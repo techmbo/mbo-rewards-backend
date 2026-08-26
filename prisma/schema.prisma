@@ -1,0 +1,2378 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Entity {
+  id              String   @id @default(uuid())
+  externalId      String
+  networkSource   String
+  entityType      String
+  entityName      String?
+  campaignName    String?
+  advertiserName  String?
+  entityStatus    String?
+  entitySubType   String?
+  code            String?
+  discount        String?
+  revenue         Float?
+  commission      Float?
+  eventDate       DateTime?
+  normalizedData  Json
+  rawData         Json
+  isManual        Boolean  @default(false)
+  manualData      Json?
+  fieldPolicies   Json?
+  lastSyncedData  Json?
+  hasSyncConflict Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([externalId, networkSource, entityType])
+  @@index([entityType])
+  @@index([networkSource])
+  @@index([externalId, networkSource])
+  @@index([entityType, networkSource, updatedAt])
+  @@index([campaignName, eventDate])
+  @@index([code, eventDate])
+
+  supplierCampaigns SupplierCampaign[]
+  supplierCoupons     SupplierCoupon[]
+  mapperErrors        MapperError[]
+  rawPayloads         RawPayload[]
+}
+
+/// Wave B — append-only supplier API payload store (immutable historical lineage).
+/// Entity.rawData remains the mutable staging/CMS compatibility copy.
+enum RawPayloadStatus {
+  RECEIVED
+  STAGED
+  PROMOTED
+  FAILED
+  DUPLICATE
+}
+
+model RawPayload {
+  id                 String           @id @default(uuid())
+  supplier           SupplierKey
+  supplierRegion     SupplierRegion   @default(UNKNOWN)
+  sourceAccountLabel String           @default("default")
+  /// Normalized resource key from adapter (e.g. campaigns, conversions, coupons, reporting).
+  resourceKey        String
+  entityType         String
+  externalId         String
+  payload            Json
+  payloadHash        String
+  fetchedAt          DateTime?
+  receivedAt         DateTime         @default(now())
+  mapperVersion      String?
+  processingStatus   RawPayloadStatus @default(RECEIVED)
+  /// Phase-1 networkSource string (e.g. optimise_sea, trackier) for Entity compatibility.
+  networkSource      String?
+  entityId           String?
+  entity             Entity?          @relation(fields: [entityId], references: [id], onDelete: SetNull)
+  metadata           Json?
+  createdAt          DateTime         @default(now())
+
+  supplierCampaigns SupplierCampaign[]
+  supplierCoupons   SupplierCoupon[]
+  conversions       Conversion[]
+  orders            Order[]
+  productSources    ProductSource[]
+  supplierCommissionRules SupplierCommissionRule[]
+  productFeedItems  ProductFeedItem[]
+
+  @@unique([supplier, sourceAccountLabel, resourceKey, externalId, payloadHash])
+  @@index([supplier, entityType, receivedAt(sort: Desc)])
+  @@index([payloadHash])
+  @@index([entityId])
+  @@index([networkSource, entityType])
+  @@map("raw_payloads")
+}
+
+model CouponColumnConfig {
+  id            String   @id @default(uuid())
+  key           String   @unique
+  label         String
+  sortOrder     Int      @default(0)
+  visible       Boolean  @default(true)
+  sourceType    String
+  dataPath      String?
+  optimisePaths Json     @default("[]")
+  boostinyPaths Json     @default("[]")
+  columnType    String   @default("text")
+  builtinKey    String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model FieldRegistry {
+  id         String   @id @default(uuid())
+  fieldPath  String
+  source     String
+  entityType String
+  dataType   String
+  firstSeenAt DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([fieldPath, source, entityType])
+  @@index([entityType, source])
+}
+
+model SyncJobLog {
+  id            String   @id @default(uuid())
+  jobName        String
+  status         String
+  attempt        Int      @default(1)
+  message        String?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+}
+
+enum UserRole {
+  ADMIN
+  OPERATIONS
+  ANALYST
+  TECH
+  SUPPORT
+  CLIENT
+}
+
+model User {
+  id              String    @id @default(uuid())
+  email           String    @unique
+  passwordHash    String
+  name            String?
+  role            UserRole  @default(SUPPORT)
+  isActive        Boolean   @default(true)
+  clientId        String?
+  client          Client?   @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  inviteTokenHash String?
+  inviteExpiresAt DateTime?
+  passwordSetAt   DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  accessLogs AccessLog[]
+
+  @@index([clientId])
+  @@index([inviteTokenHash])
+}
+
+model EmailOtp {
+  id         String    @id @default(uuid())
+  email      String
+  otpHash    String
+  expiresAt  DateTime
+  verifiedAt DateTime?
+  attempts   Int       @default(0)
+  createdAt  DateTime  @default(now())
+
+  @@index([email, createdAt])
+}
+
+model AccessLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    String
+  resource  String?
+  metadata  Json?
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+}
+
+model MarketplaceAccount {
+  id                     String   @id @default(uuid())
+  platform               String
+  accountLabel           String   @default("default")
+  authType               String
+  accountExternalId      String?
+  agencyId               String?
+  contactId              String?
+  encryptedAccessToken   String
+  encryptedRefreshToken  String?
+  tokenExpiresAt         DateTime?
+  maskedApiKey           String?
+  scope                  String?
+  connectedAt            DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+  // Phase 1/5 — incremental sync and static-resource cache timestamps
+  lastSuccessfulSync     DateTime?
+  lastCampaignSyncAt     DateTime?
+  lastCouponSyncAt       DateTime?
+  /// Network Health — order/conversion sync evidence (null = never / unknown).
+  lastOrderSyncAt        DateTime?
+  /// Network Health — payment/invoice sync evidence (null = never / unknown).
+  lastPaymentSyncAt      DateTime?
+  /// Configured sync cadence in minutes when known; null = UNKNOWN (do not invent).
+  syncFrequencyMinutes   Int?
+  lastAuthCheckAt        DateTime?
+  lastSyncError          String?
+
+  @@unique([platform, accountLabel])
+  @@index([platform, authType])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 Wave 1 — Supplier Integration foundation (see PHASE2_DATABASE_VALIDATION.md)
+// ---------------------------------------------------------------------------
+
+enum SupplierKey {
+  BOOSTINY
+  OPTIMISE
+  TRACKIER
+  PARTNERIZE
+  IMPACT
+  AWIN
+  UNKNOWN
+}
+
+enum SupplierRegion {
+  GLOBAL
+  SEA
+  MENA
+  UK
+  UNKNOWN
+}
+
+enum SupplierStatus {
+  PLANNED
+  ENABLED
+  DEPRECATED
+}
+
+enum CampaignStatus {
+  ACTIVE
+  PAUSED
+  PENDING
+  RETIRED
+  UNKNOWN
+}
+
+enum ParticipationStatus {
+  JOINED
+  NOT_JOINED
+  PENDING
+  UNKNOWN
+}
+
+enum PricingModel {
+  CPA
+  CPC
+  CPL
+  CPS
+  HYBRID
+  UNKNOWN
+}
+
+enum CommissionUnit {
+  PERCENT
+  FLAT
+  UNKNOWN
+}
+
+enum CouponType {
+  CODE
+  LINK
+  UNKNOWN
+}
+
+enum CouponStatus {
+  ACTIVE
+  EXPIRED
+  SCHEDULED
+  UNKNOWN
+  DISABLED
+}
+
+/// Coupon pool inventory source (Network Ops CouponCodeMaster).
+enum CouponCodeSource {
+  NETWORK_API
+  MANUAL_EMAIL
+  EXCEL
+  ACCOUNT_MANAGER
+  BRAND
+  MANUAL
+  UNKNOWN
+}
+
+/// Coupon inventory scope — not client assignment semantics.
+enum CouponCodeScope {
+  SHARED_LIMITED
+  UNIQUE_TO_CLIENT
+  UNLIMITED
+  UNKNOWN
+}
+
+/// Evidence-based mapping certification for Network Campaigns.
+enum MappingCertificationStatus {
+  PENDING
+  CERTIFIED
+  REVOKED
+}
+
+/// Campaign channel semantics (HTML assets) — distinct from CPS/CPA commercial model.
+enum CampaignChannelType {
+  AFFILIATE_LINK_ONLY
+  COUPON_CODE_ONLY
+  COUPON_AND_LINK
+  DEEPLINK
+  UNKNOWN
+}
+
+enum NetworkReconStatus {
+  MATCHED
+  PENDING
+  PARTIAL
+  MISMATCH
+  UNKNOWN
+}
+
+enum EventOutboxStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum MapperErrorStatus {
+  OPEN
+  RETRYING
+  RESOLVED
+  DISCARDED
+}
+
+model Supplier {
+  id          String         @id @default(uuid())
+  key         SupplierKey    @unique
+  displayName String
+  status      SupplierStatus @default(ENABLED)
+  config      Json?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  campaigns SupplierCampaign[]
+
+  @@map("suppliers")
+}
+
+model SupplierCampaign {
+  id                     String               @id @default(uuid())
+  supplier               SupplierKey
+  supplierRegion         SupplierRegion       @default(GLOBAL)
+  supplierCampaignId     String
+  sourceAccountLabel     String               @default("default")
+  campaignName           String
+  campaignDescription    String?
+  campaignLogoUrl        String?
+  merchantId             String?
+  merchant               Merchant?            @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+  matchedAt              DateTime?
+  matchedBy              String?
+  matchConfidence        Decimal?             @db.Decimal(5, 4)
+  merchantNameRaw        String?
+  merchantVertical       String?
+  categoryName           String?
+  campaignType           String?
+  pricingModel           PricingModel?
+  defaultCommissionValue Decimal?             @db.Decimal(18, 4)
+  commissionUnit         CommissionUnit?
+  commissionCurrency     String?              @db.Char(3)
+  commissionGroups       Json?
+  trackingUrl            String?
+  destinationUrl         String?
+  mboTrackingSlug        String?
+  mboTrackingToken       String?
+  mboTrackingUrl         String?
+  deepLinkingEnabled     Boolean?
+  cookieDurationDays     Int?
+  campaignStatus         CampaignStatus       @default(UNKNOWN)
+  participationStatus    ParticipationStatus?
+  isJoined               Boolean              @default(false)
+  countryCodes           String[]             @default([])
+  currencyCode           String?              @db.Char(3)
+  campaignStartDate      DateTime?
+  firstSeenAt            DateTime             @default(now())
+  lastSyncedAt           DateTime             @default(now())
+  entityId               String?
+  entity                 Entity?              @relation(fields: [entityId], references: [id], onDelete: SetNull)
+  /// Wave B lineage to immutable RawPayload (optional; Entity.rawData remains staging copy).
+  rawPayloadId           String?
+  rawPayloadRecord       RawPayload?          @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
+  rawPayload             Json
+  normalizedPayload      Json
+  mapperVersion          String
+  syncConflict           Boolean              @default(false)
+  adminOverrides         Json?
+  fieldPolicies          Json?
+  archivedAt             DateTime?
+  supplierRefId          String?
+  supplierRef            Supplier?            @relation(fields: [supplierRefId], references: [id], onDelete: SetNull)
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+
+  coupons SupplierCoupon[]
+  couponCodeMasters CouponCodeMaster[]
+  merchantReview MerchantReview?
+  campaignSources CampaignSource[]
+  mappingCertification MappingCertification?
+  networkPerformanceFacts NetworkPerformanceFact[]
+
+  @@unique([supplier, supplierRegion, sourceAccountLabel, supplierCampaignId])
+  @@index([merchantId])
+  @@index([campaignStatus])
+  @@index([participationStatus])
+  @@index([lastSyncedAt(sort: Desc)])
+  @@index([entityId])
+  @@index([rawPayloadId])
+  @@index([supplier, campaignStatus])
+  @@map("supplier_campaigns")
+}
+
+model SupplierCoupon {
+  id                  String           @id @default(uuid())
+  supplierCampaignId  String
+  supplierCampaign    SupplierCampaign @relation(fields: [supplierCampaignId], references: [id], onDelete: Cascade)
+  entityId            String?
+  entity              Entity?          @relation(fields: [entityId], references: [id], onDelete: SetNull)
+  rawPayloadId        String?
+  rawPayloadRecord    RawPayload?      @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
+  supplierCouponId    String?
+  couponType          CouponType       @default(UNKNOWN)
+  couponCode          String?
+  couponLink          String?
+  couponDescription   String?
+  discountValue       String?
+  couponStartDate     DateTime?
+  couponEndDate       DateTime?
+  couponStatus        CouponStatus     @default(UNKNOWN)
+  couponIsExclusive   Boolean?
+  rawPayload          Json
+  normalizedPayload   Json
+  mapperVersion       String
+  firstSeenAt         DateTime         @default(now())
+  lastSyncedAt        DateTime         @default(now())
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+
+  couponAssignments ClientCouponAssignment[]
+  couponCodeMaster  CouponCodeMaster?
+
+  @@index([supplierCampaignId])
+  @@index([couponStatus])
+  @@index([entityId])
+  @@index([rawPayloadId])
+  @@map("supplier_coupons")
+}
+
+/// Operational coupon inventory (HTML Coupon Pool / CouponCodeMaster).
+/// Linked to SupplierCoupon when synced; quantities are MBO allocation inventory — not network redemptions.
+model CouponCodeMaster {
+  id                   String           @id @default(uuid())
+  supplier             SupplierKey
+  sourceAccountLabel   String           @default("default")
+  supplierCampaignId   String
+  supplierCampaign     SupplierCampaign @relation(fields: [supplierCampaignId], references: [id], onDelete: Cascade)
+  campaignSourceId     String?
+  supplierCouponId     String?          @unique
+  supplierCoupon       SupplierCoupon?  @relation(fields: [supplierCouponId], references: [id], onDelete: SetNull)
+  supplierCouponExtId  String?
+  couponCode           String
+  source               CouponCodeSource @default(UNKNOWN)
+  scope                CouponCodeScope  @default(UNKNOWN)
+  /// Inventory size when known. Null = unknown (do not invent).
+  totalQuantity        Int?
+  /// Explicit MBO allocation counter (platform usage). Synced from ClientCouponAssignment counts when linked.
+  assignedQuantity     Int              @default(0)
+  status               CouponStatus     @default(UNKNOWN)
+  validFrom            DateTime?
+  validUntil           DateTime?
+  newCodeAlert         Boolean          @default(false)
+  alertReviewedAt      DateTime?
+  detectedAt           DateTime         @default(now())
+  lastUpdatedAt        DateTime         @updatedAt
+  rawPayloadId         String?
+  metadata             Json?
+  createdAt            DateTime         @default(now())
+
+  @@unique([supplier, sourceAccountLabel, supplierCampaignId, couponCode])
+  @@index([supplier, newCodeAlert, status])
+  @@index([campaignSourceId])
+  @@index([detectedAt(sort: Desc)])
+  @@map("coupon_code_masters")
+}
+
+/// Auditable mapping certification — only CERTIFIED rows may yield mapping_status=MAPPED.
+model MappingCertification {
+  id                 String                      @id @default(uuid())
+  supplierCampaignId String                      @unique
+  supplierCampaign   SupplierCampaign            @relation(fields: [supplierCampaignId], references: [id], onDelete: Cascade)
+  status             MappingCertificationStatus  @default(PENDING)
+  /// Evidence checklist: required canonical fields present + mapper version + raw payload id.
+  checklist          Json
+  certifiedAt        DateTime?
+  certifiedBy        String?
+  revokedAt          DateTime?
+  revokedBy          String?
+  reason             String?
+  createdAt          DateTime                    @default(now())
+  updatedAt          DateTime                    @updatedAt
+
+  @@index([status])
+  @@map("mapping_certifications")
+}
+
+/// Network-grain performance fact (HTML 14E). NOT client DailyReport.
+/// network_clicks and mbo_link_clicks are independent; never silently substitute.
+model NetworkPerformanceFact {
+  id                    String            @id @default(uuid())
+  /// Deterministic grain key — unique identity for upserts.
+  grainKey              String            @unique
+  supplier              SupplierKey
+  sourceAccountLabel    String            @default("default")
+  reportDate            DateTime          @db.Date
+  reportExternalId      String?
+  campaignSourceId      String?
+  supplierCampaignDbId  String?
+  supplierCampaign      SupplierCampaign? @relation(fields: [supplierCampaignDbId], references: [id], onDelete: SetNull)
+  supplierCampaignId    String?
+  brandName             String?
+  campaignName          String?
+  category              String?
+  country               String?           @db.Char(2)
+  currency              String?           @db.Char(3)
+  campaignTypeCommercial String?
+  campaignChannelType   CampaignChannelType @default(UNKNOWN)
+  couponId              String?
+  couponCode            String?
+  couponSource          String?
+  couponScope           String?
+  networkTrackingLink   String?
+  mboTrackingLink       String?
+  trackingLinkId        String?
+  networkClickId        String?
+  mboClickId            String?
+  subId1                String?
+  subId2                String?
+  subId3                String?
+  impressions           Int?
+  networkClicks         Int?
+  mboLinkClicks         Int?
+  uniqueClicks          Int?
+  grossOrders           Int?
+  pendingOrders         Int?
+  confirmedOrders       Int?
+  cancelledOrders       Int?
+  rejectedOrders        Int?
+  paidOrders            Int?
+  grossOrderValue       Decimal?          @db.Decimal(18, 4)
+  pendingOrderValue     Decimal?          @db.Decimal(18, 4)
+  confirmedOrderValue   Decimal?          @db.Decimal(18, 4)
+  cancelledOrderValue   Decimal?          @db.Decimal(18, 4)
+  rejectedOrderValue    Decimal?          @db.Decimal(18, 4)
+  paidOrderValue        Decimal?          @db.Decimal(18, 4)
+  grossCommission       Decimal?          @db.Decimal(18, 4)
+  pendingCommission     Decimal?          @db.Decimal(18, 4)
+  confirmedCommission   Decimal?          @db.Decimal(18, 4)
+  cancelledCommission   Decimal?          @db.Decimal(18, 4)
+  rejectedCommission    Decimal?          @db.Decimal(18, 4)
+  payableCommission     Decimal?          @db.Decimal(18, 4)
+  paidCommission        Decimal?          @db.Decimal(18, 4)
+  mboReceivable         Decimal?          @db.Decimal(18, 4)
+  mboActuallyReceived   Decimal?          @db.Decimal(18, 4)
+  discountPercent       Decimal?          @db.Decimal(8, 4)
+  customerType          String?
+  devicePlatform        String?
+  conversionRate        Decimal?          @db.Decimal(12, 6)
+  aov                   Decimal?          @db.Decimal(18, 4)
+  epc                   Decimal?          @db.Decimal(18, 4)
+  attributionStatus     String?
+  reconciliationStatus  String?
+  rawPayloadId          String?
+  sourceEndpoint        String?
+  reportGranularity     String?
+  lastSyncedAt          DateTime?
+  lastUpdatedAt         DateTime          @updatedAt
+  metadata              Json?
+  createdAt             DateTime          @default(now())
+
+  @@index([supplier, reportDate])
+  @@index([campaignSourceId, reportDate])
+  @@index([supplierCampaignDbId, reportDate])
+  @@map("network_performance_facts")
+}
+
+/// Persisted Network reconciliation row (HTML 14H Reported / Confirmed / Paid).
+model NetworkReconciliationRow {
+  id                    String              @id @default(uuid())
+  grainKey              String              @unique
+  supplier              SupplierKey
+  sourceAccountLabel    String              @default("default")
+  billingMonth          Int
+  billingYear           Int
+  campaignSourceId      String?
+  supplierCampaignId    String?
+  brandName             String?
+  campaignName          String?
+  reportedCommission    Decimal?            @db.Decimal(18, 4)
+  confirmedCommission   Decimal?            @db.Decimal(18, 4)
+  paidCommission        Decimal?            @db.Decimal(18, 4)
+  reportedVsConfirmed   Decimal?            @db.Decimal(18, 4)
+  confirmedVsPaid       Decimal?            @db.Decimal(18, 4)
+  status                NetworkReconStatus  @default(UNKNOWN)
+  currency              String?             @db.Char(3)
+  reconciledAt          DateTime            @default(now())
+  orderDrilldown        Json?
+  metadata              Json?
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  @@index([billingYear, billingMonth, supplier])
+  @@index([status])
+  @@map("network_reconciliation_rows")
+}
+
+model EventOutbox {
+  id          String            @id @default(uuid())
+  eventId     String            @unique
+  eventType   String
+  aggregateId String?
+  payload     Json
+  status      EventOutboxStatus @default(PENDING)
+  attempts    Int               @default(0)
+  lastError   String?
+  createdAt   DateTime          @default(now())
+  processedAt DateTime?
+
+  @@index([status, createdAt])
+  @@index([eventType, createdAt])
+  @@map("event_outbox")
+}
+
+model MapperError {
+  id            String            @id @default(uuid())
+  entityId      String
+  entity        Entity            @relation(fields: [entityId], references: [id], onDelete: Cascade)
+  supplier      SupplierKey?
+  entityType    String
+  errorCode     String
+  message       String
+  stackTrace    String?
+  mapperVersion String?
+  status        MapperErrorStatus @default(OPEN)
+  attempts      Int               @default(0)
+  createdAt     DateTime          @default(now())
+  resolvedAt    DateTime?
+
+  @@index([status, createdAt])
+  @@index([entityId])
+  @@map("mapper_errors")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 Wave 2 — Merchant Intelligence (see PHASE2_DOMAIN_MODEL.md §6–7)
+// ---------------------------------------------------------------------------
+
+enum MerchantStatus {
+  DRAFT
+  ACTIVE
+  MERGED
+  ARCHIVED
+}
+
+enum MerchantVerificationStatus {
+  UNVERIFIED
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum MerchantAliasStatus {
+  CANDIDATE
+  CONFIRMED
+  REJECTED
+}
+
+enum MerchantAliasSource {
+  MATCHING
+  MANUAL
+  IMPORT
+  MERGE
+}
+
+enum MerchantReviewStatus {
+  AUTO_MATCHED
+  PENDING_REVIEW
+  MANUALLY_MATCHED
+  REJECTED
+  MERGED
+}
+
+model Merchant {
+  id                    String                     @id @default(uuid())
+  displayName           String
+  normalizedName        String
+  slug                  String                     @unique
+  website               String?
+  supplierTrackingLink  String?
+  couponDescription     String?
+  category              String?
+  logoUrl               String?
+  country               String?                    @db.Char(2)
+  status                MerchantStatus             @default(DRAFT)
+  verificationStatus    MerchantVerificationStatus @default(UNVERIFIED)
+  isVerified            Boolean                    @default(false)
+  notes                 String?
+  mergedIntoId       String?
+  mergedInto         Merchant?                  @relation("MerchantMerge", fields: [mergedIntoId], references: [id], onDelete: SetNull)
+  mergedFrom         Merchant[]                 @relation("MerchantMerge")
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
+  deletedAt          DateTime?
+
+  aliases            MerchantAlias[]
+  supplierCampaigns  SupplierCampaign[]
+  reviews            MerchantReview[]
+  canonicalCampaigns CanonicalCampaign[]
+  brandRequests      ClientBrandRequest[]
+  dailyReports       DailyReport[]
+  orders             Order[]
+  products           Product[]
+
+  @@unique([normalizedName])
+  @@index([status])
+  @@index([verificationStatus])
+  @@index([deletedAt])
+  @@map("merchants")
+}
+
+model MerchantAlias {
+  id              String              @id @default(uuid())
+  merchantId      String
+  merchant        Merchant            @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  supplier        SupplierKey
+  aliasValue      String
+  normalizedAlias String
+  confidence      Decimal?            @db.Decimal(5, 4)
+  source          MerchantAliasSource @default(MATCHING)
+  status          MerchantAliasStatus @default(CANDIDATE)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  @@unique([aliasValue, supplier])
+  @@index([merchantId])
+  @@index([status])
+  @@index([normalizedAlias])
+  @@map("merchant_aliases")
+}
+
+model MerchantReview {
+  id                 String               @id @default(uuid())
+  supplierCampaignId String               @unique
+  supplierCampaign   SupplierCampaign     @relation(fields: [supplierCampaignId], references: [id], onDelete: Cascade)
+  merchantId         String?
+  merchant           Merchant?            @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+  merchantNameRaw    String
+  supplier           SupplierKey
+  status             MerchantReviewStatus @default(PENDING_REVIEW)
+  confidence         Decimal?             @db.Decimal(5, 4)
+  matchMethod        String?
+  reviewedBy         String?
+  reviewedAt         DateTime?
+  notes              String?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+
+  @@index([status, createdAt])
+  @@index([merchantId])
+  @@index([supplier])
+  @@map("merchant_reviews")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 Wave 2B — Catalog Intelligence (see PHASE2_DOMAIN_MODEL.md §8–9)
+// ---------------------------------------------------------------------------
+
+enum CanonicalCampaignStatus {
+  DRAFT
+  PUBLISHED
+  PAUSED
+  ARCHIVED
+}
+
+enum CatalogVisibility {
+  INTERNAL
+  ASSIGNABLE
+  HIDDEN
+}
+
+enum CampaignSourceStatus {
+  LINKED
+  ACTIVE
+  PREFERRED
+  DEPRECATED
+}
+
+enum CampaignSourceRelationshipStatus {
+  JOINED
+  NOT_JOINED
+  PENDING
+  UNKNOWN
+}
+
+model CanonicalCampaign {
+  id              String                  @id @default(uuid())
+  merchantId      String
+  merchant        Merchant                @relation(fields: [merchantId], references: [id], onDelete: Restrict)
+  displayName     String
+  status          CanonicalCampaignStatus @default(DRAFT)
+  visibility      CatalogVisibility       @default(INTERNAL)
+  category        String?
+  countries       String[]                @default([])
+  defaultCurrency String?                 @db.Char(3)
+  createdAt       DateTime                @default(now())
+  updatedAt       DateTime                @updatedAt
+  deletedAt       DateTime?
+
+  sources CampaignSource[]
+  assignments ClientCampaignAssignment[]
+  dailyReports  DailyReport[]
+  orders        Order[]
+
+  @@index([merchantId])
+  @@index([status])
+  @@index([visibility])
+  @@index([status, merchantId])
+  @@index([deletedAt])
+  @@map("canonical_campaigns")
+}
+
+model CampaignSource {
+  id                 String                           @id @default(uuid())
+  canonicalCampaignId String
+  canonicalCampaign  CanonicalCampaign                @relation(fields: [canonicalCampaignId], references: [id], onDelete: Cascade)
+  supplierCampaignId String
+  supplierCampaign   SupplierCampaign                 @relation(fields: [supplierCampaignId], references: [id], onDelete: Restrict)
+  priority           Int                              @default(100)
+  isPrimary          Boolean                          @default(false)
+  relationshipStatus CampaignSourceRelationshipStatus @default(UNKNOWN)
+  supportsLink       Boolean                          @default(false)
+  supportsCoupon     Boolean                          @default(false)
+  grossCommission    Decimal?                         @db.Decimal(18, 4)
+  channelSupport     String[]                         @default([])
+  isActive           Boolean                          @default(true)
+  status             CampaignSourceStatus             @default(LINKED)
+  createdAt          DateTime                         @default(now())
+  updatedAt          DateTime                         @updatedAt
+
+  trackingLinks TrackingLink[]
+  assignments   ClientCampaignAssignment[]
+  clicks        Click[]
+  conversions   Conversion[]
+  dailyReports  DailyReport[]
+  orders        Order[]
+  supplierCommissionRules SupplierCommissionRule[]
+  productFeeds  ProductFeed[]
+  products      Product[]
+
+  @@unique([canonicalCampaignId, supplierCampaignId])
+  @@index([canonicalCampaignId, isActive, priority])
+  @@index([supplierCampaignId])
+  @@index([status])
+  @@map("campaign_sources")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 Wave 4 — Commercial Foundation (see PHASE2_DOMAIN_MODEL.md §12–14)
+// ---------------------------------------------------------------------------
+
+enum TrackingLinkStatus {
+  GENERATED
+  ACTIVE
+  REVOKED
+}
+
+enum TrackingType {
+  STANDARD
+  DEEPLINK
+  HYBRID
+  UNKNOWN
+}
+
+enum CouponAssignmentStatus {
+  /// Draft assignment reserved inventory — not live to client (§11).
+  RESERVED
+  ASSIGNED
+  ACTIVE
+  EXPIRED
+  REVOKED
+}
+
+enum CommissionRuleStatus {
+  DRAFT
+  EFFECTIVE
+  SUPERSEDED
+}
+
+enum CommissionRuleType {
+  PERCENT
+  FIXED
+  TIERED
+  UNKNOWN
+  /// v15 07A/07B — percent of actual supplier commission (alias of PERCENT)
+  PERCENT_OF_ACTUAL_SUPPLIER_COMMISSION
+  /// v15 — client payable = orderValue × orderValuePercent / 100
+  FIXED_CLIENT_PERCENT_OF_ORDER_VALUE
+  /// v15 — fixed amount per confirmed (VALIDATION_APPROVED) order
+  FIXED_CLIENT_AMOUNT_PER_CONFIRMED_ORDER
+  /// v15 — explicitly approved manual amount
+  MANUAL_APPROVED_CLIENT_COMMISSION
+  /// v15 — display range for clients; payout still uses actual × share
+  DISPLAY_RANGE_WITH_ACTUAL_SPLIT
+}
+
+model TrackingLink {
+  id                  String             @id @default(uuid())
+  assignmentId        String
+  assignment          ClientCampaignAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  campaignSourceId    String?
+  campaignSource      CampaignSource?    @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
+  /// Human-readable path segment (client-merchant[-campaign]). Not unique alone — uniqueness is via subId/token.
+  slug                String?
+  /// Secure unique token used in /r/{slug}/{token}. Legacy links may use mbo_* format.
+  subId               String             @unique
+  supplierTrackingUrl String?
+  mboTrackingUrl      String
+  deeplinkTemplate    String?
+  trackingType        TrackingType       @default(STANDARD)
+  status              TrackingLinkStatus @default(GENERATED)
+  isPrimary           Boolean            @default(false)
+  expiresAt           DateTime?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+  deletedAt           DateTime?
+
+  clicks      Click[]
+  conversions Conversion[]
+
+  @@index([assignmentId, status])
+  @@index([campaignSourceId])
+  @@index([slug])
+  @@index([deletedAt])
+  @@map("tracking_links")
+}
+
+model ClientCouponAssignment {
+  id                 String                 @id @default(uuid())
+  assignmentId       String
+  assignment         ClientCampaignAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  supplierCouponId   String?
+  supplierCoupon     SupplierCoupon?        @relation(fields: [supplierCouponId], references: [id], onDelete: SetNull)
+  supplierCouponCode String?
+  clientCouponCode   String?
+  couponType         CouponType             @default(UNKNOWN)
+  discountPercentage String?
+  status             CouponAssignmentStatus @default(ASSIGNED)
+  validFrom          DateTime?
+  validUntil         DateTime?
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+
+  @@index([assignmentId, status])
+  @@index([supplierCouponId])
+  @@map("client_coupon_assignments")
+}
+
+model ClientCommissionRule {
+  id               String               @id @default(uuid())
+  assignmentId     String
+  assignment       ClientCampaignAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  /// Ratio basis for PERCENT / PERCENT_OF_ACTUAL / DISPLAY_RANGE (e.g. gross=100, client=70).
+  grossCommission  Decimal              @db.Decimal(18, 4)
+  clientCommission Decimal              @db.Decimal(18, 4)
+  mboCommission    Decimal              @db.Decimal(18, 4)
+  commissionType   CommissionRuleType   @default(UNKNOWN)
+  currency         String?              @db.Char(3)
+  /// Epic 2 — FIXED_CLIENT_PERCENT_OF_ORDER_VALUE (e.g. 3.5 = 3.5% of order value)
+  orderValuePercent Decimal?            @db.Decimal(8, 4)
+  /// Epic 2 — FIXED_CLIENT_AMOUNT_PER_CONFIRMED_ORDER
+  fixedAmount      Decimal?             @db.Decimal(18, 4)
+  /// Epic 2 — MANUAL_APPROVED_CLIENT_COMMISSION
+  manualAmount     Decimal?             @db.Decimal(18, 4)
+  manualApproved   Boolean              @default(false)
+  manualApprovedAt DateTime?
+  manualApprovedBy String?
+  /// Epic 2 — DISPLAY_RANGE_WITH_ACTUAL_SPLIT (display only)
+  displayRangeMin  Decimal?             @db.Decimal(18, 4)
+  displayRangeMax  Decimal?             @db.Decimal(18, 4)
+  displayLabel     String?
+  effectiveFrom    DateTime
+  effectiveUntil   DateTime?
+  status           CommissionRuleStatus   @default(DRAFT)
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+
+  conversions Conversion[]
+  financialTransactions FinancialTransaction[]
+
+  @@unique([assignmentId, effectiveFrom])
+  @@index([assignmentId, status])
+  @@index([assignmentId, effectiveFrom])
+  @@map("client_commission_rules")
+}
+
+/// Normalized supplier-side commission facts (v15 SupplierCommissionRule).
+/// Adapters map into this; commercial calc may read facts — never campaign display snapshots as FT truth.
+model SupplierCommissionRule {
+  id               String         @id @default(uuid())
+  campaignSourceId String?
+  campaignSource   CampaignSource? @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
+  supplier         SupplierKey
+  sourceAccountLabel String       @default("default")
+  /// Supplier-facing type label (CPS/CPA/PERCENT/FIXED/TIERED/etc.) — informational
+  supplierRuleType String?
+  /// Normalized basis: PERCENT_OF_SALE | FIXED_AMOUNT | TIERED | UNKNOWN
+  basis            String         @default("UNKNOWN")
+  ratePercent      Decimal?       @db.Decimal(8, 4)
+  fixedAmount      Decimal?       @db.Decimal(18, 4)
+  currency         String?        @db.Char(3)
+  effectiveFrom    DateTime       @default(now())
+  effectiveUntil   DateTime?
+  rawPayloadId     String?
+  rawPayloadRecord RawPayload?    @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
+  metadata         Json?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([campaignSourceId, effectiveFrom])
+  @@index([supplier, sourceAccountLabel])
+  @@map("supplier_commission_rules")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 Wave 3 — Client Distribution (see PHASE2_DOMAIN_MODEL.md §1,10–11)
+// ---------------------------------------------------------------------------
+
+enum ClientStatus {
+  PROSPECT
+  ACTIVE
+  SUSPENDED
+  OFFBOARDED
+}
+
+enum CommercialModel {
+  OFFERS_ONLY
+  OFFERS_PLUS_COMMISSION
+}
+
+enum BrandRequestStatus {
+  REQUESTED
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  FULFILLED
+}
+
+enum AssignmentStatus {
+  ASSIGNED
+  ACTIVE
+  PAUSED
+  REVOKED
+}
+
+/// Client access channel (§27 Delivery Method Rules).
+enum ClientDeliveryMethod {
+  PORTAL_ONLY
+  API_ONLY
+  API_AND_PORTAL
+}
+
+enum ClientAgreementStatus {
+  NONE
+  DRAFT
+  SENT
+  PENDING
+  SIGNED
+}
+
+enum ClientPaymentCycle {
+  MONTHLY
+  QUARTERLY
+}
+
+enum ClientPaymentTrigger {
+  AFTER_NETWORK_PAYMENT
+  CONTRACT_SPECIFIC
+}
+
+model Client {
+  id              String           @id @default(uuid())
+  name            String
+  slug            String           @unique
+  /// Legal entity name (agreement / commercials).
+  legalName       String?
+  industry        String?
+  category        String?
+  subCategory     String?
+  country         String?          @db.Char(2)
+  currency        String?          @db.Char(3)
+  timezone        String?
+  logoUrl         String?
+  status          ClientStatus     @default(PROSPECT)
+  commercialModel CommercialModel?
+  /// Client share of approved supplier commission (0–100). Used with OFFERS_PLUS_COMMISSION.
+  clientSharePercent Decimal?      @db.Decimal(5, 2)
+  /// Portal vs API access control (§27). Default preserves existing dual access.
+  deliveryMethod  ClientDeliveryMethod @default(API_AND_PORTAL)
+  agreementStatus ClientAgreementStatus @default(NONE)
+  agreementEffectiveAt DateTime?
+  agreementRenewalAt   DateTime?
+  agreementDocumentUrl String?
+  paymentCycle    ClientPaymentCycle?
+  paymentTrigger  ClientPaymentTrigger?
+  /// Sandbox/Production endpoint toggles: { SANDBOX: { status, campaignEndpoint, productEndpoint, reportingEndpoint }, PRODUCTION: {...} }
+  apiEnvironmentConfig Json?
+  /// Client portal preferences (notifications, etc.).
+  portalPreferences Json?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  deletedAt       DateTime?
+
+  brandRequests  ClientBrandRequest[]
+  assignments    ClientCampaignAssignment[]
+  dailyReports   DailyReport[]
+  users          User[]
+  apiCredentials ClientApiCredential[]
+  bankAccount    ClientBankAccount?
+  withdrawals    ClientWithdrawal[]
+  supportRequests ClientSupportRequest[]
+  orders         Order[]
+  exceptionCases ExceptionCase[]
+  financialTransactions FinancialTransaction[]
+  commissionAdjustments CommissionAdjustment[]
+  clientStatements ClientStatement[]
+  clientInvoices   ClientInvoice[]
+  clientPayments   ClientPayment[]
+  clientProductAssignments ClientProductAssignment[]
+  productTrackingLinks ProductTrackingLink[]
+  taxProfile       ClientTaxProfile?
+  taxLedgers       TaxLedger[]
+  boostinyPaymentSourceMappings BoostinyPaymentSourceMapping[]
+  boostinyPartnerPaymentSettlements BoostinyPartnerPaymentSettlement[]
+
+  @@index([status])
+  @@index([deletedAt])
+  @@map("clients")
+}
+
+enum ClientBankStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum ClientWithdrawalStatus {
+  REQUESTED
+  PROCESSING
+  PAID
+  REJECTED
+  CANCELLED
+}
+
+enum ClientSupportRequestType {
+  SUPPORT_TICKET
+  CAMPAIGN_REQUEST
+}
+
+enum ClientSupportRequestStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum ApiCredentialEnvironment {
+  SANDBOX
+  PRODUCTION
+}
+
+/// Client payout bank details (account number encrypted at rest).
+model ClientBankAccount {
+  id                   String           @id @default(uuid())
+  clientId             String           @unique
+  client               Client           @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  accountHolder        String
+  bankName             String
+  accountNumberLast4   String           @db.VarChar(4)
+  accountNumberEnc     String
+  ifscCode             String
+  accountType          String           @default("Current")
+  status               ClientBankStatus @default(VERIFIED)
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+
+  @@map("client_bank_accounts")
+}
+
+model ClientWithdrawal {
+  id            String                  @id @default(uuid())
+  clientId      String
+  client        Client                  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  reference     String                  @unique
+  amount        Decimal                 @db.Decimal(18, 4)
+  currency      String                  @default("INR") @db.Char(3)
+  status        ClientWithdrawalStatus  @default(REQUESTED)
+  requestedBy   String?
+  notes         String?
+  processedAt   DateTime?
+  createdAt     DateTime                @default(now())
+  updatedAt     DateTime                @updatedAt
+
+  @@index([clientId, createdAt])
+  @@index([clientId, status])
+  @@map("client_withdrawals")
+}
+
+model ClientSupportRequest {
+  id          String                      @id @default(uuid())
+  clientId    String
+  client      Client                      @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  type        ClientSupportRequestType
+  category    String?
+  subject     String?
+  body        String
+  status      ClientSupportRequestStatus  @default(OPEN)
+  createdBy   String?
+  createdAt   DateTime                    @default(now())
+  updatedAt   DateTime                    @updatedAt
+
+  @@index([clientId, createdAt])
+  @@index([clientId, status])
+  @@map("client_support_requests")
+}
+
+model ClientApiCredential {
+  id          String                   @id @default(uuid())
+  clientId    String
+  client      Client                   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  name        String?
+  /// Sandbox vs Production — separate credentials; never reuse across environments.
+  environment ApiCredentialEnvironment @default(PRODUCTION)
+  keyPrefix   String
+  keyHash     String
+  /// Encrypted full API key for authorized portal/staff reveal (AES-GCM). Null for pre-migration keys.
+  keyEnc      String?
+  createdBy   String?
+  lastUsedAt  DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime                 @default(now())
+
+  @@index([clientId])
+  @@index([clientId, environment])
+  @@index([keyPrefix])
+  @@map("client_api_credentials")
+}
+
+model ClientBrandRequest {
+  id                 String             @id @default(uuid())
+  clientId           String
+  client             Client             @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  merchantId         String?
+  merchant           Merchant?          @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+  requestedBrandName String
+  requestedBy        String?
+  priority           Int                @default(100)
+  status             BrandRequestStatus @default(REQUESTED)
+  notes              String?
+  requestedAt        DateTime           @default(now())
+  resolvedAt         DateTime?
+  fulfilledAssignmentId String?           @unique
+  fulfilledAssignment ClientCampaignAssignment? @relation("BrandRequestFulfillment", fields: [fulfilledAssignmentId], references: [id], onDelete: SetNull)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  @@index([clientId, status])
+  @@index([merchantId])
+  @@index([status, requestedAt])
+  @@map("client_brand_requests")
+}
+
+model ClientCampaignAssignment {
+  id                  String             @id @default(uuid())
+  clientId            String
+  client              Client             @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  canonicalCampaignId String
+  canonicalCampaign   CanonicalCampaign  @relation(fields: [canonicalCampaignId], references: [id], onDelete: Restrict)
+  campaignSourceId    String?
+  campaignSource      CampaignSource?    @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
+  status              AssignmentStatus   @default(ASSIGNED)
+  published           Boolean            @default(false)
+  publishedAt         DateTime?
+  unpublishedAt       DateTime?
+  startDate           DateTime?
+  endDate             DateTime?
+  channel             String?
+  notes               String?
+  /// Operator-edited client-facing snapshot for this assignment (does not rewrite master catalog).
+  clientFacing        Json?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+
+  fulfilledBrandRequest ClientBrandRequest? @relation("BrandRequestFulfillment")
+  trackingLinks         TrackingLink[]
+  couponAssignments     ClientCouponAssignment[]
+  commissionRules       ClientCommissionRule[]
+  clicks                Click[]
+  conversions           Conversion[]
+  orders                Order[]
+  clientProductAssignments ClientProductAssignment[]
+  productTrackingLinks  ProductTrackingLink[]
+
+  @@index([clientId, status])
+  @@index([canonicalCampaignId, status])
+  @@index([published, status])
+  @@index([campaignSourceId])
+  @@map("client_campaign_assignments")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 Wave 5 — Attribution & Reporting (see PHASE2_DOMAIN_MODEL.md §15–17)
+// ---------------------------------------------------------------------------
+
+enum ConversionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  PAID
+  UNKNOWN
+}
+
+enum DeviceType {
+  DESKTOP
+  MOBILE
+  TABLET
+  APP
+  OTHER
+  UNKNOWN
+}
+
+enum AttributionStatus {
+  PENDING
+  ATTRIBUTED
+  ORPHAN
+  /// Ambiguous evidence (shared coupon, multiple candidates) — never force a client.
+  REVIEW_REQUIRED
+  REATTRIBUTED
+}
+
+model Click {
+  id                 String                   @id @default(uuid())
+  trackingLinkId     String
+  trackingLink       TrackingLink             @relation(fields: [trackingLinkId], references: [id], onDelete: Cascade)
+  campaignSourceId   String?
+  campaignSource     CampaignSource?          @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
+  clientAssignmentId String
+  clientAssignment   ClientCampaignAssignment @relation(fields: [clientAssignmentId], references: [id], onDelete: Cascade)
+  subId              String
+  ipHash             String?
+  userAgentHash      String?
+  country            String?                  @db.Char(2)
+  device             DeviceType               @default(UNKNOWN)
+  referrer           String?
+  clickedAt          DateTime                 @default(now())
+  metadata           Json?
+
+  conversions Conversion[]
+  orders      Order[]
+
+  @@index([trackingLinkId, clickedAt])
+  @@index([clientAssignmentId, clickedAt])
+  @@index([subId, clickedAt])
+  @@index([clickedAt])
+  @@map("clicks")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 Wave C — Order / validation / payment transaction lifecycle
+// ---------------------------------------------------------------------------
+
+enum ValidationStatus {
+  VALIDATION_PENDING
+  VALIDATION_APPROVED
+  VALIDATION_REJECTED
+  VALIDATION_NEEDS_REVIEW
+}
+
+/// Supplier/network payment lifecycle (independent of validation).
+enum SupplierPaymentStatus {
+  PAYMENT_PENDING
+  PAYMENT_AWAITING_INVOICE
+  PAYMENT_INVOICED
+  PAYMENT_PAYABLE
+  PAYMENT_RECEIVED
+  PAYMENT_ON_HOLD
+}
+
+/// Client payment readiness (independent of supplier payment; foundation only).
+enum ClientPaymentStatus {
+  CLIENT_PAYMENT_NOT_READY
+  CLIENT_PAYMENT_PAYABLE
+  CLIENT_PAYMENT_INVOICED
+  CLIENT_PAYMENT_PROCESSING
+  CLIENT_PAYMENT_PAID
+  CLIENT_PAYMENT_ON_HOLD
+}
+
+enum ExceptionCaseType {
+  ATTRIBUTION_UNRESOLVED
+  DUPLICATE_ORDER
+  DUPLICATE_CONVERSION
+  MISSING_SUPPLIER_ORDER_ID
+  MISSING_SUPPLIER_CONVERSION_ID
+  INVALID_VALIDATION_TRANSITION
+  INVALID_PAYMENT_TRANSITION
+  COMMISSION_MISSING
+  COMMISSION_INVALID
+  LATE_REJECTION
+  ORDER_DATA_CONFLICT
+  SUPPLIER_STATUS_UNKNOWN
+  MISSING_FX_RATE
+  INVALID_CURRENCY
+  FINANCIAL_RECONCILIATION_MISMATCH
+  DUPLICATE_FINANCIAL_RECOGNITION
+  CONFLICTING_FINANCIAL_TRANSACTION
+  MAPPING_REQUIRED_FIELD_MISSING
+  MAPPING_INVALID_VALUE
+  MAPPING_UNKNOWN_ENUM
+  MAPPING_UNMAPPED_CRITICAL_FIELD
+  MAPPING_CONFLICT
+  PRODUCT_FEED_ERROR
+  PRODUCT_MISSING_ID
+  PRODUCT_MISSING_URL
+  PRODUCT_NEEDS_REVIEW
+  PRODUCT_DUPLICATE_SOURCE
+  TAX_CONFIGURATION_MISSING
+  TAX_LEGAL_REVIEW_REQUIRED
+  TAX_CURRENCY_MISMATCH
+  TAX_CALCULATION_BLOCKED
+  /// Network Operation Portal taxonomy
+  NETWORK_AUTH_FAILURE
+  NETWORK_CAMPAIGN_SYNC_FAILURE
+  NETWORK_COUPON_SYNC_FAILURE
+  NETWORK_ORDER_SYNC_FAILURE
+  NETWORK_PAYMENT_SYNC_FAILURE
+  NETWORK_NEW_COUPON_ALERT
+  NETWORK_RECONCILIATION_VARIANCE
+  /// Boostiny Partner Payment — payment source not mapped to exactly one client
+  BOOSTINY_SOURCE_MAPPING_MISSING
+  BOOSTINY_PARTNER_PAYMENT_INVALID
+}
+
+enum ExceptionSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum ExceptionCaseStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+  DISMISSED
+}
+
+/// Commercial transaction/order from a supplier (Wave C transaction truth).
+model Order {
+  id                       String                @id @default(uuid())
+  supplier                 SupplierKey
+  sourceAccountLabel       String                @default("default")
+  /// Supplier order identity. When absent, ingestion may use conv:{supplierConversionId}.
+  supplierOrderId          String
+  clientId                 String?
+  client                   Client?               @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  merchantId               String?
+  merchant                 Merchant?             @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+  canonicalCampaignId      String?
+  canonicalCampaign        CanonicalCampaign?    @relation(fields: [canonicalCampaignId], references: [id], onDelete: SetNull)
+  campaignSourceId         String?
+  campaignSource           CampaignSource?       @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
+  clientAssignmentId       String?
+  clientAssignment         ClientCampaignAssignment? @relation(fields: [clientAssignmentId], references: [id], onDelete: SetNull)
+  clickId                  String?
+  click                    Click?                @relation(fields: [clickId], references: [id], onDelete: SetNull)
+  orderValue               Decimal?              @db.Decimal(18, 4)
+  currency                 String?               @db.Char(3)
+  orderDate                DateTime?
+  receivedAt               DateTime              @default(now())
+  validationStatus         ValidationStatus      @default(VALIDATION_PENDING)
+  supplierPaymentStatus    SupplierPaymentStatus @default(PAYMENT_PENDING)
+  clientPaymentStatus      ClientPaymentStatus   @default(CLIENT_PAYMENT_NOT_READY)
+  validationChangedAt      DateTime?
+  supplierPaymentChangedAt DateTime?
+  clientPaymentChangedAt   DateTime?
+  /// Historical commission snapshot preserved on late rejection (Wave D ledger later).
+  lastApprovedClientCommission   Decimal?        @db.Decimal(18, 4)
+  lastApprovedMboCommission      Decimal?        @db.Decimal(18, 4)
+  lastApprovedSupplierCommission Decimal?        @db.Decimal(18, 4)
+  rawPayloadId             String?
+  rawPayloadRecord         RawPayload?           @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
+  metadata                 Json?
+  createdAt                DateTime              @default(now())
+  updatedAt                DateTime              @updatedAt
+
+  items          OrderItem[]
+  conversions    Conversion[]
+  exceptionCases ExceptionCase[]
+  financialTransactions FinancialTransaction[]
+  commissionAdjustments CommissionAdjustment[]
+
+  @@unique([supplier, sourceAccountLabel, supplierOrderId])
+  @@index([clientId, orderDate])
+  @@index([validationStatus])
+  @@index([supplierPaymentStatus])
+  @@index([clientPaymentStatus])
+  @@index([campaignSourceId])
+  @@index([clientAssignmentId])
+  @@index([rawPayloadId])
+  @@map("orders")
+}
+
+model OrderItem {
+  id             String   @id @default(uuid())
+  orderId        String
+  order          Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  /// Stable line identity within an order (supplier item id or derived key).
+  lineKey        String
+  supplierItemId String?
+  sku            String?
+  productId      String?
+  /// Optional link to normalized Product catalog (Wave F).
+  productRecordId String?
+  productRecord   Product? @relation(fields: [productRecordId], references: [id], onDelete: SetNull)
+  productName    String?
+  quantity       Decimal? @db.Decimal(18, 4)
+  unitPrice      Decimal? @db.Decimal(18, 4)
+  itemValue      Decimal? @db.Decimal(18, 4)
+  currency       String?  @db.Char(3)
+  category       String?
+  commission     Decimal? @db.Decimal(18, 4)
+  /// Epic 9 VAL-006 — nullable: null = historical/unknown (no item-level decision).
+  /// When any item on an order has a non-null status, only VALIDATION_APPROVED items contribute to commercial basis.
+  validationStatus ValidationStatus?
+  validationChangedAt DateTime?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([orderId, lineKey])
+  @@index([orderId])
+  @@index([sku])
+  @@index([productRecordId])
+  @@index([validationStatus])
+  @@map("order_items")
+}
+
+model ExceptionCase {
+  id           String              @id @default(uuid())
+  type         ExceptionCaseType
+  severity     ExceptionSeverity   @default(MEDIUM)
+  status       ExceptionCaseStatus @default(OPEN)
+  /// Stable identity for open-case dedupe (supplier + refs + type).
+  dedupeKey    String
+  orderId      String?
+  order        Order?              @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  conversionId String?
+  conversion   Conversion?         @relation(fields: [conversionId], references: [id], onDelete: SetNull)
+  supplier     SupplierKey?
+  clientId     String?
+  client       Client?             @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  entityId     String?
+  reason       String?
+  metadata     Json?
+  assignedTo   String?
+  detectedAt   DateTime            @default(now())
+  resolvedAt   DateTime?
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  @@index([dedupeKey, status])
+  @@index([type, status])
+  @@index([orderId])
+  @@index([conversionId])
+  @@index([clientId, status])
+  @@index([detectedAt])
+  @@map("exception_cases")
+}
+
+model Conversion {
+  id                   String                   @id @default(uuid())
+  clickId              String?
+  click                Click?                   @relation(fields: [clickId], references: [id], onDelete: SetNull)
+  /// Wave C — optional link to commercial Order (null for historical rows).
+  orderId              String?
+  order                Order?                   @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  supplier             SupplierKey              @default(UNKNOWN)
+  supplierConversionId String
+  sourceAccountLabel   String                   @default("default")
+  trackingLinkId       String?
+  trackingLink         TrackingLink?            @relation(fields: [trackingLinkId], references: [id], onDelete: SetNull)
+  campaignSourceId     String?
+  campaignSource       CampaignSource?          @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
+  clientAssignmentId   String?
+  clientAssignment     ClientCampaignAssignment? @relation(fields: [clientAssignmentId], references: [id], onDelete: SetNull)
+  commissionRuleId     String?
+  commissionRule       ClientCommissionRule?    @relation(fields: [commissionRuleId], references: [id], onDelete: SetNull)
+  subId                String?
+  supplierCommission   Decimal                  @db.Decimal(18, 4)
+  approvedCommission   Decimal?                 @db.Decimal(18, 4)
+  clientCommission     Decimal?                 @db.Decimal(18, 4)
+  mboCommission        Decimal?                 @db.Decimal(18, 4)
+  currency             String?                  @db.Char(3)
+  /// LEGACY collapsed status — preserved for Wave A reporting compatibility.
+  status               ConversionStatus         @default(PENDING)
+  attributionStatus    AttributionStatus        @default(PENDING)
+  conversionDate       DateTime
+  approvedDate         DateTime?
+  metadata             Json?
+  /// Wave B lineage to immutable RawPayload when promoted from sync.
+  rawPayloadId         String?
+  rawPayloadRecord     RawPayload?              @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
+
+  exceptionCases ExceptionCase[]
+  financialTransactions FinancialTransaction[]
+  commissionAdjustments CommissionAdjustment[]
+
+  @@unique([supplier, supplierConversionId, sourceAccountLabel])
+  @@index([trackingLinkId])
+  @@index([clientAssignmentId, conversionDate])
+  @@index([status])
+  @@index([conversionDate])
+  @@index([attributionStatus])
+  @@index([rawPayloadId])
+  @@index([orderId])
+  @@map("conversions")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 Wave D — Financial truth (commission / payable / FX / statement)
+// ---------------------------------------------------------------------------
+
+enum FinancialTransactionType {
+  COMMISSION_EARNED
+  REVERSAL
+  ADJUSTMENT
+}
+
+enum FinancialTransactionStatus {
+  FINANCIAL_RECOGNIZED
+  FINANCIAL_ADJUSTED
+  FINANCIAL_REVERSED
+  FINANCIAL_UNRESOLVED
+}
+
+enum CommissionAdjustmentType {
+  LATE_REJECTION
+  SUPPLIER_CORRECTION
+  COMMISSION_CORRECTION
+  ATTRIBUTION_CORRECTION
+  MANUAL_ADJUSTMENT
+  FX_CORRECTION
+}
+
+enum ClientStatementStatus {
+  OPEN
+  CLOSED
+  SUPERSEDED
+}
+
+enum ClientInvoiceStatus {
+  DRAFT
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  VOID
+  OVERDUE
+}
+
+enum ClientPaymentRecordStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+  CANCELLED
+}
+
+/// Immutable-style financial recognition row (Wave D). Adjust via CommissionAdjustment + new rows.
+model FinancialTransaction {
+  id                     String                     @id @default(uuid())
+  /// Deterministic identity: earn:{conversionId} | rev:{type}:{conversionId} | adj:{type}:{conversionId}:{key}
+  recognitionKey         String                     @unique
+  transactionType        FinancialTransactionType
+  status                 FinancialTransactionStatus @default(FINANCIAL_RECOGNIZED)
+  orderId                String?
+  order                  Order?                     @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  conversionId           String?
+  conversion             Conversion?                @relation(fields: [conversionId], references: [id], onDelete: SetNull)
+  clientId               String
+  client                 Client                     @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  supplier               SupplierKey
+  campaignSourceId       String?
+  commissionRuleId       String?
+  commissionRule         ClientCommissionRule?      @relation(fields: [commissionRuleId], references: [id], onDelete: SetNull)
+  /// Link to original earn row for reversals/adjustments.
+  relatedTransactionId   String?
+  relatedTransaction     FinancialTransaction?      @relation("FinancialTxnRelation", fields: [relatedTransactionId], references: [id], onDelete: SetNull)
+  relatedFrom            FinancialTransaction[]     @relation("FinancialTxnRelation")
+  /// Signed amounts in original currency (supplier commission basis).
+  supplierReceivable     Decimal                    @db.Decimal(18, 4)
+  clientPayable          Decimal                    @db.Decimal(18, 4)
+  mboMargin              Decimal                    @db.Decimal(18, 4)
+  originalCurrency       String                     @db.Char(3)
+  /// Reporting amounts after FX (same sign as original).
+  reportingSupplierReceivable Decimal?              @db.Decimal(18, 4)
+  reportingClientPayable      Decimal?              @db.Decimal(18, 4)
+  reportingMboMargin          Decimal?              @db.Decimal(18, 4)
+  reportingCurrency      String?                    @db.Char(3)
+  fxRate                 Decimal?                   @db.Decimal(18, 8)
+  fxDate                 DateTime?
+  fxSource               String?
+  ruleSnapshot           Json?
+  calculationMetadata    Json?
+  effectiveAt            DateTime                   @default(now())
+  createdAt              DateTime                   @default(now())
+  updatedAt              DateTime                   @updatedAt
+  metadata               Json?
+
+  adjustmentsAsOriginal CommissionAdjustment[] @relation("AdjustmentOriginalTxn")
+  adjustmentsAsResult   CommissionAdjustment[] @relation("AdjustmentResultTxn")
+  statementLines        ClientStatementLine[]
+  taxLedgers            TaxLedger[]
+
+  @@index([clientId, effectiveAt])
+  @@index([conversionId, transactionType])
+  @@index([orderId])
+  @@index([status])
+  @@index([relatedTransactionId])
+  @@map("financial_transactions")
+}
+
+model CommissionAdjustment {
+  id                      String                   @id @default(uuid())
+  /// Deterministic: {type}:{conversionId} or {type}:{conversionId}:{correctionKey}
+  adjustmentKey           String                   @unique
+  adjustmentType          CommissionAdjustmentType
+  reason                  String?
+  originalTransactionId   String
+  originalTransaction     FinancialTransaction     @relation("AdjustmentOriginalTxn", fields: [originalTransactionId], references: [id], onDelete: Restrict)
+  resultTransactionId     String?
+  resultTransaction       FinancialTransaction?    @relation("AdjustmentResultTxn", fields: [resultTransactionId], references: [id], onDelete: SetNull)
+  orderId                 String?
+  order                   Order?                   @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  conversionId            String?
+  conversion              Conversion?              @relation(fields: [conversionId], references: [id], onDelete: SetNull)
+  clientId                String
+  client                  Client                   @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  supplierReceivableDelta Decimal                  @db.Decimal(18, 4)
+  clientPayableDelta      Decimal                  @db.Decimal(18, 4)
+  mboMarginDelta          Decimal                  @db.Decimal(18, 4)
+  currency                String                   @db.Char(3)
+  reportingCurrency       String?                  @db.Char(3)
+  fxRate                  Decimal?                 @db.Decimal(18, 8)
+  createdBy               String?
+  createdAt               DateTime                 @default(now())
+  metadata                Json?
+
+  @@index([clientId, createdAt])
+  @@index([originalTransactionId])
+  @@index([conversionId])
+  @@index([orderId])
+  @@map("commission_adjustments")
+}
+
+model FxRateRecord {
+  id             String   @id @default(uuid())
+  fromCurrency   String   @db.Char(3)
+  toCurrency     String   @db.Char(3)
+  rate           Decimal  @db.Decimal(18, 8)
+  effectiveDate  DateTime @db.Date
+  source         String   @default("manual")
+  createdAt      DateTime @default(now())
+
+  @@unique([fromCurrency, toCurrency, effectiveDate, source])
+  @@index([fromCurrency, toCurrency, effectiveDate])
+  @@map("fx_rate_records")
+}
+
+model ClientStatement {
+  id              String               @id @default(uuid())
+  clientId        String
+  client          Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  periodStart     DateTime             @db.Date
+  periodEnd       DateTime             @db.Date
+  currency        String               @db.Char(3)
+  openingBalance  Decimal              @default(0) @db.Decimal(18, 4)
+  closingBalance  Decimal              @default(0) @db.Decimal(18, 4)
+  status          ClientStatementStatus @default(OPEN)
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  metadata        Json?
+
+  lines      ClientStatementLine[]
+  invoices   ClientInvoice[]
+  taxLedgers TaxLedger[]
+
+  @@unique([clientId, periodStart, periodEnd, currency])
+  @@index([clientId, status])
+  @@map("client_statements")
+}
+
+model ClientStatementLine {
+  id                      String               @id @default(uuid())
+  statementId             String
+  statement               ClientStatement      @relation(fields: [statementId], references: [id], onDelete: Cascade)
+  financialTransactionId  String?
+  financialTransaction    FinancialTransaction? @relation(fields: [financialTransactionId], references: [id], onDelete: SetNull)
+  description             String?
+  amount                  Decimal              @db.Decimal(18, 4)
+  currency                String               @db.Char(3)
+  effectiveAt             DateTime
+  createdAt               DateTime             @default(now())
+
+  @@index([statementId])
+  @@index([financialTransactionId])
+  @@map("client_statement_lines")
+}
+
+model ClientInvoice {
+  id            String             @id @default(uuid())
+  invoiceNumber String             @unique
+  clientId      String
+  client        Client             @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  statementId   String?
+  statement     ClientStatement?   @relation(fields: [statementId], references: [id], onDelete: SetNull)
+  currency      String             @db.Char(3)
+  subtotal      Decimal            @db.Decimal(18, 4)
+  adjustments   Decimal            @default(0) @db.Decimal(18, 4)
+  /// Epic 5 — GST/tax from TaxLedger when contract config present (never invented).
+  taxAmount     Decimal            @default(0) @db.Decimal(18, 4)
+  total         Decimal            @db.Decimal(18, 4)
+  status        ClientInvoiceStatus @default(DRAFT)
+  issuedAt      DateTime?
+  dueAt         DateTime?
+  paidAt        DateTime?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  metadata      Json?
+
+  payments   ClientPayment[]
+  taxLedgers TaxLedger[]
+
+  @@index([clientId, status])
+  @@index([statementId])
+  @@map("client_invoices")
+}
+
+model ClientPayment {
+  id             String                   @id @default(uuid())
+  clientId       String
+  client         Client                   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  invoiceId      String?
+  invoice        ClientInvoice?           @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  amount         Decimal                  @db.Decimal(18, 4)
+  currency       String                   @db.Char(3)
+  status         ClientPaymentRecordStatus @default(PENDING)
+  paidAt         DateTime?
+  reference      String?
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+  metadata       Json?
+
+  @@index([clientId, status])
+  @@index([invoiceId])
+  @@map("client_payments")
+}
+
+// ---------------------------------------------------------------------------
+// Epic 5 — TaxLedger / GST (v15 09F step 8 — Partial; legal review required)
+// ---------------------------------------------------------------------------
+
+enum TaxLegalReviewStatus {
+  PENDING
+  APPROVED
+  NOT_REQUIRED
+}
+
+enum TaxType {
+  GST
+  UNKNOWN
+}
+
+enum TaxCalculationPolicy {
+  CONTRACT_CONFIG
+  LEGAL_REVIEW_REQUIRED
+}
+
+enum TaxLedgerStatus {
+  DRAFT
+  POSTED
+  VOID
+}
+
+/// Contract-level tax configuration. Never invent rates.
+model ClientTaxProfile {
+  id                 String               @id @default(uuid())
+  clientId           String               @unique
+  client             Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  taxEnabled         Boolean              @default(false)
+  taxCountry         String?              @db.VarChar(8)
+  /// Percent from client contract only — nullable until finance/legal supplies it.
+  taxRatePercent     Decimal?             @db.Decimal(9, 4)
+  taxType            TaxType              @default(UNKNOWN)
+  legalReviewStatus  TaxLegalReviewStatus @default(PENDING)
+  notes              String?
+  metadata           Json?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+
+  @@map("client_tax_profiles")
+}
+
+/// Append-oriented tax record (v15 TaxLedger). Traceable to FT / statement / invoice.
+model TaxLedger {
+  id                       String               @id @default(uuid())
+  /// Deterministic: tax:{invoiceId} | tax-adj:{invoiceId}:{key}
+  recognitionKey           String               @unique
+  clientId                 String
+  client                   Client               @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  financialTransactionId   String?
+  financialTransaction     FinancialTransaction? @relation(fields: [financialTransactionId], references: [id], onDelete: SetNull)
+  clientStatementId        String?
+  clientStatement          ClientStatement?     @relation(fields: [clientStatementId], references: [id], onDelete: SetNull)
+  clientInvoiceId          String?
+  clientInvoice            ClientInvoice?       @relation(fields: [clientInvoiceId], references: [id], onDelete: SetNull)
+  invoiceNumber            String?
+  taxCountry               String?              @db.VarChar(8)
+  taxRate                  Decimal?             @db.Decimal(9, 4)
+  taxAmount                Decimal              @db.Decimal(18, 4)
+  taxableAmount            Decimal              @db.Decimal(18, 4)
+  currency                 String               @db.Char(3)
+  taxType                  TaxType              @default(UNKNOWN)
+  calculationPolicy        TaxCalculationPolicy @default(LEGAL_REVIEW_REQUIRED)
+  status                   TaxLedgerStatus      @default(DRAFT)
+  effectiveAt              DateTime             @default(now())
+  createdAt                DateTime             @default(now())
+  updatedAt                DateTime             @updatedAt
+  metadata                 Json?
+
+  @@index([clientId, status])
+  @@index([clientInvoiceId])
+  @@index([clientStatementId])
+  @@index([financialTransactionId])
+  @@map("tax_ledgers")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 Wave F — Product catalog (normalized + supplier sources)
+// ---------------------------------------------------------------------------
+
+enum ProductStatus {
+  ACTIVE
+  INACTIVE
+  DISCONTINUED
+  UNKNOWN
+}
+
+enum ProductAvailability {
+  IN_STOCK
+  OUT_OF_STOCK
+  PREORDER
+  UNKNOWN
+}
+
+enum ProductFeedFormat {
+  CSV
+  XML
+  JSON
+  GOOGLE_SHOPPING
+  UNKNOWN
+}
+
+enum ProductFeedStatus {
+  ACTIVE
+  PAUSED
+  ERROR
+  NEEDS_REVIEW
+}
+
+enum ClientProductAssignmentStatus {
+  ACTIVE
+  PAUSED
+  EXPIRED
+}
+
+enum ProductTrackingLinkStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+/// Canonical product catalog row (current state — not transaction-time).
+model Product {
+  id           String              @id @default(uuid())
+  merchantId   String?
+  merchant     Merchant?           @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+  /// Optional parent feed when created via ProductFeed ingest (Epic 4).
+  productFeedId String?
+  productFeed   ProductFeed?       @relation(fields: [productFeedId], references: [id], onDelete: SetNull)
+  campaignSourceId String?
+  campaignSource   CampaignSource? @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
+  sku          String?
+  title        String
+  description  String?
+  url          String?
+  imageUrl     String?
+  category     String?
+  brand        String?
+  /// Current catalog price — not financial payable.
+  price        Decimal?            @db.Decimal(18, 4)
+  salePrice    Decimal?            @db.Decimal(18, 4)
+  currency     String?             @db.Char(3)
+  /// Client display currency (INR for India region, else USD) — not commission basis.
+  clientReportingCurrency String?  @db.Char(3)
+  availability ProductAvailability @default(UNKNOWN)
+  status       ProductStatus       @default(UNKNOWN)
+  feedStatus   ProductFeedStatus?  @default(ACTIVE)
+  /// Internal only — never client API.
+  supplierProductTrackingUrl String?
+  metadata     Json?
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  sources                 ProductSource[]
+  orderItems              OrderItem[]
+  feedItems               ProductFeedItem[]
+  clientProductAssignments ClientProductAssignment[]
+  productTrackingLinks    ProductTrackingLink[]
+
+  @@index([merchantId])
+  @@index([sku])
+  @@index([status])
+  @@index([productFeedId])
+  @@index([campaignSourceId])
+  @@map("products")
+}
+
+/// Supplier-specific product identity (no fuzzy merge).
+model ProductSource {
+  id                 String     @id @default(uuid())
+  productId          String
+  product            Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  supplier           SupplierKey
+  sourceAccountLabel String     @default("default")
+  supplierProductId  String
+  supplierSku        String?
+  supplierCampaignId String?
+  catalogId          String?
+  /// Snapshot from supplier at last sync.
+  title              String?
+  price              Decimal?   @db.Decimal(18, 4)
+  currency           String?    @db.Char(3)
+  rawPayloadId       String?
+  rawPayload         RawPayload? @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
+  mapperVersion      String?
+  metadata           Json?
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  feedItems ProductFeedItem[]
+
+  @@unique([supplier, sourceAccountLabel, supplierProductId])
+  @@index([productId])
+  @@index([supplier, supplierSku])
+  @@index([rawPayloadId])
+  @@map("product_sources")
+}
+
+/// v15 11H — feed-level metadata (Optimise/Partnerize/Impact).
+model ProductFeed {
+  id                 String            @id @default(uuid())
+  supplier           SupplierKey
+  sourceAccountLabel String            @default("default")
+  campaignSourceId   String?
+  campaignSource     CampaignSource?   @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
+  feedExternalId     String            @default("default")
+  feedName           String?
+  feedUrl            String?
+  feedFormat         ProductFeedFormat @default(UNKNOWN)
+  feedStatus         ProductFeedStatus @default(NEEDS_REVIEW)
+  /// Optimise AID when applicable.
+  aid                String?
+  compressedLocation String?
+  creativeId         String?
+  mappingVersion     String?
+  lastSyncedAt       DateTime?
+  lastError          String?
+  errorCount         Int               @default(0)
+  metadata           Json?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  products  Product[]
+  feedItems ProductFeedItem[]
+
+  @@unique([supplier, sourceAccountLabel, feedExternalId])
+  @@index([campaignSourceId])
+  @@index([feedStatus])
+  @@index([supplier, lastSyncedAt])
+  @@map("product_feeds")
+}
+
+/// Feed-row snapshot distinct from normalized Product (v15 / DM-02).
+model ProductFeedItem {
+  id                 String            @id @default(uuid())
+  productFeedId      String
+  productFeed        ProductFeed       @relation(fields: [productFeedId], references: [id], onDelete: Cascade)
+  productId          String?
+  product            Product?          @relation(fields: [productId], references: [id], onDelete: SetNull)
+  productSourceId    String?
+  productSource      ProductSource?    @relation(fields: [productSourceId], references: [id], onDelete: SetNull)
+  supplierProductId  String
+  title              String?
+  price              Decimal?          @db.Decimal(18, 4)
+  currency           String?           @db.Char(3)
+  productUrl         String?
+  imageUrl           String?
+  supplierTrackingUrl String?
+  status             ProductFeedStatus @default(ACTIVE)
+  rawPayloadId       String?
+  rawPayload         RawPayload?       @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
+  mapperVersion      String?
+  metadata           Json?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  @@unique([productFeedId, supplierProductId])
+  @@index([productId])
+  @@index([productSourceId])
+  @@index([rawPayloadId])
+  @@map("product_feed_items")
+}
+
+/// v15 11E/11H — client publish control for products.
+model ClientProductAssignment {
+  id                         String                        @id @default(uuid())
+  clientId                   String
+  client                     Client                        @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  productId                  String
+  product                    Product                       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  clientCampaignAssignmentId String?
+  clientCampaignAssignment   ClientCampaignAssignment?     @relation(fields: [clientCampaignAssignmentId], references: [id], onDelete: SetNull)
+  status                     ClientProductAssignmentStatus @default(ACTIVE)
+  publishedAt                DateTime?
+  metadata                   Json?
+  createdAt                  DateTime                      @default(now())
+  updatedAt                  DateTime                      @updatedAt
+
+  productTrackingLinks ProductTrackingLink[]
+
+  @@unique([clientId, productId])
+  @@index([clientId, status])
+  @@index([productId])
+  @@index([clientCampaignAssignmentId])
+  @@map("client_product_assignments")
+}
+
+/// v15 11D/11H — client-safe product tracking wrapper (never expose supplier URL to client).
+model ProductTrackingLink {
+  id                         String                    @id @default(uuid())
+  clientId                   String
+  client                     Client                    @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  productId                  String
+  product                    Product                   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  clientProductAssignmentId  String?
+  clientProductAssignment    ClientProductAssignment?  @relation(fields: [clientProductAssignmentId], references: [id], onDelete: SetNull)
+  clientCampaignAssignmentId String?
+  clientCampaignAssignment   ClientCampaignAssignment? @relation(fields: [clientCampaignAssignmentId], references: [id], onDelete: SetNull)
+  token                      String                    @unique
+  supplierProductTrackingUrl String
+  mboProductTrackingUrl      String
+  status                     ProductTrackingLinkStatus @default(ACTIVE)
+  metadata                   Json?
+  createdAt                  DateTime                  @default(now())
+  updatedAt                  DateTime                  @updatedAt
+
+  @@index([clientId, productId])
+  @@index([productId])
+  @@index([clientProductAssignmentId])
+  @@index([status])
+  @@map("product_tracking_links")
+}
+
+model DailyReport {
+  id                     String            @id @default(uuid())
+  reportDate             DateTime          @db.Date
+  clientId               String
+  client                 Client            @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  merchantId             String
+  merchant               Merchant          @relation(fields: [merchantId], references: [id], onDelete: Restrict)
+  canonicalCampaignId    String
+  canonicalCampaign      CanonicalCampaign @relation(fields: [canonicalCampaignId], references: [id], onDelete: Restrict)
+  campaignSourceId       String?
+  campaignSource         CampaignSource?   @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
+  country                String?           @db.Char(2)
+  currency               String?           @db.Char(3)
+  clickCount             Int               @default(0)
+  conversionCount        Int               @default(0)
+  approvedConversionCount Int              @default(0)
+  grossCommission        Decimal           @default(0) @db.Decimal(18, 4)
+  clientCommission       Decimal           @default(0) @db.Decimal(18, 4)
+  mboCommission          Decimal           @default(0) @db.Decimal(18, 4)
+  conversionRate         Decimal?          @db.Decimal(8, 6)
+  epc                    Decimal?          @db.Decimal(18, 4)
+  ctr                    Decimal?          @db.Decimal(8, 6)
+  createdAt              DateTime          @default(now())
+  updatedAt              DateTime          @updatedAt
+
+  @@index([clientId, reportDate])
+  @@index([merchantId, reportDate])
+  @@index([canonicalCampaignId, reportDate])
+  @@index([campaignSourceId, reportDate])
+  @@index([reportDate])
+  @@map("daily_reports")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 — Platform Operations (audit, jobs — no business domain changes)
+// ---------------------------------------------------------------------------
+
+enum JobRunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+  DEAD_LETTER
+}
+
+model AuditEvent {
+  id            String   @id @default(uuid())
+  aggregateType String
+  aggregateId   String?
+  action        String
+  actorId       String?
+  actorEmail    String?
+  before        Json?
+  after         Json?
+  reason        String?
+  correlationId String?
+  metadata      Json?
+  createdAt     DateTime @default(now())
+
+  @@index([aggregateType, aggregateId])
+  @@index([action, createdAt])
+  @@index([correlationId])
+  @@index([createdAt])
+  @@map("audit_events")
+}
+
+model JobRun {
+  id            String       @id @default(uuid())
+  jobName       String
+  status        JobRunStatus @default(PENDING)
+  priority      Int          @default(100)
+  attempt       Int          @default(0)
+  maxAttempts   Int          @default(3)
+  progress      Int          @default(0)
+  payload       Json?
+  result        Json?
+  lastError     String?
+  correlationId String?
+  startedAt     DateTime?
+  completedAt   DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([jobName, status])
+  @@index([status, createdAt])
+  @@index([correlationId])
+  @@map("job_runs")
+}
+
+// ---------------------------------------------------------------------------
+// Boostiny Partner Payment — aggregate final settlement (never fake individual orders)
+// ---------------------------------------------------------------------------
+
+enum BoostinySettlementStatus {
+  PENDING_REVIEW
+  SETTLED
+  BLOCKED
+  SUPERSEDED
+}
+
+/// Maps Boostiny "Payment source" → exactly one MBO client (§ Boostiny mapping).
+model BoostinyPaymentSourceMapping {
+  id                 String   @id @default(uuid())
+  paymentSource      String
+  sourceAccountLabel String   @default("default")
+  clientId           String
+  client             Client   @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  /// Optional preferred assignment; settlement still keyed at payment-source level.
+  clientAssignmentId String?
+  notes              String?
+  isActive           Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  settlements BoostinyPartnerPaymentSettlement[]
+
+  @@unique([paymentSource, sourceAccountLabel])
+  @@index([clientId, isActive])
+  @@map("boostiny_payment_source_mappings")
+}
+
+/// Final aggregate settlement from Partner Payment CSV. confirmation_granularity = PAYMENT_SOURCE_CYCLE.
+model BoostinyPartnerPaymentSettlement {
+  id                   String                   @id @default(uuid())
+  /// Deterministic: BOOSTINY|{sourceAccountLabel}|{paymentSource}|{cycle}
+  settlementKey        String                   @unique
+  sourceAccountLabel   String                   @default("default")
+  paymentSource        String
+  cycle                String
+  legalEntityName      String?
+  ordersCount          Int?
+  revenue              Decimal?                 @db.Decimal(18, 4)
+  salesAmountUsd       Decimal?                 @db.Decimal(18, 4)
+  extra                Decimal?                 @db.Decimal(18, 4)
+  deduction            Decimal?                 @db.Decimal(18, 4)
+  delayed              Decimal?                 @db.Decimal(18, 4)
+  currency             String                   @default("USD") @db.Char(3)
+  confirmationGranularity String                @default("PAYMENT_SOURCE_CYCLE")
+  status               BoostinySettlementStatus @default(PENDING_REVIEW)
+  clientId             String?
+  client               Client?                  @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  mappingId            String?
+  mapping              BoostinyPaymentSourceMapping? @relation(fields: [mappingId], references: [id], onDelete: SetNull)
+  uploadBatchId        String?
+  rawRow               Json?
+  rawPayloadId         String?
+  blockReason          String?
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
+
+  @@index([paymentSource, cycle])
+  @@index([clientId, cycle])
+  @@index([uploadBatchId])
+  @@index([status])
+  @@map("boostiny_partner_payment_settlements")
+}

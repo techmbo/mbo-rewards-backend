@@ -1,0 +1,1709 @@
+<!DOCTYPE html>
+<!-- MBO Rewards Client Portal FINAL BUILD | 2026-08-17 -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MBO Rewards Client Portal</title>
+<style>
+:root{
+ --bg:#f5f7fb;--panel:#fff;--text:#101828;--muted:#667085;--line:#dfe5ee;--line2:#edf1f5;
+ --blue:#2457d6;--bluebg:#eef4ff;--dark:#111827;--green:#087a55;--greenbg:#ecfdf3;
+ --amber:#b54708;--amberbg:#fffaeb;
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--text)}
+.app{display:grid;grid-template-columns:235px 1fr;min-height:100vh}
+.sidebar{background:#fff;border-right:1px solid var(--line);padding:20px 14px;position:sticky;top:0;height:100vh}
+.brand{padding:4px 10px 18px;border-bottom:1px solid var(--line)}
+.brand strong{display:block;color:var(--blue);font-size:18px}
+.brand small{display:block;color:var(--muted);margin-top:5px}
+.nav{padding-top:16px}
+.nav a{display:block;padding:10px 11px;border-radius:7px;color:#344054;text-decoration:none;font-size:14px;font-weight:650;margin:3px 0}
+.nav a.active{background:var(--bluebg);color:var(--blue);border:1px solid #9db9ff}
+.sidebar-foot{position:absolute;left:14px;right:14px;bottom:18px;border-top:1px solid var(--line);padding:14px 10px 0}
+.sidebar-foot b{display:block;font-size:13px}
+.sidebar-foot span{display:block;font-size:11px;color:var(--muted);margin-top:2px}
+.main{min-width:0}
+.topbar{height:66px;background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 22px}
+.crumb{font-size:13px;color:#98a2b3}
+.crumb b{color:#344054}
+.account{border:1px solid var(--line);background:#fff;border-radius:8px;padding:8px 11px;font-size:13px}
+.content{padding:24px 20px 36px;max-width:1440px;margin:0 auto}
+.pagehead{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:18px}
+.pagehead h1{margin:0;font-size:25px}
+.pagehead p{margin:5px 0 0;color:var(--muted);font-size:13px}
+.btn{border:1px solid var(--line);background:#fff;color:#344054;border-radius:8px;padding:9px 12px;font-weight:700;cursor:pointer}
+.btn.dark{background:var(--dark);color:#fff;border-color:var(--dark)}
+.kpis{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin-bottom:16px}
+.card{background:#fff;border:1px solid var(--line);border-radius:9px}
+.kpi{padding:13px}
+.kpi span{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;font-weight:800;letter-spacing:.04em}
+.kpi strong{display:block;font-size:21px;margin-top:7px}
+.kpi small{display:block;color:var(--muted);font-size:11px;margin-top:4px}
+.grid2{display:grid;grid-template-columns:1.4fr .9fr;gap:16px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.panel-head{display:flex;justify-content:space-between;align-items:center;padding:14px 15px;border-bottom:1px solid var(--line)}
+.panel-head h3{margin:0;font-size:15px}
+.panel-head a{font-size:12px;color:var(--blue);font-weight:700;text-decoration:none}
+.panel-body{padding:14px 15px}
+.status{display:inline-block;border-radius:999px;padding:4px 7px;font-size:10px;font-weight:800;white-space:nowrap}
+.status.good{background:var(--greenbg);color:var(--green)}
+.status.info{background:var(--bluebg);color:var(--blue)}
+.status.warn{background:var(--amberbg);color:var(--amber)}
+table{width:100%;border-collapse:collapse}
+th{background:#f8fafc;color:#475467;text-transform:uppercase;font-size:9px;letter-spacing:.03em;padding:9px 8px;text-align:left;border-bottom:1px solid var(--line)}
+td{padding:10px 8px;border-bottom:1px solid var(--line2);font-size:12px;vertical-align:top}
+tr:last-child td{border-bottom:0}
+.metric-row{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line2)}
+.metric-row:last-child{border-bottom:0}
+.metric-row span{color:var(--muted);font-size:12px}
+.metric-row b{font-size:13px}
+.balance-box{padding:16px;border:1px solid var(--line);border-radius:8px;background:#fbfcfe}
+.balance-box span{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;font-weight:800}
+.balance-box strong{display:block;font-size:28px;margin-top:6px}
+.balance-box small{display:block;color:var(--muted);margin-top:4px}
+.action-row{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+.campaign-row{display:grid;grid-template-columns:44px 1fr auto;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line2)}
+.campaign-row:last-child{border-bottom:0}
+.logo{width:42px;height:42px;border:1px solid var(--line);border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:11px;background:#fff}
+.campaign-row b{display:block;font-size:12px}
+.campaign-row small{display:block;color:var(--muted);font-size:11px;margin-top:3px}
+.section-gap{margin-top:16px}
+@media(max-width:1150px){.kpis{grid-template-columns:repeat(3,1fr)}.grid2{grid-template-columns:1fr}.grid3{grid-template-columns:1fr}}
+@media(max-width:780px){.app{grid-template-columns:1fr}.sidebar{position:static;height:auto}.sidebar-foot{position:static;margin-top:20px}.topbar{padding:0 14px}.content{padding:16px}.kpis{grid-template-columns:1fr 1fr}.nav{display:grid;grid-template-columns:1fr 1fr}}
+
+.page{display:none}
+.page.active{display:block}
+.filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.filters input,.filters select{border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:#fff;color:#344054}
+.campaigns-table td{vertical-align:middle}
+.brand-cell{display:flex;align-items:center;gap:9px}
+.brand-badge{width:34px;height:34px;border:1px solid var(--line);border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;background:#fff}
+.offer{font-weight:800}
+.muted{color:var(--muted)}
+.linkbox{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.detail-item{border:1px solid var(--line);border-radius:8px;padding:10px}
+.detail-item span{display:block;color:var(--muted);font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px}
+.detail-item b{font-size:12px}
+.detail-wide{grid-column:1/-1}
+.modal-bg{position:fixed;inset:0;background:rgba(15,23,42,.38);display:none;align-items:center;justify-content:center;padding:18px;z-index:50}
+.modal-bg.open{display:flex}
+.modal{width:min(820px,100%);max-height:90vh;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:10px}
+.modal-head{display:flex;justify-content:space-between;align-items:flex-start;padding:15px 17px;border-bottom:1px solid var(--line)}
+.modal-head h3{margin:0;font-size:17px}
+.modal-body{padding:16px 17px}
+.modal-foot{display:flex;justify-content:flex-end;gap:8px;padding:13px 17px;border-top:1px solid var(--line)}
+.copy-btn{border:1px solid var(--line);background:#fff;border-radius:6px;padding:5px 7px;font-size:10px;font-weight:800;cursor:pointer}
+@media(max-width:800px){.detail-grid{grid-template-columns:1fr}.detail-wide{grid-column:auto}}
+
+
+.campaign-tabs{display:flex;gap:6px;margin-bottom:14px;border-bottom:1px solid var(--line)}
+.campaign-tab{border:0;background:transparent;padding:10px 12px;font-weight:800;color:#667085;cursor:pointer;border-bottom:2px solid transparent}
+.campaign-tab.active{color:var(--blue);border-bottom-color:var(--blue)}
+.report-kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:14px}
+.report-kpi{background:#fff;border:1px solid var(--line);border-radius:8px;padding:11px}
+.report-kpi span{display:block;color:var(--muted);font-size:9px;text-transform:uppercase;font-weight:800}
+.report-kpi strong{display:block;font-size:18px;margin-top:5px}
+@media(max-width:900px){.report-kpis{grid-template-columns:1fr 1fr}}
+
+
+.perf-controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.perf-controls input,.perf-controls select{border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:#fff;color:#344054}
+.perf-kpis{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:9px;margin-bottom:15px}
+.perf-kpi{background:#fff;border:1px solid var(--line);border-radius:8px;padding:11px}
+.perf-kpi span{display:block;color:var(--muted);font-size:9px;text-transform:uppercase;font-weight:800;letter-spacing:.03em}
+.perf-kpi strong{display:block;font-size:18px;margin-top:5px}
+.perf-tabs{display:flex;gap:6px;margin-bottom:12px;border-bottom:1px solid var(--line)}
+.perf-tab{border:0;background:transparent;padding:9px 12px;font-weight:800;color:#667085;cursor:pointer;border-bottom:2px solid transparent}
+.perf-tab.active{color:var(--blue);border-bottom-color:var(--blue)}
+.order-status{font-size:10px;font-weight:800}
+.order-status.confirmed{color:var(--green)}
+.order-status.pending{color:var(--amber)}
+.order-status.rejected{color:#b42318}
+@media(max-width:1200px){.perf-kpis{grid-template-columns:repeat(4,1fr)}}
+@media(max-width:800px){.perf-kpis{grid-template-columns:1fr 1fr}}
+
+
+.statement-filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.statement-filters input,.statement-filters select{border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:#fff;color:#344054}
+.statement-doc{background:#fff;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.statement-doc-head{display:flex;justify-content:space-between;gap:24px;padding:22px 24px 16px;border-bottom:1px solid var(--line)}
+.statement-brand strong{display:block;color:var(--blue);font-size:22px}
+.statement-brand small{display:block;color:var(--muted);margin-top:4px}
+.statement-title{text-align:right}
+.statement-title h2{margin:0;font-size:22px}
+.statement-meta{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-top:18px}
+.statement-meta-box{border:1px solid var(--line);border-radius:8px;padding:10px}
+.statement-meta-box span{display:block;font-size:9px;color:var(--muted);font-weight:800;text-transform:uppercase}
+.statement-meta-box b{display:block;font-size:12px;margin-top:4px}
+.statement-parties{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:16px 24px;border-bottom:1px solid var(--line)}
+.statement-party{border:1px solid var(--line);border-radius:8px;padding:12px}
+.statement-party h4{margin:0 0 6px;font-size:10px;text-transform:uppercase;color:#667085}
+.statement-party b{display:block;font-size:13px;margin-bottom:4px}
+.statement-party div{font-size:11px;color:var(--muted);margin:2px 0}
+.statement-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;padding:16px 24px;border-bottom:1px solid var(--line)}
+.statement-summary div{border:1px solid var(--line);border-radius:8px;padding:10px}
+.statement-summary span{display:block;font-size:9px;color:var(--muted);font-weight:800;text-transform:uppercase}
+.statement-summary b{display:block;font-size:18px;margin-top:5px}
+.statement-table-wrap{padding:0 24px 16px;overflow:auto}
+.statement-note{margin:0 24px 20px;padding:10px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);font-size:12px;color:#475467}
+.statement-footer{padding:0 24px 20px;color:#667085;font-size:10px}
+@media(max-width:800px){.statement-meta,.statement-summary{grid-template-columns:1fr 1fr}.statement-parties{grid-template-columns:1fr}.statement-title{text-align:left}.statement-doc-head{display:block}.statement-title{margin-top:14px}}
+
+
+.withdraw-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}
+.withdraw-kpi{background:#fff;border:1px solid var(--line);border-radius:8px;padding:12px}
+.withdraw-kpi span{display:block;color:var(--muted);font-size:9px;text-transform:uppercase;font-weight:800}
+.withdraw-kpi strong{display:block;font-size:19px;margin-top:5px}
+.request-form{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.request-field label{display:block;font-size:9px;font-weight:800;text-transform:uppercase;color:var(--muted);margin-bottom:5px}
+.request-field input,.request-field select,.request-field textarea{width:100%;border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:#fff;color:#344054}
+.request-field textarea{min-height:84px;resize:vertical}
+.request-wide{grid-column:1/-1}
+.available-box{border:1px solid var(--line);border-radius:8px;padding:12px;background:#fbfcfe}
+.available-box .amount{font-size:23px;font-weight:800;margin-top:5px}
+.request-detail-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}
+.request-detail-grid .detail-item{min-height:72px}
+.timeline{border-left:2px solid var(--line);margin-left:8px;padding-left:16px}
+.timeline-item{position:relative;padding:0 0 16px}
+.timeline-item:before{content:"";position:absolute;left:-22px;top:2px;width:10px;height:10px;border-radius:50%;background:#fff;border:2px solid var(--blue)}
+.timeline-item b{display:block;font-size:12px}
+.timeline-item small{display:block;color:var(--muted);margin-top:3px}
+@media(max-width:900px){.withdraw-kpis{grid-template-columns:1fr 1fr}.request-form,.request-detail-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:650px){.request-form,.request-detail-grid{grid-template-columns:1fr}.request-wide{grid-column:auto}}
+
+
+.payment-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}
+.payment-kpi{background:#fff;border:1px solid var(--line);border-radius:8px;padding:12px}
+.payment-kpi span{display:block;color:var(--muted);font-size:9px;text-transform:uppercase;font-weight:800}
+.payment-kpi strong{display:block;font-size:19px;margin-top:5px}
+.payment-detail{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}
+.payment-detail .detail-item{min-height:72px}
+@media(max-width:900px){.payment-kpis,.payment-detail{grid-template-columns:1fr 1fr}}
+@media(max-width:600px){.payment-kpis,.payment-detail{grid-template-columns:1fr}}
+
+
+.profile-tabs{display:flex;gap:6px;margin-bottom:14px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.profile-tab{border:0;background:transparent;padding:9px 12px;font-weight:800;color:#667085;cursor:pointer;border-bottom:2px solid transparent}
+.profile-tab.active{color:var(--blue);border-bottom-color:var(--blue)}
+.profile-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.profile-field label{display:block;font-size:9px;font-weight:800;text-transform:uppercase;color:var(--muted);margin-bottom:5px}
+.profile-field input,.profile-field select,.profile-field textarea{width:100%;border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:#fff;color:#344054}
+.profile-field textarea{min-height:80px;resize:vertical}
+.profile-wide{grid-column:1/-1}
+.readonly{background:#f8fafc!important}
+.user-row{display:grid;grid-template-columns:1.2fr 1.5fr .9fr .8fr auto;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line2)}
+.user-row:last-child{border-bottom:0}
+.pref-row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--line2)}
+.pref-row:last-child{border-bottom:0}
+.toggle{width:38px;height:22px;border-radius:999px;background:#d0d5dd;position:relative;cursor:pointer}
+.toggle.on{background:#2457d6}
+.toggle:after{content:"";position:absolute;width:16px;height:16px;top:3px;left:3px;border-radius:50%;background:#fff;transition:.15s}
+.toggle.on:after{left:19px}
+@media(max-width:800px){.profile-grid{grid-template-columns:1fr}.profile-wide{grid-column:auto}.user-row{grid-template-columns:1fr 1fr}}
+
+
+.notification-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}
+.notification-kpi{background:#fff;border:1px solid var(--line);border-radius:8px;padding:12px}
+.notification-kpi span{display:block;color:var(--muted);font-size:9px;text-transform:uppercase;font-weight:800}
+.notification-kpi strong{display:block;font-size:19px;margin-top:5px}
+.notification-item{display:grid;grid-template-columns:12px 1fr auto;gap:12px;padding:14px 0;border-bottom:1px solid var(--line2);align-items:start}
+.notification-item:last-child{border-bottom:0}
+.notification-dot{width:8px;height:8px;border-radius:50%;background:#2457d6;margin-top:6px}
+.notification-item.read .notification-dot{background:#d0d5dd}
+.notification-title{font-size:13px;font-weight:800}
+.notification-text{font-size:12px;color:#475467;margin-top:4px;line-height:1.45}
+.notification-meta{font-size:10px;color:var(--muted);margin-top:5px}
+.notification-actions{display:flex;gap:6px;align-items:center}
+.notification-filter{display:flex;gap:8px;flex-wrap:wrap}
+.notification-filter select,.notification-filter input{border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:#fff;color:#344054}
+@media(max-width:800px){.notification-kpis{grid-template-columns:1fr 1fr}.notification-item{grid-template-columns:10px 1fr}.notification-actions{grid-column:2}}
+
+
+.top-actions{display:flex;align-items:center;gap:10px;position:relative}
+.notif-bell{position:relative;width:38px;height:38px;border:1px solid var(--line);background:#fff;border-radius:9px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:18px}
+.notif-badge{position:absolute;top:-5px;right:-5px;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:#d92d20;color:#fff;font-size:10px;font-weight:800;display:flex;align-items:center;justify-content:center;border:2px solid #fff}
+.notif-menu{position:absolute;right:0;top:48px;width:380px;max-height:520px;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 18px 45px rgba(16,24,40,.14);z-index:80;display:none;overflow:hidden}
+.notif-menu.open{display:block}
+.notif-menu-head{display:flex;justify-content:space-between;align-items:center;padding:13px 14px;border-bottom:1px solid var(--line)}
+.notif-menu-head h3{margin:0;font-size:14px}
+.notif-menu-head button{border:0;background:none;color:var(--blue);font-size:11px;font-weight:800;cursor:pointer}
+.notif-menu-list{max-height:390px;overflow:auto}
+.notif-menu-item{display:grid;grid-template-columns:8px 1fr;gap:9px;padding:12px 14px;border-bottom:1px solid var(--line2);cursor:pointer}
+.notif-menu-item:hover{background:#fafbfc}
+.notif-menu-item.read{background:#fff}
+.notif-menu-dot{width:8px;height:8px;border-radius:50%;background:var(--blue);margin-top:5px}
+.notif-menu-item.read .notif-menu-dot{background:#d0d5dd}
+.notif-menu-title{font-size:12px;font-weight:800}
+.notif-menu-text{font-size:11px;color:#475467;margin-top:3px;line-height:1.4}
+.notif-menu-time{font-size:10px;color:var(--muted);margin-top:4px}
+.notif-menu-foot{padding:10px 14px;border-top:1px solid var(--line);font-size:11px;color:var(--muted)}
+@media(max-width:600px){.notif-menu{position:fixed;left:12px;right:12px;top:64px;width:auto;max-height:70vh}}
+
+
+.api-env-tabs{display:flex;gap:6px;margin-bottom:12px;border-bottom:1px solid var(--line)}
+.api-env-tab{border:0;background:transparent;padding:9px 12px;font-weight:800;color:#667085;cursor:pointer;border-bottom:2px solid transparent}
+.api-env-tab.active{color:var(--blue);border-bottom-color:var(--blue)}
+.api-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.api-box{border:1px solid var(--line);border-radius:8px;padding:12px;background:#fff}
+.api-box span{display:block;color:var(--muted);font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.03em;margin-bottom:5px}
+.api-box b{font-size:12px;word-break:break-word}
+.api-secret{display:flex;gap:8px;align-items:center}
+.api-secret code{flex:1;border:1px solid var(--line);background:#f8fafc;border-radius:7px;padding:9px 10px;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.api-note{font-size:11px;color:#667085;line-height:1.5;margin-top:10px}
+.api-list-row{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line2);font-size:12px}
+.api-list-row:last-child{border-bottom:0}
+.api-list-row span{color:var(--muted)}
+.api-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+@media(max-width:800px){.api-grid{grid-template-columns:1fr}}
+
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <strong>MBO Rewards</strong>
+      <small>Client Portal</small>
+    </div>
+    <nav class="nav">
+      <a class="active" data-page="dashboard" href="#">Dashboard</a>
+      <a data-page="campaigns" href="#">Campaigns</a>
+      <a data-page="performance" href="#">Performance</a>
+      <a data-page="statements" href="#">Payable Statements</a>
+      <a data-page="withdrawals" href="#">Withdrawal Requests</a>
+      <a data-page="payouts" href="#">Payments</a>
+      <a data-page="profile" href="#">Profile</a>
+    </nav>
+    <div class="sidebar-foot">
+      <b>HDFC Bank</b>
+      <span>Client Account</span>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div class="crumb">MBO Rewards Client Portal / <b>Dashboard</b></div>
+      
+<div class="top-actions">
+  <button class="notif-bell" onclick="toggleNotificationMenu(event)" aria-label="Notifications">
+    🔔
+    <span class="notif-badge" id="notifBadge">4</span>
+  </button>
+
+  <div class="notif-menu" id="notifMenu" onclick="event.stopPropagation()">
+    <div class="notif-menu-head">
+      <h3>Notifications</h3>
+      <button onclick="markAllNotificationsRead()">Mark all as read</button>
+    </div>
+    <div class="notif-menu-list" id="notifMenuList"></div>
+    <div class="notif-menu-foot">Latest account activity</div>
+  </div>
+
+  <div class="account">HDFC Bank · Admin</div>
+</div>
+    </div>
+
+    <div class="content">
+<section id="dashboard" class="page active">
+
+      <div class="pagehead">
+        <div>
+          <h1>Dashboard</h1>
+          <p>Overview of your campaigns, performance, payable commission, and withdrawals.</p>
+        </div>
+        <button class="btn dark">View Campaigns</button>
+      </div>
+
+      <div class="kpis">
+        <div class="card kpi"><span>Active Campaigns</span><strong>18</strong><small>Currently live</small></div>
+        <div class="card kpi"><span>Orders</span><strong>342</strong><small>Aug 2026</small></div>
+        <div class="card kpi"><span>Confirmed Orders</span><strong>284</strong><small>Aug 2026</small></div>
+        <div class="card kpi"><span>Confirmed Order Value</span><strong>$28.4K</strong><small>Aug 2026</small></div>
+        <div class="card kpi"><span>Confirmed Commission</span><strong>$1,420</strong><small>Client commission</small></div>
+        <div class="card kpi"><span>Available to Withdraw</span><strong>$850</strong><small>Ready now</small></div>
+      </div>
+
+      <div class="grid2">
+        <section class="card">
+          <div class="panel-head">
+            <h3>Performance Summary</h3>
+            <a href="#">View Performance</a>
+          </div>
+          <div class="panel-body">
+            <table>
+              <thead>
+                <tr>
+                  <th>Brand</th>
+                  <th>Campaign</th>
+                  <th>Orders</th>
+                  <th>Confirmed Orders</th>
+                  <th>Confirmed Order Value</th>
+                  <th>Commission</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td>Nike</td><td>Nike Online Store</td><td>82</td><td>68</td><td>$7,920.00</td><td>$396.00</td></tr>
+                <tr><td>Adidas</td><td>Adidas UAE</td><td>61</td><td>52</td><td>$5,880.00</td><td>$294.00</td></tr>
+                <tr><td>Myntra</td><td>Myntra Fashion Sale</td><td>107</td><td>91</td><td>$9,460.00</td><td>$473.00</td></tr>
+                <tr><td>Ajio</td><td>Ajio Fashion</td><td>92</td><td>73</td><td>$5,140.00</td><td>$257.00</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="panel-head">
+            <h3>Withdrawal Balance</h3>
+            <a href="#">View Statements</a>
+          </div>
+          <div class="panel-body">
+            <div class="balance-box">
+              <span>Available for Withdrawal</span>
+              <strong>$850.00</strong>
+              <small>USD · Based on released payable statements</small>
+              <div class="action-row">
+                <button class="btn dark">Raise Withdrawal Request</button>
+                <button class="btn">View Payable Statements</button>
+              </div>
+            </div>
+            <div class="metric-row"><span>Pending Request</span><b>$320.00</b></div>
+            <div class="metric-row"><span>Approved for Payout</span><b>$530.00</b></div>
+            <div class="metric-row"><span>Paid This Month</span><b>$640.00</b></div>
+          </div>
+        </section>
+      </div>
+
+      <div class="grid3 section-gap">
+        <section class="card">
+          <div class="panel-head">
+            <h3>Recent Payable Statements</h3>
+            <a href="#">View All</a>
+          </div>
+          <div class="panel-body">
+            <table>
+              <thead><tr><th>Statement</th><th>Period</th><th>Amount</th><th>Status</th></tr></thead>
+              <tbody>
+                <tr><td>PS-HDFC-2026-08-001</td><td>Aug 2026</td><td>$530.00</td><td><span class="status good">AVAILABLE</span></td></tr>
+                <tr><td>PS-HDFC-2026-07-004</td><td>Jul 2026</td><td>$320.00</td><td><span class="status info">REQUESTED</span></td></tr>
+                <tr><td>PS-HDFC-2026-07-002</td><td>Jul 2026</td><td>$640.00</td><td><span class="status good">PAID</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="panel-head">
+            <h3>Recent Payments</h3>
+            <a href="#">View All</a>
+          </div>
+          <div class="panel-body">
+            <div class="metric-row"><span>PAY-000104</span><b>$640.00</b></div>
+            <div class="metric-row"><span>Payment Date</span><b>12 Aug 2026</b></div>
+            <div class="metric-row"><span>Status</span><b><span class="status good">PAID</span></b></div>
+            <div class="metric-row"><span>Reference</span><b>UTR-9182041</b></div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="panel-head">
+            <h3>Available Campaigns</h3>
+            <a href="#">Browse All</a>
+          </div>
+          <div class="panel-body">
+            <div class="campaign-row"><div class="logo">N</div><div><b>Nike Online Store</b><small>Affiliate Link · Up to 5% commission</small></div><span class="status good">LIVE</span></div>
+            <div class="campaign-row"><div class="logo">A</div><div><b>Adidas UAE</b><small>Coupon · 4% commission</small></div><span class="status good">LIVE</span></div>
+            <div class="campaign-row"><div class="logo">M</div><div><b>Myntra Fashion Sale</b><small>Coupon · 5% commission</small></div><span class="status info">NEW</span></div>
+          </div>
+        </section>
+      </div>
+    
+</section>
+
+<section id="campaigns" class="page">
+  <div class="pagehead">
+    <div>
+      <h1>Campaigns</h1>
+      <p>Browse campaigns available to your account and access client-safe campaign details.</p>
+    </div>
+  </div>
+
+  <div class="campaign-tabs">
+    <button class="campaign-tab active" data-campaign-tab="all" onclick="setCampaignTab('all')">All Campaigns</button>
+    <button class="campaign-tab" data-campaign-tab="affiliate" onclick="setCampaignTab('affiliate')">Affiliate Link Report</button>
+    <button class="campaign-tab" data-campaign-tab="coupon" onclick="setCampaignTab('coupon')">Coupon Code Report</button>
+  </div>
+
+  <div id="campaignAllTab">
+  <div class="card">
+    <div class="panel-head">
+      <h3>Available Campaigns</h3>
+      <span class="muted" id="campaignCount">6 campaigns</span>
+    </div>
+    <div class="panel-body">
+      <div class="filters">
+        <input id="campaignSearch" placeholder="Search brand or campaign" oninput="renderCampaigns()">
+        <select id="campaignStatus" onchange="renderCampaigns()">
+          <option value="">All Statuses</option>
+          <option value="LIVE">Live</option>
+          <option value="NEW">New</option>
+          <option value="EXPIRING">Expiring Soon</option>
+        </select>
+        <select id="campaignType" onchange="renderCampaigns()">
+          <option value="">All Types</option>
+          <option value="Affiliate Link">Affiliate Link</option>
+          <option value="Coupon">Coupon</option>
+        </select>
+        <select id="campaignCountry" onchange="renderCampaigns()">
+          <option value="">All Countries</option>
+          <option value="India">India</option>
+          <option value="UAE">UAE</option>
+        </select>
+      </div>
+
+      <div style="overflow:auto">
+        <table class="campaigns-table">
+          <thead>
+            <tr>
+              <th>Brand</th>
+              <th>Campaign Name</th>
+              <th>Campaign Type</th>
+              <th>Customer Offer</th>
+              <th>Commission</th>
+              <th>Coupon Code</th>
+              <th>Country</th>
+              <th>Valid Until</th>
+              <th>Status</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="campaignRows"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <div id="campaignAffiliateTab" style="display:none">
+    <div class="report-kpis">
+      <div class="report-kpi"><span>Affiliate Campaigns</span><strong>3</strong></div>
+      <div class="report-kpi"><span>Clicks</span><strong>8,420</strong></div>
+      <div class="report-kpi"><span>Orders</span><strong>176</strong></div>
+      <div class="report-kpi"><span>Confirmed Orders</span><strong>141</strong></div>
+      <div class="report-kpi"><span>Commission</span><strong>$705.00</strong></div>
+    </div>
+    <div class="card">
+      <div class="panel-head"><h3>Affiliate Link Report</h3><span class="muted">Link-attributed campaigns only</span></div>
+      <div class="panel-body">
+        <div style="overflow:auto">
+          <table>
+            <thead>
+              <tr>
+                <th>Brand</th>
+                <th>Campaign Name</th>
+                <th>MBO Tracking Link</th>
+                <th>Clicks</th>
+                <th>Orders</th>
+                <th>Confirmed Orders</th>
+                <th>Confirmed Order Value</th>
+                <th>Commission</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Nike</td><td>Nike Online Store</td><td class="linkbox">mbor.io/hdfc/nike</td><td>3,420</td><td>82</td><td>68</td><td>$7,920.00</td><td>$396.00</td><td><span class="status good">LIVE</span></td></tr>
+              <tr><td>Ajio</td><td>Ajio Fashion</td><td class="linkbox">mbor.io/hdfc/ajio</td><td>2,840</td><td>61</td><td>49</td><td>$4,980.00</td><td>$249.00</td><td><span class="status good">LIVE</span></td></tr>
+              <tr><td>Noon</td><td>Noon UAE</td><td class="linkbox">mbor.io/hdfc/noon</td><td>2,160</td><td>33</td><td>24</td><td>$2,000.00</td><td>$60.00</td><td><span class="status good">LIVE</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="campaignCouponTab" style="display:none">
+    <div class="report-kpis">
+      <div class="report-kpi"><span>Coupon Campaigns</span><strong>3</strong></div>
+      <div class="report-kpi"><span>Coupon Orders</span><strong>166</strong></div>
+      <div class="report-kpi"><span>Confirmed Orders</span><strong>143</strong></div>
+      <div class="report-kpi"><span>Confirmed Order Value</span><strong>$14.2K</strong></div>
+      <div class="report-kpi"><span>Commission</span><strong>$715.00</strong></div>
+    </div>
+    <div class="card">
+      <div class="panel-head"><h3>Coupon Code Report</h3><span class="muted">Coupon-attributed campaigns only</span></div>
+      <div class="panel-body">
+        <div style="overflow:auto">
+          <table>
+            <thead>
+              <tr>
+                <th>Brand</th>
+                <th>Campaign Name</th>
+                <th>Coupon Code</th>
+                <th>Orders</th>
+                <th>Confirmed Orders</th>
+                <th>Confirmed Order Value</th>
+                <th>Commission</th>
+                <th>Valid Until</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Adidas</td><td>Adidas UAE</td><td><b>RUN20</b></td><td>61</td><td>52</td><td>$5,880.00</td><td>$294.00</td><td>30 Sep 2026</td><td><span class="status good">LIVE</span></td></tr>
+              <tr><td>Myntra</td><td>Myntra Fashion Sale</td><td><b>HDFC30</b></td><td>74</td><td>66</td><td>$6,920.00</td><td>$346.00</td><td>31 Aug 2026</td><td><span class="status info">NEW</span></td></tr>
+              <tr><td>Puma</td><td>Puma End of Season</td><td><b>PUMA25</b></td><td>31</td><td>25</td><td>$1,400.00</td><td>$75.00</td><td>25 Aug 2026</td><td><span class="status warn">EXPIRING</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<section id="performance" class="page">
+  <div class="pagehead">
+    <div>
+      <h1>Performance</h1>
+      <p>Track clicks, orders, confirmed sales, and commission across your campaigns.</p>
+    </div>
+  </div>
+
+  <div class="perf-controls">
+    <input type="date" id="perfFrom" value="2026-08-01">
+    <input type="date" id="perfTo" value="2026-08-16">
+    <select id="perfBrand">
+      <option value="">All Brands</option>
+      <option>Nike</option>
+      <option>Adidas</option>
+      <option>Myntra</option>
+      <option>Ajio</option>
+    </select>
+    <select id="perfType">
+      <option value="">All Campaign Types</option>
+      <option>Affiliate Link</option>
+      <option>Coupon</option>
+    </select>
+    <button class="btn dark">Apply</button>
+  </div>
+
+  <div class="perf-kpis">
+    <div class="perf-kpi"><span>Clicks</span><strong>8,420</strong></div>
+    <div class="perf-kpi"><span>Orders</span><strong>342</strong></div>
+    <div class="perf-kpi"><span>Pending Orders</span><strong>39</strong></div>
+    <div class="perf-kpi"><span>Confirmed Orders</span><strong>284</strong></div>
+    <div class="perf-kpi"><span>Rejected Orders</span><strong>11</strong></div>
+    <div class="perf-kpi"><span>Cancelled Orders</span><strong>8</strong></div>
+    <div class="perf-kpi"><span>Confirmed Order Value</span><strong>$28.4K</strong></div>
+    <div class="perf-kpi"><span>Confirmed Commission</span><strong>$1,420</strong></div>
+  </div>
+
+  <div class="perf-tabs">
+    <button class="perf-tab active" data-perf-tab="overview" onclick="setPerformanceTab('overview')">Overview</button>
+    <button class="perf-tab" data-perf-tab="orders" onclick="setPerformanceTab('orders')">Individual Orders</button>
+  </div>
+
+  <div id="perfOverviewTab">
+    <div class="card">
+      <div class="panel-head">
+        <h3>Campaign Performance</h3>
+        <span class="muted">Current selected date range</span>
+      </div>
+      <div class="panel-body">
+        <div style="overflow:auto">
+          <table>
+            <thead>
+              <tr>
+                <th>Brand</th>
+                <th>Campaign Name</th>
+                <th>Campaign Type</th>
+                <th>Coupon Code / Tracking Link</th>
+                <th>Clicks</th>
+                <th>Orders</th>
+                <th>Pending Orders</th>
+                <th>Confirmed Orders</th>
+                <th>Rejected Orders</th>
+                <th>Cancelled Orders</th>
+                <th>Gross Order Value</th>
+                <th>Confirmed Order Value</th>
+                <th>Commission Generated</th>
+                <th>Confirmed Commission</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Nike</td><td>Nike Online Store</td><td>Affiliate Link</td>
+                <td class="linkbox">mbor.io/hdfc/nike</td><td>3,420</td><td>82</td><td>9</td><td>68</td><td>3</td><td>2</td>
+                <td>$9,340.00</td><td>$7,920.00</td><td>$467.00</td><td>$396.00</td>
+              </tr>
+              <tr>
+                <td>Adidas</td><td>Adidas UAE</td><td>Coupon</td>
+                <td><b>RUN20</b></td><td>1,180</td><td>61</td><td>6</td><td>52</td><td>2</td><td>1</td>
+                <td>$6,520.00</td><td>$5,880.00</td><td>$326.00</td><td>$294.00</td>
+              </tr>
+              <tr>
+                <td>Myntra</td><td>Myntra Fashion Sale</td><td>Coupon</td>
+                <td><b>HDFC30</b></td><td>1,660</td><td>107</td><td>13</td><td>91</td><td>2</td><td>1</td>
+                <td>$11,020.00</td><td>$9,460.00</td><td>$551.00</td><td>$473.00</td>
+              </tr>
+              <tr>
+                <td>Ajio</td><td>Ajio Fashion</td><td>Affiliate Link</td>
+                <td class="linkbox">mbor.io/hdfc/ajio</td><td>2,160</td><td>92</td><td>11</td><td>73</td><td>4</td><td>4</td>
+                <td>$7,920.00</td><td>$5,140.00</td><td>$396.00</td><td>$257.00</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid2 section-gap">
+      <div class="card">
+        <div class="panel-head"><h3>Tracking Method Summary</h3></div>
+        <div class="panel-body">
+          <div class="metric-row"><span>Affiliate Link Orders</span><b>174</b></div>
+          <div class="metric-row"><span>Coupon Orders</span><b>168</b></div>
+          <div class="metric-row"><span>Confirmed Affiliate Link Orders</span><b>141</b></div>
+          <div class="metric-row"><span>Confirmed Coupon Orders</span><b>143</b></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="panel-head"><h3>Commission Summary</h3></div>
+        <div class="panel-body">
+          <div class="metric-row"><span>Commission Generated</span><b>$1,740.00</b></div>
+          <div class="metric-row"><span>Confirmed Commission</span><b>$1,420.00</b></div>
+          <div class="metric-row"><span>Pending Commission</span><b>$195.00</b></div>
+          <div class="metric-row"><span>Rejected / Cancelled</span><b>$125.00</b></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="perfOrdersTab" style="display:none">
+    <div class="card">
+      <div class="panel-head">
+        <h3>Individual Orders</h3>
+        <span class="muted" id="perfOrderContext">All campaigns · order-level reporting</span>
+      </div>
+      <div class="panel-body">
+        <div style="overflow:auto">
+          <table>
+            <thead>
+              <tr>
+                <th>Order Date</th>
+                <th>Order Confirmed Date</th>
+                <th>Brand</th>
+                <th>Campaign Name</th>
+                <th>Campaign Type</th>
+                <th>Coupon Code</th>
+                <th>MBO Tracking Link</th>
+                <th>Order Value</th>
+                <th>Currency</th>
+                <th>Order Status</th>
+                <th>Commission</th>
+                <th>Last Updated Date</th>
+                <th>Last Updated Time</th>
+              </tr>
+            </thead>
+            <tbody id="perfOrderRows"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="statements" class="page">
+  <div class="pagehead">
+    <div>
+      <h1>Payable Statements</h1>
+      <p>View commission statements that have been released and made available for withdrawal.</p>
+    </div>
+  </div>
+
+  <div class="statement-filters">
+    <input type="date" value="2026-07-01">
+    <input type="date" value="2026-08-16">
+    <select>
+      <option>All Statuses</option>
+      <option>Available for Withdrawal</option>
+      <option>Requested</option>
+      <option>Approved</option>
+      <option>Paid</option>
+    </select>
+    <button class="btn dark">Apply</button>
+  </div>
+
+  <div class="card">
+    <div class="panel-head">
+      <h3>Statements</h3>
+      <span class="muted">4 statements</span>
+    </div>
+    <div class="panel-body">
+      <div style="overflow:auto">
+        <table>
+          <thead>
+            <tr>
+              <th>Statement ID</th>
+              <th>Statement Date</th>
+              <th>Settlement Period</th>
+              <th>Payable Orders</th>
+              <th>Commission</th>
+              <th>Currency</th>
+              <th>Status</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>PS-HDFC-2026-08-001</td><td>16 Aug 2026</td><td>Aug 2026</td><td>5</td><td>530.00</td><td>USD</td><td><span class="status good">AVAILABLE</span></td><td><button class="btn" onclick="openClientStatement('PS-HDFC-2026-08-001')">View Statement</button></td></tr>
+            <tr><td>PS-HDFC-2026-07-004</td><td>31 Jul 2026</td><td>Jul 2026</td><td>8</td><td>320.00</td><td>USD</td><td><span class="status info">REQUESTED</span></td><td><button class="btn" onclick="openClientStatement('PS-HDFC-2026-07-004')">View Statement</button></td></tr>
+            <tr><td>PS-HDFC-2026-07-002</td><td>18 Jul 2026</td><td>Jul 2026</td><td>11</td><td>640.00</td><td>USD</td><td><span class="status good">PAID</span></td><td><button class="btn" onclick="openClientStatement('PS-HDFC-2026-07-002')">View Statement</button></td></tr>
+            <tr><td>PS-HDFC-2026-06-006</td><td>30 Jun 2026</td><td>Jun 2026</td><td>6</td><td>410.00</td><td>USD</td><td><span class="status good">PAID</span></td><td><button class="btn" onclick="openClientStatement('PS-HDFC-2026-06-006')">View Statement</button></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="clientStatementView" style="display:none;margin-top:16px">
+    <div class="pagehead">
+      <div>
+        <h1 style="font-size:20px">Statement Details</h1>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn" onclick="closeClientStatement()">Back to Statements</button>
+        <button class="btn dark" onclick="window.print()">Download PDF</button>
+      </div>
+    </div>
+
+    <div id="clientStatementDocument"></div>
+  </div>
+</section>
+
+<section id="withdrawals" class="page">
+  <div id="withdrawalListView">
+    <div class="pagehead">
+      <div>
+        <h1>Withdrawal Requests</h1>
+        <p>Request withdrawal of commission that has been made available to your account.</p>
+      </div>
+      <button class="btn dark" onclick="openNewWithdrawal()">New Withdrawal Request</button>
+    </div>
+
+    <div class="withdraw-kpis">
+      <div class="withdraw-kpi"><span>Available for Withdrawal</span><strong>$850.00</strong></div>
+      <div class="withdraw-kpi"><span>Under Review</span><strong>$320.00</strong></div>
+      <div class="withdraw-kpi"><span>Approved</span><strong>$530.00</strong></div>
+      <div class="withdraw-kpi"><span>Paid This Month</span><strong>$640.00</strong></div>
+    </div>
+
+    <div class="card">
+      <div class="panel-head">
+        <h3>Requests</h3>
+        <span class="muted">4 requests</span>
+      </div>
+      <div class="panel-body">
+        <div class="filters">
+          <select>
+            <option>All Statuses</option>
+            <option>Requested</option>
+            <option>Under Review</option>
+            <option>Approved</option>
+            <option>Rejected</option>
+            <option>Processing</option>
+            <option>Paid</option>
+          </select>
+          <input placeholder="Search request ID or invoice number">
+        </div>
+        <div style="overflow:auto">
+          <table>
+            <thead>
+              <tr>
+                <th>Request ID</th>
+                <th>Request Date</th>
+                <th>Settlement Period</th>
+                <th>Statement ID</th>
+                <th>Requested Amount</th>
+                <th>Currency</th>
+                <th>Invoice Number</th>
+                <th>Status</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>REQ-000173</td><td>18 Aug 2026</td><td>Aug 2026</td><td>PS-HDFC-2026-08-001</td><td>530.00</td><td>USD</td><td>HDFC-INV-0826-001</td><td><span class="status good">APPROVED</span></td><td><button class="btn" onclick="openWithdrawalDetail('REQ-000173')">View Details</button></td></tr>
+              <tr><td>REQ-000169</td><td>02 Aug 2026</td><td>Jul 2026</td><td>PS-HDFC-2026-07-004</td><td>320.00</td><td>USD</td><td>HDFC-INV-0726-004</td><td><span class="status info">UNDER REVIEW</span></td><td><button class="btn" onclick="openWithdrawalDetail('REQ-000169')">View Details</button></td></tr>
+              <tr><td>REQ-000161</td><td>20 Jul 2026</td><td>Jul 2026</td><td>PS-HDFC-2026-07-002</td><td>640.00</td><td>USD</td><td>HDFC-INV-0726-002</td><td><span class="status good">PAID</span></td><td><button class="btn" onclick="openWithdrawalDetail('REQ-000161')">View Details</button></td></tr>
+              <tr><td>REQ-000154</td><td>04 Jul 2026</td><td>Jun 2026</td><td>PS-HDFC-2026-06-006</td><td>410.00</td><td>USD</td><td>HDFC-INV-0626-006</td><td><span class="status warn">REJECTED</span></td><td><button class="btn" onclick="openWithdrawalDetail('REQ-000154')">View Details</button></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="newWithdrawalView" style="display:none">
+    <div class="pagehead">
+      <div>
+        <h1>New Withdrawal Request</h1>
+        <p>Select an available statement and submit the required invoice details.</p>
+      </div>
+      <button class="btn" onclick="backToWithdrawalList()">Back to Requests</button>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <div class="panel-head"><h3>Request Details</h3></div>
+        <div class="panel-body">
+          <div class="request-form">
+            <div class="request-field request-wide">
+              <label>Available Statement</label>
+              <select id="withdrawStatement" onchange="updateWithdrawalAmount()">
+                <option value="530">PS-HDFC-2026-08-001 · Aug 2026 · USD 530.00</option>
+                <option value="320">PS-HDFC-2026-07-004 · Jul 2026 · USD 320.00</option>
+              </select>
+            </div>
+
+            <div class="request-field">
+              <label>Available Amount</label>
+              <input id="withdrawAvailable" value="530.00" readonly>
+            </div>
+            <div class="request-field">
+              <label>Currency</label>
+              <input value="USD" readonly>
+            </div>
+
+            <div class="request-field">
+              <label>Requested Amount</label>
+              <input id="withdrawRequested" value="530.00">
+            </div>
+            <div class="request-field" id="withdrawInvoiceNumberField">
+              <label>Invoice Number</label>
+              <input id="withdrawInvoiceNumber" placeholder="Enter invoice number">
+            </div>
+
+            <div class="request-field request-wide" id="withdrawInvoiceDocumentField">
+              <label>Invoice Document</label>
+              <input id="withdrawInvoiceDocument" type="file" accept=".pdf,.jpg,.jpeg,.png">
+            </div>
+
+            <div class="request-field request-wide">
+              <label>Note</label>
+              <textarea placeholder="Optional note"></textarea>
+            </div>
+          </div>
+
+          <div class="action-row">
+            <button class="btn dark" onclick="submitWithdrawalRequest()">Submit Request</button>
+            <button class="btn" onclick="backToWithdrawalList()">Cancel</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="panel-head"><h3>Available Balance</h3></div>
+        <div class="panel-body">
+          <div class="available-box">
+            <span class="muted" style="font-size:10px;text-transform:uppercase;font-weight:800">Available for Withdrawal</span>
+            <div class="amount">$850.00</div>
+            <div class="muted" style="font-size:11px;margin-top:4px">Across released payable statements</div>
+          </div>
+          <div class="metric-row"><span>Selected Statement</span><b>PS-HDFC-2026-08-001</b></div>
+          <div class="metric-row"><span>Statement Amount</span><b>$530.00</b></div>
+          <div class="metric-row"><span>Request Status</span><b>Not Submitted</b></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="withdrawalDetailView" style="display:none">
+    <div class="pagehead">
+      <div>
+        <h1>Withdrawal Request Details</h1>
+        <p id="withdrawDetailSubtitle"></p>
+      </div>
+      <button class="btn" onclick="backToWithdrawalList()">Back to Requests</button>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <div class="panel-head"><h3>Request</h3></div>
+        <div class="panel-body">
+          <div class="request-detail-grid" id="withdrawDetailGrid"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="panel-head"><h3>Status</h3></div>
+        <div class="panel-body">
+          <div class="timeline" id="withdrawTimeline"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card section-gap">
+      <div class="panel-head"><h3>Related Statement</h3></div>
+      <div class="panel-body">
+        <table>
+          <thead><tr><th>Statement ID</th><th>Settlement Period</th><th>Commission</th><th>Currency</th><th>Status</th></tr></thead>
+          <tbody id="withdrawStatementRow"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="payouts" class="page">
+  <div id="paymentsListView">
+    <div class="pagehead">
+      <div>
+        <h1>Payments</h1>
+        <p>View payments made or scheduled against your approved withdrawal requests.</p>
+      </div>
+    </div>
+
+    <div class="payment-kpis">
+      <div class="payment-kpi"><span>Scheduled</span><strong>$530.00</strong></div>
+      <div class="payment-kpi"><span>Processing</span><strong>$0.00</strong></div>
+      <div class="payment-kpi"><span>Paid This Month</span><strong>$640.00</strong></div>
+      <div class="payment-kpi"><span>Total Paid</span><strong>$4,870.00</strong></div>
+    </div>
+
+    <div class="card">
+      <div class="panel-head">
+        <h3>Payment History</h3>
+        <span class="muted">4 payments</span>
+      </div>
+      <div class="panel-body">
+        <div class="filters">
+          <select>
+            <option>All Statuses</option>
+            <option>Scheduled</option>
+            <option>Processing</option>
+            <option>Paid</option>
+            <option>Failed</option>
+          </select>
+          <input placeholder="Search payment ID, request ID or reference">
+        </div>
+
+        <div style="overflow:auto">
+          <table>
+            <thead>
+              <tr>
+                <th>Payment ID</th>
+                <th>Request ID</th>
+                <th>Statement ID</th>
+                <th>Settlement Period</th>
+                <th>Amount</th>
+                <th>Currency</th>
+                <th>Payment Status</th>
+                <th>Payment Date</th>
+                <th>Payment Reference</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>PAY-000181</td><td>REQ-000173</td><td>PS-HDFC-2026-08-001</td><td>Aug 2026</td><td>530.00</td><td>USD</td><td><span class="status info">SCHEDULED</span></td><td>—</td><td>—</td><td><button class="btn" onclick="openPaymentDetail('PAY-000181')">View Details</button></td></tr>
+              <tr><td>PAY-000176</td><td>REQ-000161</td><td>PS-HDFC-2026-07-002</td><td>Jul 2026</td><td>640.00</td><td>USD</td><td><span class="status good">PAID</span></td><td>12 Aug 2026</td><td>UTR-9182041</td><td><button class="btn" onclick="openPaymentDetail('PAY-000176')">View Details</button></td></tr>
+              <tr><td>PAY-000160</td><td>REQ-000149</td><td>PS-HDFC-2026-06-003</td><td>Jun 2026</td><td>590.00</td><td>USD</td><td><span class="status good">PAID</span></td><td>18 Jul 2026</td><td>UTR-9041188</td><td><button class="btn" onclick="openPaymentDetail('PAY-000160')">View Details</button></td></tr>
+              <tr><td>PAY-000143</td><td>REQ-000132</td><td>PS-HDFC-2026-05-005</td><td>May 2026</td><td>720.00</td><td>USD</td><td><span class="status good">PAID</span></td><td>20 Jun 2026</td><td>UTR-8874230</td><td><button class="btn" onclick="openPaymentDetail('PAY-000143')">View Details</button></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="paymentDetailView" style="display:none">
+    <div class="pagehead">
+      <div>
+        <h1>Payment Details</h1>
+        <p id="paymentDetailSubtitle"></p>
+      </div>
+      <button class="btn" onclick="backToPayments()">Back to Payments</button>
+    </div>
+
+    <div class="card">
+      <div class="panel-head"><h3>Payment</h3></div>
+      <div class="panel-body">
+        <div class="payment-detail" id="paymentDetailGrid"></div>
+      </div>
+    </div>
+
+    <div class="grid2 section-gap">
+      <div class="card">
+        <div class="panel-head"><h3>Related Withdrawal Request</h3></div>
+        <div class="panel-body">
+          <div class="metric-row"><span>Request ID</span><b id="paymentRequestId"></b></div>
+          <div class="metric-row"><span>Request Status</span><b id="paymentRequestStatus"></b></div>
+          <div class="metric-row"><span>Invoice Number</span><b id="paymentInvoice"></b></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="panel-head"><h3>Related Statement</h3></div>
+        <div class="panel-body">
+          <div class="metric-row"><span>Statement ID</span><b id="paymentStatementId"></b></div>
+          <div class="metric-row"><span>Settlement Period</span><b id="paymentPeriod"></b></div>
+          <div class="metric-row"><span>Commission</span><b id="paymentStatementAmount"></b></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<section id="profile" class="page">
+  <div class="pagehead">
+    <div>
+      <h1>Profile</h1>
+      <p>Manage your account information, payment details, access, and preferences.</p>
+    </div>
+  </div>
+
+  <div class="profile-tabs">
+    <button class="profile-tab active" data-profile-tab="company" onclick="setProfileTab('company')">Company</button>
+    <button class="profile-tab" data-profile-tab="billing" onclick="setProfileTab('billing')">Billing & Payment</button>
+    <button class="profile-tab" data-profile-tab="commercials" onclick="setProfileTab('commercials')">Commercials</button>
+    <button class="profile-tab" id="profileApiTabButton" data-profile-tab="api" onclick="setProfileTab('api')">API & Integration</button>
+    <button class="profile-tab" data-profile-tab="users" onclick="setProfileTab('users')">Users & Access</button>
+    <button class="profile-tab" data-profile-tab="notifications" onclick="setProfileTab('notifications')">Notifications</button>
+  </div>
+
+  <div id="profileCompanyTab">
+    <div class="card">
+      <div class="panel-head"><h3>Company Details</h3><button class="btn dark" onclick="saveProfile()">Save Changes</button></div>
+      <div class="panel-body">
+        <div class="profile-grid">
+          <div class="profile-field"><label>Company Name</label><input value="HDFC Bank"></div>
+          <div class="profile-field"><label>Legal Name</label><input value="HDFC Bank Limited"></div>
+          <div class="profile-field"><label>Country</label><input value="India"></div>
+          <div class="profile-field"><label>Tax / Registration ID</label><input value="HDFC-TAX-001"></div>
+          <div class="profile-field"><label>Primary Contact Name</label><input value="Rewards Team"></div>
+          <div class="profile-field"><label>Primary Contact Email</label><input value="rewards@hdfc.example"></div>
+          <div class="profile-field"><label>Finance Contact Email</label><input value="finance@hdfc.example"></div>
+          <div class="profile-field"><label>Phone</label><input value="+91 22 0000 0000"></div>
+          <div class="profile-field profile-wide"><label>Registered Address</label><textarea>HDFC Bank Limited, Mumbai, Maharashtra, India</textarea></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="profileBillingTab" style="display:none">
+    <div class="grid2">
+      <div class="card">
+        <div class="panel-head"><h3>Billing Details</h3><button class="btn dark" onclick="saveProfile()">Save Changes</button></div>
+        <div class="panel-body">
+          <div class="profile-grid">
+            <div class="profile-field"><label>Billing Method</label><input class="readonly" value="Invoice Required" readonly></div>
+            <div class="profile-field"><label>Billing Currency</label><input class="readonly" value="USD" readonly></div>
+            <div class="profile-field"><label>Billing Contact</label><input value="finance@hdfc.example"></div>
+            <div class="profile-field"><label>Tax ID</label><input value="HDFC-TAX-001"></div>
+            <div class="profile-field profile-wide"><label>Billing Address</label><textarea>HDFC Bank Limited, Mumbai, Maharashtra, India</textarea></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="panel-head"><h3>Payment Details</h3><button class="btn dark" onclick="saveProfile()">Save Changes</button></div>
+        <div class="panel-body">
+          <div class="profile-grid">
+            <div class="profile-field"><label>Payment Method</label><select><option>Bank Transfer</option></select></div>
+            <div class="profile-field"><label>Account Holder Name</label><input value="HDFC Bank Limited"></div>
+            <div class="profile-field"><label>Bank Name</label><input value="HDFC Bank"></div>
+            <div class="profile-field"><label>Account Number</label><input value="XXXXXX7812"></div>
+            <div class="profile-field"><label>SWIFT / IFSC</label><input value="HDFC0000123"></div>
+            <div class="profile-field"><label>Bank Country</label><input value="India"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="profileCommercialsTab" style="display:none">
+    <div class="card">
+      <div class="panel-head"><h3>Commercial Summary</h3><span class="muted">Read-only</span></div>
+      <div class="panel-body">
+        <div class="profile-grid">
+          <div class="profile-field"><label>Settlement Currency</label><input class="readonly" value="USD" readonly></div>
+          <div class="profile-field"><label>Minimum Withdrawal</label><input class="readonly" value="USD 100.00" readonly></div>
+          <div class="profile-field"><label>Billing Method</label><input class="readonly" value="Invoice Required" readonly></div>
+          <div class="profile-field"><label>Settlement Frequency</label><input class="readonly" value="Monthly" readonly></div>
+          <div class="profile-field"><label>Campaign Commission</label><input class="readonly" value="Varies by campaign" readonly></div>
+          <div class="profile-field"><label>Account Status</label><input class="readonly" value="Active" readonly></div>
+        </div>
+        <div class="muted" style="font-size:11px;margin-top:12px">Commercial terms are managed by MBO Rewards and reflected in each campaign and payable statement.</div>
+      </div>
+    </div>
+  </div>
+
+
+  <div id="profileApiTab" style="display:none">
+    <div class="card">
+      <div class="panel-head">
+        <div>
+          <h3>API & Integration</h3>
+          <div class="muted" style="font-size:11px;margin-top:3px">Credentials and integration settings for your MBO Rewards account.</div>
+        </div>
+        <span class="status good">ACTIVE</span>
+      </div>
+      <div class="panel-body">
+        <div class="api-grid">
+          <div class="api-box"><span>Delivery Method</span><b>API + Portal</b></div>
+          <div class="api-box"><span>Client ID</span><b>MBO-CLI-HDFC-001</b></div>
+          <div class="api-box"><span>Authentication</span><b>API Key</b></div>
+          <div class="api-box"><span>Active Campaigns</span><b>18</b></div>
+          <div class="api-box"><span>API Status</span><b style="color:#087a55">ACTIVE</b></div>
+          <div class="api-box"><span>Last API Activity</span><b>16 Aug 2026 · 22:48</b></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card section-gap">
+      <div class="panel-head"><h3>Credentials</h3></div>
+      <div class="panel-body">
+        <div class="api-env-tabs">
+          <button class="api-env-tab active" data-api-env="production" onclick="setApiEnvironment('production')">Production</button>
+          <button class="api-env-tab" data-api-env="sandbox" onclick="setApiEnvironment('sandbox')">Sandbox</button>
+        </div>
+
+        <div id="apiProductionEnv">
+          <div class="api-grid">
+            <div class="api-box"><span>Environment</span><b>Production</b></div>
+            <div class="api-box"><span>Base URL</span><b>https://api.mbo-rewards.com/v1</b></div>
+          </div>
+          <div class="api-box" style="margin-top:12px">
+            <span>API Key</span>
+            <div class="api-secret">
+              <code id="productionApiKey">••••••••••••••••8F4K</code>
+              <button class="btn" onclick="copyMaskedKey('production')">Copy</button>
+              <button class="btn" onclick="regenerateApiKey('production')">Regenerate</button>
+            </div>
+            <div class="api-note">For security, the full API key is shown only when first generated or regenerated. Store it securely.</div>
+          </div>
+        </div>
+
+        <div id="apiSandboxEnv" style="display:none">
+          <div class="api-grid">
+            <div class="api-box"><span>Environment</span><b>Sandbox</b></div>
+            <div class="api-box"><span>Base URL</span><b>https://sandbox-api.mbo-rewards.com/v1</b></div>
+          </div>
+          <div class="api-box" style="margin-top:12px">
+            <span>API Key</span>
+            <div class="api-secret">
+              <code id="sandboxApiKey">••••••••••••••••2S7Q</code>
+              <button class="btn" onclick="copyMaskedKey('sandbox')">Copy</button>
+              <button class="btn" onclick="regenerateApiKey('sandbox')">Regenerate</button>
+            </div>
+            <div class="api-note">Sandbox credentials are separate from Production credentials and should only be used for testing.</div>
+          </div>
+        </div>
+
+        <div class="api-actions">
+          <button class="btn">View API Documentation</button>
+          <button class="btn">Download Integration Guide</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-gap">
+      <div class="card">
+        <div class="panel-head"><h3>Security & Access</h3></div>
+        <div class="panel-body">
+          <div class="api-list-row"><span>IP Allowlist</span><b>2 IPs configured</b></div>
+          <div class="api-list-row"><span>Key Created</span><b>01 Aug 2026</b></div>
+          <div class="api-list-row"><span>Last Regenerated</span><b>01 Aug 2026</b></div>
+          <div class="api-list-row"><span>Last Successful Request</span><b>16 Aug 2026 · 22:48</b></div>
+          <div class="api-list-row"><span>Last Failed Request</span><b>16 Aug 2026 · 18:12</b></div>
+          <div class="api-actions"><button class="btn">Manage IP Allowlist</button></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="profileUsersTab" style="display:none">
+    <div class="card">
+      <div class="panel-head"><h3>Users & Access</h3><button class="btn dark" onclick="addPortalUser()">Add User</button></div>
+      <div class="panel-body">
+        <div class="user-row" style="font-size:9px;text-transform:uppercase;font-weight:800;color:#667085">
+          <div>Name</div><div>Email</div><div>Role</div><div>Status</div><div>Action</div>
+        </div>
+        <div id="portalUsers">
+          <div class="user-row"><div><b>Rewards Admin</b></div><div>rewards@hdfc.example</div><div>Admin</div><div><span class="status good">ACTIVE</span></div><div><button class="btn">Edit</button></div></div>
+          <div class="user-row"><div><b>Finance User</b></div><div>finance@hdfc.example</div><div>Finance</div><div><span class="status good">ACTIVE</span></div><div><button class="btn">Edit</button></div></div>
+          <div class="user-row"><div><b>Reporting User</b></div><div>reports@hdfc.example</div><div>Viewer</div><div><span class="status good">ACTIVE</span></div><div><button class="btn">Edit</button></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="profileNotificationsTab" style="display:none">
+    <div class="card">
+      <div class="panel-head"><h3>Notification Preferences</h3><button class="btn dark" onclick="saveProfile()">Save Preferences</button></div>
+      <div class="panel-body">
+        <div class="pref-row"><div><b>New Campaigns</b><div class="muted" style="font-size:11px;margin-top:3px">Notify me when a new campaign becomes available.</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+        <div class="pref-row"><div><b>Campaign Expiry</b><div class="muted" style="font-size:11px;margin-top:3px">Notify me before an active campaign expires.</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+        <div class="pref-row"><div><b>Payable Statement Released</b><div class="muted" style="font-size:11px;margin-top:3px">Notify me when commission becomes available for withdrawal.</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+        <div class="pref-row"><div><b>Withdrawal Request Updates</b><div class="muted" style="font-size:11px;margin-top:3px">Notify me when a request is approved, rejected, or updated.</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+        <div class="pref-row"><div><b>Payment Updates</b><div class="muted" style="font-size:11px;margin-top:3px">Notify me when a payment is scheduled, processing, or paid.</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+</div>
+  </main>
+</div>
+
+<div id="campaignModal" class="modal-bg" onclick="if(event.target===this)closeCampaignModal()">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <h3 id="campaignModalTitle">Campaign Details</h3>
+        <div class="muted" id="campaignModalBrand" style="margin-top:4px;font-size:12px"></div>
+      </div>
+      <button class="btn" onclick="closeCampaignModal()">Close</button>
+    </div>
+    <div class="modal-body" id="campaignModalBody"></div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeCampaignModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const campaigns=[
+ {id:'CMP-001',brand:'Nike',campaign:'Nike Online Store',type:'Affiliate Link',offer:'Up to 30% Off',commission:'5%',coupon:'—',country:'India',validFrom:'01 Aug 2026',expiry:'31 Aug 2026',status:'LIVE',link:'https://mbor.io/hdfc/nike',terms:'Offer valid on eligible products. Exclusions and product-level restrictions may apply.'},
+ {id:'CMP-002',brand:'Adidas',campaign:'Adidas UAE',type:'Coupon',offer:'20% Off',commission:'4%',coupon:'RUN20',country:'UAE',validFrom:'05 Aug 2026',expiry:'30 Sep 2026',status:'LIVE',link:'https://mbor.io/hdfc/adidas',terms:'Use the listed coupon code at checkout. Offer subject to brand terms and eligible products.'},
+ {id:'CMP-003',brand:'Myntra',campaign:'Myntra Fashion Sale',type:'Coupon',offer:'₹500 Off',commission:'5%',coupon:'HDFC30',country:'India',validFrom:'10 Aug 2026',expiry:'31 Aug 2026',status:'NEW',link:'https://mbor.io/hdfc/myntra',terms:'Minimum order and category conditions may apply. See merchant checkout for final eligibility.'},
+ {id:'CMP-004',brand:'Ajio',campaign:'Ajio Fashion',type:'Affiliate Link',offer:'Up to 40% Off',commission:'5%',coupon:'—',country:'India',validFrom:'01 Aug 2026',expiry:'15 Sep 2026',status:'LIVE',link:'https://mbor.io/hdfc/ajio',terms:'Discount varies by eligible product. Standard merchant exclusions apply.'},
+ {id:'CMP-005',brand:'Puma',campaign:'Puma End of Season',type:'Coupon',offer:'25% Off',commission:'4.5%',coupon:'PUMA25',country:'India',validFrom:'15 Aug 2026',expiry:'25 Aug 2026',status:'EXPIRING',link:'https://mbor.io/hdfc/puma',terms:'Valid through the campaign expiry date while stock lasts.'},
+ {id:'CMP-006',brand:'Noon',campaign:'Noon UAE',type:'Affiliate Link',offer:'No Special Offer',commission:'3%',coupon:'—',country:'UAE',validFrom:'01 Aug 2026',expiry:'31 Dec 2026',status:'LIVE',link:'https://mbor.io/hdfc/noon',terms:'Standard merchant pricing applies. Client commission is earned on eligible tracked orders.'}
+];
+
+
+function setCampaignTab(tab){
+ const ids={all:'campaignAllTab',affiliate:'campaignAffiliateTab',coupon:'campaignCouponTab'};
+ Object.values(ids).forEach(id=>{const el=document.getElementById(id);if(el)el.style.display='none';});
+ const active=document.getElementById(ids[tab]); if(active)active.style.display='block';
+ document.querySelectorAll('.campaign-tab').forEach(b=>b.classList.toggle('active',b.dataset.campaignTab===tab));
+}
+
+function renderCampaigns(){
+ const q=(document.getElementById('campaignSearch')?.value||'').toLowerCase();
+ const status=document.getElementById('campaignStatus')?.value||'';
+ const type=document.getElementById('campaignType')?.value||'';
+ const country=document.getElementById('campaignCountry')?.value||'';
+ const filtered=campaigns.filter(c=>
+   (!q||(c.brand+' '+c.campaign).toLowerCase().includes(q)) &&
+   (!status||c.status===status) &&
+   (!type||c.type===type) &&
+   (!country||c.country===country)
+ );
+ document.getElementById('campaignCount').textContent=`${filtered.length} campaigns`;
+ document.getElementById('campaignRows').innerHTML=filtered.map(c=>`
+  <tr>
+   <td><div class="brand-cell"><div class="brand-badge">${c.brand.slice(0,2).toUpperCase()}</div><b>${c.brand}</b></div></td>
+   <td><b>${c.campaign}</b><div class="muted" style="font-size:10px;margin-top:2px">${c.id}</div></td>
+   <td>${c.type}</td>
+   <td class="offer">${c.offer}</td>
+   <td><b>${c.commission}</b></td>
+   <td>${c.coupon}</td>
+   <td>${c.country}</td>
+   <td>${c.expiry}</td>
+   <td><span class="status ${c.status==='LIVE'?'good':c.status==='NEW'?'info':'warn'}">${c.status}</span></td>
+   <td><button class="btn" onclick="openCampaign('${c.id}')">View Details</button></td>
+  </tr>`).join('');
+}
+
+function openCampaign(id){
+ const c=campaigns.find(x=>x.id===id);
+ document.getElementById('campaignModalTitle').textContent=c.campaign;
+ document.getElementById('campaignModalBrand').textContent=c.brand;
+ document.getElementById('campaignModalBody').innerHTML=`
+   <div class="detail-grid">
+    <div class="detail-item"><span>Campaign ID</span><b>${c.id}</b></div>
+    <div class="detail-item"><span>Status</span><b>${c.status}</b></div>
+    <div class="detail-item"><span>Campaign Type</span><b>${c.type}</b></div>
+    <div class="detail-item"><span>Customer Offer</span><b>${c.offer}</b></div>
+    <div class="detail-item"><span>Commission</span><b>${c.commission}</b></div>
+    <div class="detail-item"><span>Coupon Code</span><b>${c.coupon}</b></div>
+    <div class="detail-item"><span>Country</span><b>${c.country}</b></div>
+    <div class="detail-item"><span>Valid From</span><b>${c.validFrom}</b></div>
+    <div class="detail-item"><span>Expiry</span><b>${c.expiry}</b></div>
+    <div class="detail-item detail-wide">
+      <span>MBO Tracking Link</span>
+      <div style="display:flex;gap:8px;align-items:center">
+        <b class="linkbox" id="link-${c.id}">${c.link}</b>
+        <button class="copy-btn" onclick="copyTrackingLink('${c.link}')">Copy Link</button>
+      </div>
+    </div>
+    <div class="detail-item detail-wide"><span>Terms & Conditions</span><div style="font-size:12px;line-height:1.5">${c.terms}</div></div>
+   </div>`;
+ document.getElementById('campaignModal').classList.add('open');
+}
+function closeCampaignModal(){document.getElementById('campaignModal').classList.remove('open');}
+function copyTrackingLink(link){
+ navigator.clipboard?.writeText(link);
+ alert('Tracking link copied.');
+}
+document.querySelectorAll('.nav a[data-page]').forEach(a=>{
+ a.addEventListener('click',e=>{
+  e.preventDefault();
+  const id=a.dataset.page;
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.getElementById(id)?.classList.add('active');
+  document.querySelectorAll('.nav a[data-page]').forEach(x=>x.classList.remove('active'));
+  a.classList.add('active');
+  const name=a.textContent.trim();
+  document.querySelector('.crumb').innerHTML=`MBO Rewards Client Portal / <b>${name}</b>`;
+  if(id==='campaigns')renderCampaigns();
+  window.scrollTo(0,0);
+ });
+});
+renderCampaigns();
+
+const performanceOrders=[
+ {date:'01 Aug 2026',confirmed:'04 Aug 2026',brand:'Nike',campaign:'Nike Online Store',type:'Affiliate Link',coupon:'—',link:'mbor.io/hdfc/nike',value:'129.00',currency:'USD',status:'CONFIRMED',commission:'6.45',updatedDate:'16 Aug 2026',updatedTime:'18:40'},
+ {date:'02 Aug 2026',confirmed:'—',brand:'Nike',campaign:'Nike Online Store',type:'Affiliate Link',coupon:'—',link:'mbor.io/hdfc/nike',value:'84.00',currency:'USD',status:'PENDING',commission:'4.20',updatedDate:'16 Aug 2026',updatedTime:'18:42'},
+ {date:'03 Aug 2026',confirmed:'06 Aug 2026',brand:'Adidas',campaign:'Adidas UAE',type:'Coupon',coupon:'RUN20',link:'mbor.io/hdfc/adidas',value:'142.00',currency:'USD',status:'CONFIRMED',commission:'5.68',updatedDate:'16 Aug 2026',updatedTime:'18:45'},
+ {date:'05 Aug 2026',confirmed:'08 Aug 2026',brand:'Myntra',campaign:'Myntra Fashion Sale',type:'Coupon',coupon:'HDFC30',link:'mbor.io/hdfc/myntra',value:'96.00',currency:'USD',status:'CONFIRMED',commission:'4.80',updatedDate:'16 Aug 2026',updatedTime:'18:48'},
+ {date:'07 Aug 2026',confirmed:'—',brand:'Ajio',campaign:'Ajio Fashion',type:'Affiliate Link',coupon:'—',link:'mbor.io/hdfc/ajio',value:'73.00',currency:'USD',status:'REJECTED',commission:'0.00',updatedDate:'16 Aug 2026',updatedTime:'18:50'},
+ {date:'10 Aug 2026',confirmed:'13 Aug 2026',brand:'Ajio',campaign:'Ajio Fashion',type:'Affiliate Link',coupon:'—',link:'mbor.io/hdfc/ajio',value:'118.00',currency:'USD',status:'CONFIRMED',commission:'5.90',updatedDate:'16 Aug 2026',updatedTime:'18:55'}
+];
+
+function renderPerformanceOrders(brand=''){
+ const rows=performanceOrders.filter(o=>!brand||o.brand===brand);
+ document.getElementById('perfOrderContext').textContent=brand?`${brand} orders`:'All campaigns';
+ document.getElementById('perfOrderRows').innerHTML=rows.map(o=>`
+  <tr>
+   <td>${o.date}</td><td>${o.confirmed}</td><td>${o.brand}</td><td>${o.campaign}</td><td>${o.type}</td>
+   <td>${o.coupon}</td><td class="linkbox">${o.link}</td><td>${o.value}</td><td>${o.currency}</td>
+   <td><span class="order-status ${o.status.toLowerCase()}">${o.status}</span></td><td>${o.commission}</td>
+   <td>${o.updatedDate}</td><td>${o.updatedTime}</td>
+  </tr>`).join('');
+}
+function setPerformanceTab(tab){
+ document.getElementById('perfOverviewTab').style.display=tab==='overview'?'block':'none';
+ document.getElementById('perfOrdersTab').style.display=tab==='orders'?'block':'none';
+ document.querySelectorAll('.perf-tab').forEach(b=>b.classList.toggle('active',b.dataset.perfTab===tab));
+ if(tab==='orders')renderPerformanceOrders('');
+}
+renderPerformanceOrders();
+
+
+const clientStatements={
+ 'PS-HDFC-2026-08-001':{date:'16 Aug 2026',period:'Aug 2026',currency:'USD',orders:5,orderValue:2480,commission:530,status:'AVAILABLE FOR WITHDRAWAL'},
+ 'PS-HDFC-2026-07-004':{date:'31 Jul 2026',period:'Jul 2026',currency:'USD',orders:8,orderValue:4120,commission:320,status:'REQUESTED'},
+ 'PS-HDFC-2026-07-002':{date:'18 Jul 2026',period:'Jul 2026',currency:'USD',orders:11,orderValue:6890,commission:640,status:'PAID'},
+ 'PS-HDFC-2026-06-006':{date:'30 Jun 2026',period:'Jun 2026',currency:'USD',orders:6,orderValue:3940,commission:410,status:'PAID'}
+};
+
+function openClientStatement(id){
+ const s=clientStatements[id];
+ const sampleRows=[
+  ['01 Aug 2026','03 Aug 2026','Nike','Nike Online Store','Affiliate Link','—','mbor.io/hdfc/nike','480.00','24.00'],
+  ['03 Aug 2026','05 Aug 2026','Adidas','Adidas UAE','Coupon','RUN20','mbor.io/hdfc/adidas','510.00','25.50'],
+  ['07 Aug 2026','09 Aug 2026','Ajio','Ajio Fashion','Affiliate Link','—','mbor.io/hdfc/ajio','390.00','19.50'],
+  ['10 Aug 2026','12 Aug 2026','Myntra','Myntra Fashion Sale','Coupon','HDFC30','mbor.io/hdfc/myntra','640.00','32.00'],
+  ['12 Aug 2026','14 Aug 2026','Puma','Puma End of Season','Coupon','PUMA25','mbor.io/hdfc/puma','460.00','23.00']
+ ];
+ const rows=sampleRows.slice(0,Math.min(s.orders,5)).map(r=>`
+  <tr>
+   <td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td>${r[3]}</td><td>${r[4]}</td>
+   <td>${r[5]}</td><td class="linkbox">${r[6]}</td><td>${r[7]}</td><td>${s.currency}</td><td>${r[8]}</td>
+  </tr>`).join('');
+
+ document.getElementById('clientStatementDocument').innerHTML=`
+ <article class="statement-doc">
+   <div class="statement-doc-head">
+     <div>
+       <div class="statement-brand">
+         <strong>MBO Rewards</strong>
+         <small>Marketing Blue Ocean · Rewards & Affiliate Operations</small>
+       </div>
+       <div class="statement-meta">
+         <div class="statement-meta-box"><span>Statement ID</span><b>${id}</b></div>
+         <div class="statement-meta-box"><span>Statement Date</span><b>${s.date}</b></div>
+         <div class="statement-meta-box"><span>Settlement Period</span><b>${s.period}</b></div>
+         <div class="statement-meta-box"><span>Currency</span><b>${s.currency}</b></div>
+       </div>
+     </div>
+     <div class="statement-title">
+       <h2>PAYABLE STATEMENT</h2>
+       <div class="status ${s.status==='REQUESTED'?'info':'good'}" style="margin-top:8px">${s.status}</div>
+     </div>
+   </div>
+
+   <div class="statement-parties">
+     <div class="statement-party">
+       <h4>Issued By</h4>
+       <b>MBO Rewards</b>
+       <div>Marketing Blue Ocean</div>
+       <div>Rewards & Affiliate Operations</div>
+       <div>finance@mborewards.example</div>
+       <div>Company / Tax ID: MBO-REG-001</div>
+     </div>
+     <div class="statement-party">
+       <h4>Account</h4>
+       <b>HDFC Bank</b>
+       <div>HDFC Bank Limited</div>
+       <div>India</div>
+       <div>finance@hdfc.example</div>
+     </div>
+   </div>
+
+   <div class="statement-summary">
+     <div><span>Payable Orders</span><b>${s.orders}</b></div>
+     <div><span>Gross Order Value</span><b>${s.currency} ${s.orderValue.toFixed(2)}</b></div>
+     <div><span>Commission</span><b>${s.currency} ${s.commission.toFixed(2)}</b></div>
+     <div><span>${s.status==='PAID'?'Paid Amount':'Available for Withdrawal'}</span><b>${s.currency} ${s.commission.toFixed(2)}</b></div>
+   </div>
+
+   <div style="padding:14px 24px 8px;font-weight:800;font-size:13px">Payable Orders</div>
+   <div class="statement-table-wrap">
+     <table>
+       <thead>
+        <tr><th>Order Date</th><th>Order Confirmed Date</th><th>Brand</th><th>Campaign</th><th>Campaign Type</th><th>Coupon Code</th><th>Tracking Link</th><th>Order Value</th><th>Currency</th><th>Commission</th></tr>
+       </thead>
+       <tbody>${rows}</tbody>
+     </table>
+   </div>
+
+   <div class="statement-note">
+     ${s.status==='AVAILABLE FOR WITHDRAWAL'?'This amount is available for withdrawal. You may raise a withdrawal request from your account.':
+       s.status==='REQUESTED'?'A withdrawal request has already been submitted for this statement.':
+       'This statement has been paid.'}
+   </div>
+   <div class="statement-footer">This statement confirms payable commission released to your account.</div>
+ </article>`;
+
+ document.querySelector('#statements > .card').style.display='none';
+ document.querySelector('#statements > .statement-filters').style.display='none';
+ document.getElementById('clientStatementView').style.display='block';
+ window.scrollTo(0,0);
+}
+function closeClientStatement(){
+ document.querySelector('#statements > .card').style.display='block';
+ document.querySelector('#statements > .statement-filters').style.display='flex';
+ document.getElementById('clientStatementView').style.display='none';
+ window.scrollTo(0,0);
+}
+
+
+const withdrawalRequests={
+ 'REQ-000173':{date:'18 Aug 2026',period:'Aug 2026',statement:'PS-HDFC-2026-08-001',amount:'530.00',currency:'USD',invoice:'HDFC-INV-0826-001',document:'invoice_aug_2026.pdf',status:'APPROVED',note:'Approved and ready for payment.'},
+ 'REQ-000169':{date:'02 Aug 2026',period:'Jul 2026',statement:'PS-HDFC-2026-07-004',amount:'320.00',currency:'USD',invoice:'HDFC-INV-0726-004',document:'invoice_jul_2026.pdf',status:'UNDER REVIEW',note:'Finance review in progress.'},
+ 'REQ-000161':{date:'20 Jul 2026',period:'Jul 2026',statement:'PS-HDFC-2026-07-002',amount:'640.00',currency:'USD',invoice:'HDFC-INV-0726-002',document:'invoice_jul_02.pdf',status:'PAID',note:'Payment completed.'},
+ 'REQ-000154':{date:'04 Jul 2026',period:'Jun 2026',statement:'PS-HDFC-2026-06-006',amount:'410.00',currency:'USD',invoice:'HDFC-INV-0626-006',document:'invoice_jun_2026.pdf',status:'REJECTED',note:'Invoice number did not match the uploaded document. Please submit a corrected request.'}
+};
+
+function openNewWithdrawal(){
+ document.getElementById('withdrawalListView').style.display='none';
+ document.getElementById('withdrawalDetailView').style.display='none';
+ document.getElementById('newWithdrawalView').style.display='block';
+ window.scrollTo(0,0);
+}
+function backToWithdrawalList(){
+ document.getElementById('withdrawalListView').style.display='block';
+ document.getElementById('withdrawalDetailView').style.display='none';
+ document.getElementById('newWithdrawalView').style.display='none';
+ window.scrollTo(0,0);
+}
+function updateWithdrawalAmount(){
+ const val=document.getElementById('withdrawStatement').value;
+ document.getElementById('withdrawAvailable').value=Number(val).toFixed(2);
+ document.getElementById('withdrawRequested').value=Number(val).toFixed(2);
+}
+function submitWithdrawalRequest(){
+ const requested=Number(document.getElementById('withdrawRequested').value||0);
+ const available=Number(document.getElementById('withdrawAvailable').value||0);
+ if(requested<=0 || requested>available){alert('Requested amount must be within the available statement amount.');return;}
+ if(clientBillingMethod==='Invoice Required'){
+   const invoice=(document.getElementById('withdrawInvoiceNumber')?.value||'').trim();
+   const file=document.getElementById('withdrawInvoiceDocument')?.files?.[0];
+   if(!invoice){alert('Invoice Number is required for this account.');return;}
+   if(!file){alert('Invoice Document is required for this account.');return;}
+ }
+ alert('Withdrawal request submitted. Status: Requested.');
+ backToWithdrawalList();
+}
+function statusClassClient(s){
+ if(['APPROVED','PAID'].includes(s))return 'good';
+ if(['UNDER REVIEW','REQUESTED','PROCESSING'].includes(s))return 'info';
+ return 'warn';
+}
+function openWithdrawalDetail(id){
+ const r=withdrawalRequests[id];
+ document.getElementById('withdrawalListView').style.display='none';
+ document.getElementById('newWithdrawalView').style.display='none';
+ document.getElementById('withdrawalDetailView').style.display='block';
+ document.getElementById('withdrawDetailSubtitle').textContent=`${id} · ${r.status}`;
+
+ document.getElementById('withdrawDetailGrid').innerHTML=`
+  <div class="detail-item"><span>Request ID</span><b>${id}</b></div>
+  <div class="detail-item"><span>Request Date</span><b>${r.date}</b></div>
+  <div class="detail-item"><span>Settlement Period</span><b>${r.period}</b></div>
+  <div class="detail-item"><span>Status</span><b>${r.status}</b></div>
+  <div class="detail-item"><span>Requested Amount</span><b>${r.amount}</b></div>
+  <div class="detail-item"><span>Currency</span><b>${r.currency}</b></div>
+  <div class="detail-item"><span>Invoice Number</span><b>${r.invoice}</b></div>
+  <div class="detail-item"><span>Invoice Document</span><b>${r.document}</b></div>
+  <div class="detail-item request-wide"><span>Latest Update</span><div style="font-size:12px">${r.note}</div></div>`;
+
+ const steps=[
+  ['Request Submitted',r.date],
+  ['Under Review',r.status==='REJECTED'?'Review completed':r.status==='UNDER REVIEW'?'In progress':'Completed'],
+  [r.status==='REJECTED'?'Rejected':'Approved',r.status==='REJECTED'?r.note:['APPROVED','PAID'].includes(r.status)?'Request approved':'Pending'],
+  ['Payment',r.status==='PAID'?'Paid':'Not paid yet']
+ ];
+ document.getElementById('withdrawTimeline').innerHTML=steps.map(s=>`<div class="timeline-item"><b>${s[0]}</b><small>${s[1]}</small></div>`).join('');
+
+ document.getElementById('withdrawStatementRow').innerHTML=`
+  <tr><td>${r.statement}</td><td>${r.period}</td><td>${r.amount}</td><td>${r.currency}</td><td><span class="status ${statusClassClient(r.status)}">${r.status}</span></td></tr>`;
+ window.scrollTo(0,0);
+}
+
+
+const clientPayments={
+ 'PAY-000181':{request:'REQ-000173',statement:'PS-HDFC-2026-08-001',period:'Aug 2026',amount:'530.00',currency:'USD',status:'SCHEDULED',date:'—',time:'—',reference:'—',method:'Bank Transfer',invoice:'HDFC-INV-0826-001'},
+ 'PAY-000176':{request:'REQ-000161',statement:'PS-HDFC-2026-07-002',period:'Jul 2026',amount:'640.00',currency:'USD',status:'PAID',date:'12 Aug 2026',time:'14:22',reference:'UTR-9182041',method:'Bank Transfer',invoice:'HDFC-INV-0726-002'},
+ 'PAY-000160':{request:'REQ-000149',statement:'PS-HDFC-2026-06-003',period:'Jun 2026',amount:'590.00',currency:'USD',status:'PAID',date:'18 Jul 2026',time:'11:05',reference:'UTR-9041188',method:'Bank Transfer',invoice:'HDFC-INV-0626-003'},
+ 'PAY-000143':{request:'REQ-000132',statement:'PS-HDFC-2026-05-005',period:'May 2026',amount:'720.00',currency:'USD',status:'PAID',date:'20 Jun 2026',time:'16:40',reference:'UTR-8874230',method:'Bank Transfer',invoice:'HDFC-INV-0526-005'}
+};
+
+function openPaymentDetail(id){
+ const p=clientPayments[id];
+ document.getElementById('paymentsListView').style.display='none';
+ document.getElementById('paymentDetailView').style.display='block';
+ document.getElementById('paymentDetailSubtitle').textContent=`${id} · ${p.status}`;
+
+ document.getElementById('paymentDetailGrid').innerHTML=`
+  <div class="detail-item"><span>Payment ID</span><b>${id}</b></div>
+  <div class="detail-item"><span>Amount</span><b>${p.amount}</b></div>
+  <div class="detail-item"><span>Currency</span><b>${p.currency}</b></div>
+  <div class="detail-item"><span>Payment Status</span><b>${p.status}</b></div>
+  <div class="detail-item"><span>Payment Date</span><b>${p.date}</b></div>
+  <div class="detail-item"><span>Payment Time</span><b>${p.time}</b></div>
+  <div class="detail-item"><span>Payment Reference</span><b>${p.reference}</b></div>
+  <div class="detail-item"><span>Payment Method</span><b>${p.method}</b></div>`;
+
+ document.getElementById('paymentRequestId').textContent=p.request;
+ document.getElementById('paymentRequestStatus').textContent=p.status==='SCHEDULED'?'APPROVED':'PAID';
+ document.getElementById('paymentInvoice').textContent=p.invoice;
+ document.getElementById('paymentStatementId').textContent=p.statement;
+ document.getElementById('paymentPeriod').textContent=p.period;
+ document.getElementById('paymentStatementAmount').textContent=`${p.currency} ${p.amount}`;
+ window.scrollTo(0,0);
+}
+function backToPayments(){
+ document.getElementById('paymentsListView').style.display='block';
+ document.getElementById('paymentDetailView').style.display='none';
+ window.scrollTo(0,0);
+}
+
+
+
+function setApiEnvironment(env){
+ document.getElementById('apiProductionEnv').style.display=env==='production'?'block':'none';
+ document.getElementById('apiSandboxEnv').style.display=env==='sandbox'?'block':'none';
+ document.querySelectorAll('.api-env-tab').forEach(b=>b.classList.toggle('active',b.dataset.apiEnv===env));
+}
+function copyMaskedKey(env){
+ alert('For security, an existing full API key cannot be revealed again. Regenerate the key if you no longer have the original secret.');
+}
+function regenerateApiKey(env){
+ const ok=confirm(`Regenerate the ${env} API key? The previous key will stop working.`);
+ if(!ok)return;
+ const secret='mbo_'+env+'_sk_'+Math.random().toString(36).slice(2,18)+Date.now().toString(36);
+ const id=env==='production'?'productionApiKey':'sandboxApiKey';
+ const el=document.getElementById(id);
+ if(el)el.textContent=secret;
+ alert('New API key generated. Copy and store it now; after leaving this page it will be masked again.');
+}
+
+function setProfileTab(tab){
+ const ids={company:'profileCompanyTab',billing:'profileBillingTab',commercials:'profileCommercialsTab',api:'profileApiTab',users:'profileUsersTab',notifications:'profileNotificationsTab'};
+ Object.values(ids).forEach(id=>{const el=document.getElementById(id);if(el)el.style.display='none';});
+ const el=document.getElementById(ids[tab]); if(el)el.style.display='block';
+ document.querySelectorAll('.profile-tab').forEach(b=>b.classList.toggle('active',b.dataset.profileTab===tab));
+}
+function saveProfile(){alert('Profile changes saved in prototype.');}
+function addPortalUser(){
+ const name=prompt('User name:','New User'); if(!name)return;
+ const email=prompt('Email:','user@hdfc.example'); if(!email)return;
+ const box=document.getElementById('portalUsers');
+ box.insertAdjacentHTML('beforeend',`<div class="user-row"><div><b>${name}</b></div><div>${email}</div><div>Viewer</div><div><span class="status good">ACTIVE</span></div><div><button class="btn">Edit</button></div></div>`);
+}
+
+
+const notificationsData=[
+ {id:1,type:'Statement',title:'Payable Statement Released',text:'USD 530.00 is now available for withdrawal.',date:'16 Aug 2026',time:'18:40',read:false,target:'statements'},
+ {id:2,type:'Campaign',title:'New Campaign Available',text:'Myntra Fashion Sale is now available.',date:'16 Aug 2026',time:'15:10',read:false,target:'campaigns'},
+ {id:3,type:'Withdrawal',title:'Withdrawal Request Approved',text:'REQ-000173 for USD 530.00 has been approved.',date:'16 Aug 2026',time:'14:25',read:false,target:'withdrawals'},
+ {id:4,type:'Payment',title:'Payment Scheduled',text:'PAY-000181 for USD 530.00 has been scheduled.',date:'16 Aug 2026',time:'13:05',read:false,target:'payouts'},
+ {id:5,type:'Campaign',title:'Campaign Expiring Soon',text:'Puma End of Season expires on 25 Aug 2026.',date:'15 Aug 2026',time:'11:30',read:true,target:'campaigns'},
+ {id:6,type:'Payment',title:'Payment Completed',text:'PAY-000176 for USD 640.00 was completed.',date:'12 Aug 2026',time:'14:22',read:true,target:'payouts'}
+];
+
+function renderNotificationMenu(){
+ const list=document.getElementById('notifMenuList');
+ if(!list)return;
+ list.innerHTML=notificationsData.map(n=>`
+  <div class="notif-menu-item ${n.read?'read':''}" onclick="openNotification(${n.id})">
+    <div class="notif-menu-dot"></div>
+    <div>
+      <div class="notif-menu-title">${n.title}</div>
+      <div class="notif-menu-text">${n.text}</div>
+      <div class="notif-menu-time">${n.date} · ${n.time}</div>
+    </div>
+  </div>`).join('');
+ const unread=notificationsData.filter(n=>!n.read).length;
+ const badge=document.getElementById('notifBadge');
+ if(badge){
+   badge.textContent=unread;
+   badge.style.display=unread?'flex':'none';
+ }
+}
+function toggleNotificationMenu(e){
+ e.stopPropagation();
+ document.getElementById('notifMenu')?.classList.toggle('open');
+}
+function markAllNotificationsRead(){
+ notificationsData.forEach(n=>n.read=true);
+ renderNotificationMenu();
+applyWithdrawalBillingMethod();
+}
+function openNotification(id){
+ const n=notificationsData.find(x=>x.id===id);
+ if(!n)return;
+ n.read=true;
+ renderNotificationMenu();
+ document.getElementById('notifMenu')?.classList.remove('open');
+ const nav=document.querySelector(`.nav a[data-page="${n.target}"]`);
+ if(nav)nav.click();
+}
+document.addEventListener('click',()=>document.getElementById('notifMenu')?.classList.remove('open'));
+renderNotificationMenu();
+
+
+
+const clientBillingMethod='Invoice Required';
+function applyWithdrawalBillingMethod(){
+ const required=clientBillingMethod==='Invoice Required';
+ const num=document.getElementById('withdrawInvoiceNumberField');
+ const doc=document.getElementById('withdrawInvoiceDocumentField');
+ if(num)num.style.display=required?'block':'none';
+ if(doc)doc.style.display=required?'block':'none';
+}
+
+const clientDeliveryMethod='API + Portal';
+(function applyClientDeliveryMethod(){
+ const apiBtn=document.getElementById('profileApiTabButton');
+ if(apiBtn)apiBtn.style.display=(clientDeliveryMethod==='Portal Only')?'none':'';
+})();
+
+</script>
+
+</body>
+</html>

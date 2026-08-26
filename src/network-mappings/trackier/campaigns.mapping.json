@@ -1,0 +1,84 @@
+{
+  "supplier": "TRACKIER",
+  "resourceKey": "campaigns",
+  "mappingVersion": "2",
+  "fields": [
+    {
+      "transform": "COALESCE",
+      "sources": ["id", "offer_id", "campaign_id", "campaignId"],
+      "targetField": "supplierCampaignId",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["title", "campaign_name", "offer_name", "name"],
+      "targetField": "campaignName",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["status", "campaign_status"],
+      "targetField": "campaignStatus",
+      "required": false,
+      "quality": "IMPORTANT",
+      "notes": "Master: status → campaign_status only"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["application_status", "applicationStatus", "status"],
+      "targetField": "participationStatus",
+      "required": false,
+      "quality": "IMPORTANT",
+      "notes": "Master: status/application_status → relationship; prefer application_status"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["tracking_link", "tracking_url"],
+      "targetField": "trackingUrl",
+      "required": false,
+      "quality": "OPTIONAL",
+      "notes": "supplier_tracking_url — never MBO tracking link"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["preview_url", "url", "offer_url", "website"],
+      "targetField": "destinationUrl",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["category_name", "categoryName", "category", "vertical"],
+      "targetField": "categoryName",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["geo", "countries", "country", "country_code"],
+      "targetField": "countryCodes",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["payout_value", "payout", "default_commission", "commission"],
+      "targetField": "defaultCommissionValue",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["advertiser_name", "advertiser", "merchant_name"],
+      "targetField": "merchantNameRaw",
+      "required": false,
+      "quality": "OPTIONAL"
+    }
+  ],
+  "notes": [
+    "Complements imperative trackier.mapper.js + trackierFieldContract.js.",
+    "v2 separates campaign status from application_status / relationship."
+  ]
+}

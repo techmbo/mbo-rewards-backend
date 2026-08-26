@@ -1,0 +1,1765 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MBO Rewards Developer API</title>
+<meta name="description" content="MBO Rewards Client API developer documentation">
+<style>
+:root{
+ --bg:#f7f8fb;--panel:#fff;--text:#101828;--muted:#667085;--line:#e4e7ec;
+ --soft:#f8fafc;--blue:#2457d6;--blue2:#1d4ed8;--bluebg:#eef4ff;--green:#067647;
+ --code:#0f172a;--shadow:0 1px 2px rgba(16,24,40,.04),0 8px 30px rgba(16,24,40,.04);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--text);background:var(--bg)}
+a{color:inherit}
+header.site-header{height:64px;background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 22px;position:sticky;top:0;z-index:100}
+.brand-row{display:flex;align-items:center;gap:12px}
+.logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(145deg,#1d4ed8,#3568eb);display:grid;place-items:center;color:#fff;font-weight:900;font-size:13px}
+.brand-copy strong{display:block;font-size:14px} .brand-copy span{display:block;font-size:10px;color:var(--muted);margin-top:2px}
+.header-actions{display:flex;align-items:center;gap:9px}
+.env-select{border:1px solid var(--line);border-radius:8px;background:#fff;padding:8px 30px 8px 10px;font-size:11px;font-weight:700;color:#344054}
+.version{font-size:10px;font-weight:800;color:var(--blue);background:var(--bluebg);padding:6px 8px;border-radius:999px;border:1px solid #c7d7fe}
+.layout{display:grid;grid-template-columns:270px minmax(0,1fr) 210px;max-width:1750px;margin:0 auto;min-height:calc(100vh - 64px)}
+.left{background:#fff;border-right:1px solid var(--line);position:sticky;top:64px;height:calc(100vh - 64px);overflow:hidden;display:flex;flex-direction:column}
+.left-top{padding:14px;border-bottom:1px solid var(--line)}
+.search-wrap{position:relative}
+.search{width:100%;border:1px solid var(--line);border-radius:8px;padding:9px 10px 9px 30px;font-size:12px;outline:none}
+.search:focus{border-color:#98b4ff;box-shadow:0 0 0 3px #eef4ff}
+.search-icon{position:absolute;left:10px;top:9px;color:#98a2b3;font-size:12px}
+.nav-scroll{overflow:auto;padding:8px 10px 28px}
+.nav-group{margin:3px 0 7px}
+.nav-toggle{width:100%;border:0;background:transparent;display:flex;justify-content:space-between;align-items:center;padding:9px 8px;color:#667085;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.06em;cursor:pointer}
+.nav-toggle .chev{font-size:11px;transition:.15s}
+.nav-group.collapsed .chev{transform:rotate(-90deg)}
+.nav-group.collapsed .nav-items{display:none}
+.nav-items a{display:block;text-decoration:none;font-size:12px;color:#475467;padding:8px 9px;border-radius:7px;margin:1px 0;position:relative}
+.nav-items a.sub{padding-left:22px;font-size:11px}
+.nav-items a:hover{background:#f8fafc;color:#101828}
+.nav-items a.active{background:var(--bluebg);color:var(--blue);font-weight:800}
+.nav-items a.active:before{content:"";position:absolute;left:0;top:8px;bottom:8px;width:3px;background:var(--blue);border-radius:4px}
+.center{min-width:0;padding:30px 34px 80px}
+.center-inner{max-width:980px;margin:0 auto}
+.right{border-left:1px solid var(--line);padding:24px 16px;position:sticky;top:64px;height:calc(100vh - 64px);overflow:auto}
+.right-title{font-size:10px;font-weight:900;color:#98a2b3;text-transform:uppercase;letter-spacing:.08em;margin:0 0 10px}
+.right a{display:block;text-decoration:none;font-size:11px;color:#667085;padding:6px 0}
+.right a:hover,.right a.active{color:var(--blue);font-weight:800}
+.hero{background:linear-gradient(180deg,#fff,#fbfcff);border:1px solid var(--line);border-radius:14px;padding:28px;box-shadow:var(--shadow);margin-bottom:18px}
+.hero h1{font-size:34px;line-height:1.1;margin:0;letter-spacing:-.03em} .hero p{font-size:14px;color:var(--muted);line-height:1.6;max-width:760px}
+.breadcrumbs{font-size:11px;color:#98a2b3;margin-bottom:10px}
+.docs-overview{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:20px}
+.overview-card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px}
+.overview-card span{display:block;font-size:9px;color:#98a2b3;font-weight:900;text-transform:uppercase;letter-spacing:.05em}
+.overview-card strong{display:block;font-size:13px;margin-top:5px}
+.section{background:#fff;border:1px solid var(--line);border-radius:12px;margin:0 0 16px;overflow:hidden;box-shadow:0 1px 2px rgba(16,24,40,.02);scroll-margin-top:82px}
+.section-head{padding:18px 20px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:16px}
+.section-head h2{margin:0;font-size:20px;letter-spacing:-.01em} .section-head p{margin:5px 0 0;font-size:12px;color:var(--muted);line-height:1.55}
+.section-body{padding:18px 20px}
+.endpoint{border:1px solid var(--line);border-radius:10px;margin:0 0 14px;overflow:hidden;background:#fff}
+.endpoint-head{background:#fbfcfe;border-bottom:1px solid var(--line);padding:12px 14px;display:flex;align-items:center;gap:10px}
+.endpoint-body{padding:15px}
+.method{display:inline-block;font-size:9px;font-weight:900;padding:5px 7px;border-radius:6px;background:#ecfdf3;color:#067647}
+.path{font:700 12px ui-monospace,SFMono-Regular,Menlo,monospace}
+.code{position:relative;background:var(--code);color:#f8fafc;border-radius:9px;padding:16px;overflow:auto;font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre}
+.copy-code{position:absolute;right:8px;top:8px;border:1px solid #334155;background:#1e293b;color:#fff;border-radius:6px;font-size:9px;font-weight:800;padding:5px 7px;cursor:pointer}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;background:#f8fafc;color:#475467;text-transform:uppercase;font-size:9px;letter-spacing:.04em;padding:9px 8px;border-bottom:1px solid var(--line)}
+td{font-size:11px;padding:9px 8px;border-bottom:1px solid #eef2f6;vertical-align:top}
+.note{border-left:3px solid var(--blue);background:#f8fbff;padding:11px 12px;border-radius:0 7px 7px 0;font-size:11px;color:#475467;line-height:1.55}
+.safe{border-left-color:var(--green);background:#f6fef9}
+.tag{display:inline-block;font-size:9px;font-weight:900;padding:4px 7px;background:var(--bluebg);color:var(--blue);border-radius:999px}
+.ref-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.ref-card{border:1px solid var(--line);border-radius:9px;padding:12px}
+.status-list{display:flex;gap:6px;flex-wrap:wrap}
+.status-chip{font:700 10px ui-monospace,SFMono-Regular,Menlo,monospace;padding:5px 7px;background:#f8fafc;border:1px solid var(--line);border-radius:6px}
+.getting-started{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.start-step{border:1px solid var(--line);border-radius:9px;padding:12px}
+.start-step .num{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;background:var(--bluebg);color:var(--blue);font-size:10px;font-weight:900;margin-bottom:8px}
+.endpoint-index{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+.endpoint-index-card{border:1px solid var(--line);border-radius:9px;padding:12px;cursor:pointer}
+.endpoint-index-card:hover{border-color:#b6c8ff;background:#fcfdff}
+.back-top{position:fixed;right:18px;bottom:18px;width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:#fff;box-shadow:var(--shadow);display:none;place-items:center;cursor:pointer;z-index:120}
+.back-top.show{display:grid}
+.mobile-nav-btn{display:none}
+@media(max-width:1200px){.layout{grid-template-columns:250px minmax(0,1fr)}.right{display:none}}
+@media(max-width:820px){
+ .mobile-nav-btn{display:inline-flex;border:1px solid var(--line);background:#fff;border-radius:8px;padding:7px 9px}
+ .layout{display:block} .left{position:fixed;left:0;top:64px;width:280px;transform:translateX(-102%);transition:.2s;z-index:110;box-shadow:0 20px 40px rgba(16,24,40,.12)}
+ .left.open{transform:translateX(0)} .center{padding:18px 14px 70px}
+ .docs-overview,.getting-started,.ref-grid,.endpoint-index{grid-template-columns:1fr}
+ .hero h1{font-size:28px} .header-actions .version{display:none}
+}
+</style>
+</head>
+<body>
+<header class="site-header">
+  <div class="brand-row">
+    <button class="mobile-nav-btn" id="mobileNavBtn" type="button">☰</button>
+    <div class="logo">MBO</div>
+    <div class="brand-copy"><strong>MBO Rewards</strong><span>Developer API</span></div>
+  </div>
+  <div class="header-actions">
+    <span class="version">API v1</span>
+    <select class="env-select" id="envSelect">
+      <option value="production">Production</option>
+      <option value="sandbox">Sandbox</option>
+    </select>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="left" id="leftNav">
+    <div class="left-top">
+      <div class="search-wrap">
+        <span class="search-icon">⌕</span>
+        <input id="docsSearch" class="search" type="search" placeholder="Search documentation">
+      </div>
+    </div>
+    <nav class="nav-scroll" id="docsNav">
+      
+        <div class="nav-group" data-group="0">
+          <button class="nav-toggle" type="button" aria-expanded="true">
+            <span>Overview</span><span class="chev">▾</span>
+          </button>
+          <div class="nav-items"><a href="#overview">Overview</a><a href="#getting-started">Getting Started</a><a href="#normalization-overview">Standardization Layer</a><a href="#authentication">Authentication</a><a href="#environments">Environments</a><a href="#api-scopes">API Scopes</a><a href="#account-api">Account API</a></div>
+        </div>
+
+        <div class="nav-group" data-group="1">
+          <button class="nav-toggle" type="button" aria-expanded="true">
+            <span>Campaigns</span><span class="chev">▾</span>
+          </button>
+          <div class="nav-items"><a href="#campaigns">Campaigns API</a><a class="sub" href="#list-campaigns">List Campaigns</a><a class="sub" href="#campaign-detail">Campaign Details</a><a class="sub" href="#affiliate-campaigns">Affiliate Link Campaigns</a><a class="sub" href="#coupon-campaigns">Coupon Code Campaigns</a></div>
+        </div>
+
+        <div class="nav-group" data-group="2">
+          <button class="nav-toggle" type="button" aria-expanded="true">
+            <span>Products</span><span class="chev">▾</span>
+          </button>
+          <div class="nav-items"><a href="#products-api">Products API</a><a class="sub" href="#list-products">List Products</a><a class="sub" href="#product-detail">Product Details</a><a class="sub" href="#campaign-products">Campaign Products</a></div>
+        </div>
+
+        <div class="nav-group" data-group="3">
+          <button class="nav-toggle" type="button" aria-expanded="true">
+            <span>Performance</span><span class="chev">▾</span>
+          </button>
+          <div class="nav-items"><a href="#performance">Performance API</a><a class="sub" href="#performance-summary">Performance Summary</a><a class="sub" href="#campaign-performance">Campaign Performance</a><a class="sub" href="#affiliate-performance">Affiliate Link Performance</a><a class="sub" href="#coupon-performance">Coupon Code Performance</a><a class="sub" href="#individual-orders">Individual Orders</a></div>
+        </div>
+
+        <div class="nav-group" data-group="4">
+          <button class="nav-toggle" type="button" aria-expanded="true">
+            <span>Finance</span><span class="chev">▾</span>
+          </button>
+          <div class="nav-items"><a href="#statements-api">Payable Statements</a><a href="#withdrawals-api">Withdrawal Requests</a><a href="#payments-api">Payments</a></div>
+        </div>
+
+        <div class="nav-group" data-group="5">
+          <button class="nav-toggle" type="button" aria-expanded="true">
+            <span>Developer Reference</span><span class="chev">▾</span>
+          </button>
+          <div class="nav-items"><a href="#query-standards">Query & Sync Standards</a><a class="sub" href="#sorting-standard">Sorting</a><a class="sub" href="#cursor-pagination-standard">Cursor Pagination</a><a class="sub" href="#incremental-sync-standard">Incremental Sync</a><a href="#standards">Common Standards</a><a href="#errors">Errors</a></div>
+        </div>
+
+        <div class="nav-group" data-group="6">
+          <button class="nav-toggle" type="button" aria-expanded="true">
+            <span>Reference Data</span><span class="chev">▾</span>
+          </button>
+          <div class="nav-items"><a href="#reference-data">Reference Data</a><a href="#safe-fields">Client-Safe Fields</a><a href="#deprecation-policy">Deprecation Policy</a><a href="#changelog">Changelog</a></div>
+        </div>
+    </nav>
+  </aside>
+
+  <main class="center">
+    <div class="center-inner">
+      
+      
+      <div class="hero section-anchor" id="overview">
+        <div class="breadcrumbs">MBO Rewards / <b>Client API Documentation</b> / v1</div>
+        <h1>MBO Rewards Client API</h1>
+        <p>Developer documentation for authenticating, retrieving assigned campaigns, reading performance, accessing payable statements, submitting withdrawal requests, and tracking payments.</p>
+
+        <div class="docs-overview">
+          <div class="overview-card"><span>API Version</span><strong>v1</strong></div>
+          <div class="overview-card"><span>Authentication</span><strong>Client ID + API Key</strong></div>
+          <div class="overview-card"><span>Production</span><strong>api.mbo-rewards.com</strong></div>
+          <div class="overview-card"><span>Sandbox</span><strong>sandbox-api.mbo-rewards.com</strong></div>
+        </div>
+      </div>
+
+      <section class="section section-anchor" id="getting-started">
+        <div class="section-head">
+          <div><h2>Getting Started</h2><p>Recommended integration sequence for a new client.</p></div>
+        </div>
+        <div class="section-body">
+          <div class="getting-started">
+            <div class="start-step"><div class="num">1</div><b>Get Credentials</b><p>Use the Client ID and environment-specific API key from Profile → API & Integration.</p></div>
+            <div class="start-step"><div class="num">2</div><b>Test in Sandbox</b><p>Authenticate against the Sandbox base URL and confirm campaign retrieval.</p></div>
+            <div class="start-step"><div class="num">3</div><b>Integrate Core APIs</b><p>Use Campaigns and Performance first, then Statements, Withdrawals, and Payments as needed.</p></div>
+            <div class="start-step"><div class="num">4</div><b>Move to Production</b><p>Switch to Production credentials and base URL only after integration validation.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section-anchor" id="endpoint-index">
+        <div class="section-head">
+          <div><h2>API Endpoint Overview</h2><p>Quick navigation to the main client-facing API groups.</p></div>
+        </div>
+        <div class="section-body">
+          <div class="endpoint-index">
+            <div class="endpoint-index-card" onclick="location.hash='campaigns'"><div class="line"><span class="method">GET</span><b>Campaigns</b></div><p>List and retrieve client-safe campaigns, including affiliate links and coupon campaigns.</p></div>
+            <div class="endpoint-index-card" onclick="location.hash='performance'"><div class="line"><span class="method">GET</span><b>Performance</b></div><p>Clicks, orders, confirmed sales, commission, and individual order reporting.</p></div>
+            <div class="endpoint-index-card" onclick="location.hash='statements-api'"><div class="line"><span class="method">GET</span><b>Payable Statements</b></div><p>Retrieve released statements, payable orders, and secure PDF references.</p></div>
+            <div class="endpoint-index-card" onclick="location.hash='withdrawals-api'"><div class="line"><span class="method" style="background:#eef4ff;color:#2457d6">POST</span><b>Withdrawal Requests</b></div><p>Create and track requests against available payable statements.</p></div>
+            <div class="endpoint-index-card" onclick="location.hash='payments-api'"><div class="line"><span class="method">GET</span><b>Payments</b></div><p>Track scheduled, processing, paid, or failed payments.</p></div>
+            <div class="endpoint-index-card" onclick="location.hash='standards'"><div class="line"><span class="tag">REF</span><b>Common Standards</b></div><p>Pagination, date/time, currencies, versioning, idempotency, errors, and rate-limit contract.</p></div>
+          </div>
+        </div>
+      </section>
+
+
+      
+      <section class="section section-anchor" id="normalization-overview">
+        <div class="section-head">
+          <div><h2>MBO Standardization Layer</h2><p>All network-specific data is normalized before it reaches the Client API.</p></div>
+        </div>
+        <div class="section-body">
+          <div class="std-flow">
+            <div class="node">Network APIs<br><small>Impact · Partnerize · Optimise · Trackier · vCommission · Boostiny</small></div>
+            <div class="arrow">→</div>
+            <div class="node">MBO Canonical Layer<br><small>Normalize values, statuses, IDs and money</small></div>
+            <div class="arrow">→</div>
+            <div class="node">Client API<br><small>Stable, client-safe contract</small></div>
+          </div>
+          <div class="note safe" style="margin-top:12px">
+            Clients never need to understand individual network schemas. Adding a new network should not require a breaking change to the public MBO Client API.
+          </div>
+        </div>
+      </section>
+<section class="section section-anchor" id="authentication">
+        <div class="section-head">
+          <div><h2>Authentication</h2><p>Every request is authenticated using the client account and its API key.</p></div>
+          <span class="tag">API KEY</span>
+        </div>
+        <div class="section-body">
+          <div class="grid2">
+            <div class="box"><span>Client ID</span><b>CLI-HDFC-001</b></div>
+            <div class="box"><span>Authentication</span><b>API Key</b></div>
+          </div>
+
+          <h3 style="font-size:13px;margin:16px 0 8px">Required Headers</h3>
+          <table>
+            <thead><tr><th>Header</th><th>Required</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><code>X-MBO-Client-ID</code></td><td>Yes</td><td>Unique client account identifier.</td></tr>
+              <tr><td><code>X-MBO-API-Key</code></td><td>Yes</td><td>Environment-specific API secret.</td></tr>
+              <tr><td><code>Accept</code></td><td>Recommended</td><td><code>application/json</code></td></tr>
+            </tbody>
+          </table>
+
+          <h3 style="font-size:13px;margin:16px 0 8px">Example</h3>
+          <div class="code">GET /v1/campaigns HTTP/1.1
+Host: api.mbo-rewards.com
+X-MBO-Client-ID: CLI-HDFC-001
+X-MBO-API-Key: mbo_production_sk_xxxxxxxxxxxxx
+Accept: application/json</div>
+
+          <div class="note safe" style="margin-top:12px">
+            Production and Sandbox credentials are separate. A Sandbox key must not authenticate against Production, and a Production key must not authenticate against Sandbox.
+          </div>
+        </div>
+      </section>
+
+      <section class="section section-anchor" id="environments">
+        <div class="section-head"><div><h2>Environments</h2><p>Separate base URLs and credentials for testing and live traffic.</p></div></div>
+        <div class="section-body">
+          <div class="grid2">
+            <div class="box"><span>Production Base URL</span><b>https://api.mbo-rewards.com/v1</b></div>
+            <div class="box"><span>Sandbox Base URL</span><b>https://sandbox-api.mbo-rewards.com/v1</b></div>
+          </div>
+        </div>
+      </section>
+
+      
+      <section class="section section-anchor" id="api-scopes">
+        <div class="section-head"><div><h2>API Scopes</h2><p>API keys should be restricted to the minimum access required by the client integration.</p></div></div>
+        <div class="section-body">
+          <table>
+            <thead><tr><th>Scope</th><th>Access</th></tr></thead>
+            <tbody>
+              <tr><td><code>campaigns:read</code></td><td>Read campaigns and campaign details.</td></tr>
+              <tr><td><code>products:read</code></td><td>Read products assigned to the client.</td></tr>
+              <tr><td><code>performance:read</code></td><td>Read summary and campaign performance.</td></tr>
+              <tr><td><code>orders:read</code></td><td>Read individual client-safe order records.</td></tr>
+              <tr><td><code>statements:read</code></td><td>Read payable statements and statement orders.</td></tr>
+              <tr><td><code>withdrawals:read</code></td><td>Read withdrawal requests.</td></tr>
+              <tr><td><code>withdrawals:write</code></td><td>Create withdrawal requests.</td></tr>
+              <tr><td><code>payments:read</code></td><td>Read payment records.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section section-anchor" id="account-api">
+        <div class="section-head"><div><h2>Account API</h2><p>Verify which client account and API configuration the current credentials belong to.</p></div></div>
+        <div class="section-body">
+          <div class="endpoint" id="account-detail">
+            <div class="endpoint-head"><div class="endpoint-titlebar"><span class="method">GET</span><span class="path">/account</span></div></div>
+            <div class="endpoint-body">
+              <div class="code">{
+  "data": {
+    "client_id": "CLI-HDFC-001",
+    "company_name": "HDFC Bank",
+    "delivery_method": "API_AND_PORTAL",
+    "api_status": "ACTIVE",
+    "billing_method": "INVOICE_REQUIRED",
+    "settlement_currency": "USD"
+  }
+}</div>
+            </div>
+          </div>
+        </div>
+      </section>
+<section class="section section-anchor" id="campaigns">
+        <div class="section-head">
+          <div><h2>Campaigns API</h2><p>Returns only campaigns available to the authenticated client account.</p></div>
+        </div>
+        <div class="section-body">
+          <div class="note" style="margin-bottom:12px"><b>Use this API when:</b> your application needs the latest campaigns available to your account.</div>
+          <div class="note safe">
+            The API never returns network/source information, raw network commission, MBO margin, network campaign IDs, or internal source-selection logic.
+          </div>
+
+          <div class="endpoint" id="list-campaigns" style="margin-top:14px">
+            <div class="endpoint-head"><span class="method">GET</span><span class="path">/campaigns</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">List campaigns available to the authenticated client.</p>
+              <h3 style="font-size:12px">Query Parameters</h3>
+              <table>
+                <thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>status</code></td><td>string</td><td>No</td><td>Filter by campaign status, e.g. <code>LIVE</code>.</td></tr>
+                  <tr><td><code>campaign_type</code></td><td>string</td><td>No</td><td><code>AFFILIATE_LINK</code> or <code>COUPON</code>.</td></tr>
+                  <tr><td><code>country</code></td><td>string</td><td>No</td><td>ISO 3166-1 alpha-2 country code, e.g. <code>IN</code> or <code>AE</code>.</td></tr>
+                  <tr><td><code>search</code></td><td>string</td><td>No</td><td>Search brand or campaign name.</td></tr>
+                  <tr><td><code>updated_since</code></td><td>datetime</td><td>No</td><td>Return campaigns created or changed since this ISO 8601 timestamp.</td></tr>
+                  <tr><td><code>sort_by</code></td><td>string</td><td>No</td><td>Approved sortable field such as <code>valid_until</code> or <code>brand_name</code>.</td></tr>
+                  <tr><td><code>sort_order</code></td><td>string</td><td>No</td><td><code>asc</code> or <code>desc</code>.</td></tr>
+                  <tr><td><code>page</code></td><td>integer</td><td>No</td><td>Page number.</td></tr>
+                  <tr><td><code>page_size</code></td><td>integer</td><td>No</td><td>Records per page.</td></tr>
+                </tbody>
+              </table>
+
+              <h3 style="font-size:12px;margin-top:15px">Example Response</h3>
+              <div class="code">{
+  "data": [
+    {
+      "campaign_id": "CMP-001",
+      "brand_name": "Nike",
+      "campaign_name": "Nike Online Store",
+      "campaign_type": "AFFILIATE_LINK",
+      "customer_offer": "Up to 30% Off",
+      "commission": {
+        "type": "PERCENTAGE",
+        "value": 5.00,
+        "currency": null,
+        "display": "5%"
+      },
+      "coupon_code": null,
+      "tracking_method": "LINK",
+      "tracking_link": "https://mbor.io/hdfc/nike",
+      "countries": [
+        {"code": "IN", "name": "India"}
+      ],
+      "valid_from": "2026-08-01",
+      "valid_until": "2026-08-31",
+      "status": "LIVE",
+      "last_updated_date": "2026-08-16",
+      "last_updated_time": "18:40"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 25,
+    "total_records": 18,
+    "total_pages": 1
+  }
+}</div>
+            </div>
+          </div>
+
+          <div class="endpoint" id="campaign-detail">
+            <div class="endpoint-head"><span class="method">GET</span><span class="path">/campaigns/{campaign_id}</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">Return the full client-safe details of one campaign.</p>
+              <div class="code">{
+  "campaign_id": "CMP-002",
+  "brand_name": "Adidas",
+  "campaign_name": "Adidas UAE",
+  "campaign_type": "COUPON",
+  "customer_offer": "20% Off",
+  "offer_description": "20% off on eligible products.",
+  "commission": {
+    "type": "PERCENTAGE",
+    "value": 4.00,
+    "currency": null,
+    "display": "4%"
+  },
+  "coupon_code": "RUN20",
+  "tracking_method": "LINK_AND_COUPON",
+  "tracking_link": "https://mbor.io/hdfc/adidas",
+  "countries": [
+    {"code": "AE", "name": "United Arab Emirates"}
+  ],
+  "valid_from": "2026-08-05",
+  "valid_until": "2026-09-30",
+  "terms_and_conditions": "Offer subject to eligible products and merchant terms.",
+  "status": "LIVE",
+  "last_updated_date": "2026-08-16",
+  "last_updated_time": "18:45"
+}</div>
+            </div>
+          </div>
+
+          <div class="endpoint" id="affiliate-campaigns">
+            <div class="endpoint-head"><span class="method">GET</span><span class="path">/campaigns/affiliate-links</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">Convenience endpoint for affiliate-link campaigns only.</p>
+              <table>
+                <thead><tr><th>Field</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>campaign_id</code></td><td>Client-safe MBO campaign identifier.</td></tr>
+                  <tr><td><code>brand_name</code></td><td>Brand shown to the client.</td></tr>
+                  <tr><td><code>campaign_name</code></td><td>Campaign title.</td></tr>
+                  <tr><td><code>customer_offer</code></td><td>Customer-facing offer.</td></tr>
+                  <tr><td><code>commission</code></td><td>Commission applicable to this client.</td></tr>
+                  <tr><td><code>tracking_method</code></td><td><code>LINK</code>, <code>COUPON</code>, or <code>LINK_AND_COUPON</code>.</td></tr>
+                  <tr><td><code>tracking_link</code></td><td>Unique MBO tracking link for the client assignment.</td></tr>
+                  <tr><td><code>countries</code></td><td>Applicable countries using ISO alpha-2 codes.</td></tr>
+                  <tr><td><code>valid_until</code></td><td>Campaign expiry.</td></tr>
+                  <tr><td><code>status</code></td><td>Campaign status.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="endpoint" id="coupon-campaigns">
+            <div class="endpoint-head"><span class="method">GET</span><span class="path">/campaigns/coupons</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">Convenience endpoint for coupon-code campaigns only.</p>
+              <table>
+                <thead><tr><th>Field</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>campaign_id</code></td><td>Client-safe MBO campaign identifier.</td></tr>
+                  <tr><td><code>brand_name</code></td><td>Brand shown to the client.</td></tr>
+                  <tr><td><code>campaign_name</code></td><td>Campaign title.</td></tr>
+                  <tr><td><code>customer_offer</code></td><td>Customer-facing offer.</td></tr>
+                  <tr><td><code>commission</code></td><td>Commission applicable to this client.</td></tr>
+                  <tr><td><code>coupon_code</code></td><td>Assigned/shared coupon code when available.</td></tr>
+                  <tr><td><code>tracking_method</code></td><td><code>LINK</code>, <code>COUPON</code>, or <code>LINK_AND_COUPON</code>.</td></tr>
+                  <tr><td><code>tracking_link</code></td><td>MBO tracking link for the client campaign assignment.</td></tr>
+                  <tr><td><code>countries</code></td><td>Applicable countries using ISO alpha-2 codes.</td></tr>
+                  <tr><td><code>valid_until</code></td><td>Campaign expiry.</td></tr>
+                  <tr><td><code>status</code></td><td>Campaign status.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+
+      
+      <section class="section section-anchor" id="products-api">
+        <div class="section-head"><div><h2>Products API</h2><p>Retrieve client-safe products assigned through MBO campaign/product inventory.</p></div></div>
+        <div class="section-body">
+          <div class="endpoint" id="list-products">
+            <div class="endpoint-head"><div class="endpoint-titlebar"><span class="method">GET</span><span class="path">/products</span></div></div>
+            <div class="endpoint-body">
+              <p class="api-purpose">List products available to the authenticated client.</p>
+              <div class="code">{
+  "data": [
+    {
+      "product_id": "PRD-001",
+      "brand_name": "Nike",
+      "product_name": "Air Max",
+      "category": "Footwear",
+      "price": {"amount": 140.00, "currency": "USD"},
+      "sale_price": {"amount": 110.00, "currency": "USD"},
+      "availability": "IN_STOCK",
+      "tracking_link": "https://mbor.io/client/nike-air-max",
+      "commission": {"type": "PERCENTAGE", "value": 5.00, "currency": null, "display": "5%"}
+    }
+  ]
+}</div>
+            </div>
+          </div>
+
+          <div class="endpoint" id="product-detail">
+            <div class="endpoint-head"><div class="endpoint-titlebar"><span class="method">GET</span><span class="path">/products/{product_id}</span></div></div>
+            <div class="endpoint-body"><p class="api-purpose">Retrieve one client-safe product record.</p></div>
+          </div>
+
+          <div class="endpoint" id="campaign-products">
+            <div class="endpoint-head"><div class="endpoint-titlebar"><span class="method">GET</span><span class="path">/campaigns/{campaign_id}/products</span></div></div>
+            <div class="endpoint-body"><p class="api-purpose">List products attached to a specific client campaign.</p></div>
+          </div>
+        </div>
+      </section>
+<section class="section section-anchor" id="performance">
+        <div class="section-head">
+          <div><h2>Performance API</h2><p>Client-safe performance data for clicks, orders, confirmed sales, and commission.</p></div>
+        </div>
+        <div class="section-body">
+          <div class="note" style="margin-bottom:12px"><b>Use this API when:</b> your application needs reporting for clicks, orders, sales, and commission.</div>
+          <div class="note safe">
+            Performance responses never expose network clicks, network order IDs, network conversion IDs, raw network status, network commission, or MBO margin.
+          </div>
+
+          <div class="endpoint" id="performance-summary" style="margin-top:14px">
+            <div class="endpoint-head"><span class="method">GET</span><span class="path">/performance/summary</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">Returns account-level performance totals for the selected date range.</p>
+
+              <h3 style="font-size:12px">Query Parameters</h3>
+              <table>
+                <thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>from_date</code></td><td>date</td><td>Yes</td><td>Start date, format <code>YYYY-MM-DD</code>.</td></tr>
+                  <tr><td><code>to_date</code></td><td>date</td><td>Yes</td><td>End date, format <code>YYYY-MM-DD</code>.</td></tr>
+                  <tr><td><code>brand</code></td><td>string</td><td>No</td><td>Filter by brand.</td></tr>
+                  <tr><td><code>campaign_id</code></td><td>string</td><td>No</td><td>Filter by client-safe campaign ID.</td></tr>
+                  <tr><td><code>campaign_type</code></td><td>string</td><td>No</td><td><code>AFFILIATE_LINK</code> or <code>COUPON</code>.</td></tr>
+                  <tr><td><code>country</code></td><td>string</td><td>No</td><td>ISO 3166-1 alpha-2 country code.</td></tr>
+                  <tr><td><code>currency</code></td><td>string</td><td>No</td><td>ISO 4217 currency code. Recommended when the account has activity in multiple currencies.</td></tr>
+                </tbody>
+              </table>
+
+              <h3 style="font-size:12px;margin-top:15px">Example Response</h3>
+              <div class="code">{
+  "from_date": "2026-08-01",
+  "to_date": "2026-08-16",
+  "clicks": 8420,
+  "orders": 342,
+  "pending_orders": 39,
+  "confirmed_orders": 284,
+  "rejected_orders": 11,
+  "cancelled_orders": 8,
+  "gross_order_value": {
+    "amount": 34800.00,
+    "currency": "USD"
+  },
+  "confirmed_order_value": {
+    "amount": 28400.00,
+    "currency": "USD"
+  },
+  "commission_generated": {
+    "amount": 1740.00,
+    "currency": "USD"
+  },
+  "confirmed_commission": {
+    "amount": 1420.00,
+    "currency": "USD"
+  },
+  "pending_commission": {
+    "amount": 195.00,
+    "currency": "USD"
+  }
+}</div>
+            </div>
+          </div>
+
+          
+              <div class="note" style="margin-top:12px">Performance totals must never combine different currencies into one numeric total. When multiple currencies are in scope, clients should filter by <code>currency</code> or consume currency-separated results.</div>
+<div class="endpoint" id="campaign-performance">
+            <div class="endpoint-head"><span class="method">GET</span><span class="path">/performance/campaigns</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">Returns campaign-level performance for the authenticated client.</p>
+
+              <h3 style="font-size:12px">Supported Filters</h3>
+              <table>
+                <thead><tr><th>Parameter</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>from_date</code>, <code>to_date</code></td><td>Date range.</td></tr>
+                  <tr><td><code>brand</code></td><td>Brand filter.</td></tr>
+                  <tr><td><code>campaign_id</code></td><td>Campaign filter.</td></tr>
+                  <tr><td><code>campaign_type</code></td><td>Affiliate Link or Coupon.</td></tr>
+                  <tr><td><code>country</code></td><td>ISO 3166-1 alpha-2 country code.</td></tr>
+                  <tr><td><code>page</code>, <code>page_size</code></td><td>Pagination.</td></tr>
+                </tbody>
+              </table>
+
+              <h3 style="font-size:12px;margin-top:15px">Example Response</h3>
+              <div class="code">{
+  "data": [
+    {
+      "campaign_id": "CMP-001",
+      "brand_name": "Nike",
+      "campaign_name": "Nike Online Store",
+      "campaign_type": "AFFILIATE_LINK",
+      "tracking_link": "https://mbor.io/hdfc/nike",
+      "clicks": 3420,
+      "orders": 82,
+      "pending_orders": 9,
+      "confirmed_orders": 68,
+      "rejected_orders": 3,
+      "cancelled_orders": 2,
+      "gross_order_value": {
+        "amount": 9340.00,
+        "currency": "USD"
+      },
+      "confirmed_order_value": {
+        "amount": 7920.00,
+        "currency": "USD"
+      },
+      "commission_generated": {
+        "amount": 467.00,
+        "currency": "USD"
+      },
+      "confirmed_commission": {
+        "amount": 396.00,
+        "currency": "USD"
+      },
+      "last_updated_date": "2026-08-16",
+      "last_updated_time": "18:40"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 25,
+    "total_records": 4,
+    "total_pages": 1
+  }
+}</div>
+            </div>
+          </div>
+
+          <div class="endpoint" id="affiliate-performance">
+            <div class="endpoint-head"><span class="method">GET</span><span class="path">/performance/affiliate-links</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">Returns performance only for affiliate-link campaigns.</p>
+              <table>
+                <thead><tr><th>Field</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>campaign_id</code></td><td>Client-safe campaign identifier.</td></tr>
+                  <tr><td><code>brand_name</code></td><td>Brand.</td></tr>
+                  <tr><td><code>campaign_name</code></td><td>Campaign title.</td></tr>
+                  <tr><td><code>tracking_link</code></td><td>Client tracking link.</td></tr>
+                  <tr><td><code>clicks</code></td><td>Clicks recorded for the client tracking link.</td></tr>
+                  <tr><td><code>orders</code></td><td>Total orders attributed to the campaign.</td></tr>
+                  <tr><td><code>confirmed_orders</code></td><td>Confirmed orders.</td></tr>
+                  <tr><td><code>confirmed_order_value</code></td><td>Confirmed sales value.</td></tr>
+                  <tr><td><code>confirmed_commission</code></td><td>Confirmed commission payable to the client.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="endpoint" id="coupon-performance">
+            <div class="endpoint-head"><span class="method">GET</span><span class="path">/performance/coupons</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">Returns performance only for coupon-code campaigns.</p>
+              <table>
+                <thead><tr><th>Field</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>campaign_id</code></td><td>Client-safe campaign identifier.</td></tr>
+                  <tr><td><code>brand_name</code></td><td>Brand.</td></tr>
+                  <tr><td><code>campaign_name</code></td><td>Campaign title.</td></tr>
+                  <tr><td><code>coupon_code</code></td><td>Coupon code assigned/available to the client.</td></tr>
+                  <tr><td><code>clicks</code></td><td>Clicks recorded through the MBO tracking link associated with the coupon campaign.</td></tr>
+                  <tr><td><code>orders</code></td><td>Total orders attributed to the campaign.</td></tr>
+                  <tr><td><code>confirmed_orders</code></td><td>Confirmed orders.</td></tr>
+                  <tr><td><code>confirmed_order_value</code></td><td>Confirmed sales value.</td></tr>
+                  <tr><td><code>confirmed_commission</code></td><td>Confirmed commission payable to the client.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="endpoint" id="individual-orders">
+            <div class="endpoint-head"><span class="method">GET</span><span class="path">/performance/orders</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">Returns client-safe individual order records where order-level data is available.</p>
+
+              <h3 style="font-size:12px">Query Parameters</h3>
+              <table>
+                <thead><tr><th>Parameter</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>from_date</code></td><td>Yes</td><td>Order date range start.</td></tr>
+                  <tr><td><code>to_date</code></td><td>Yes</td><td>Order date range end.</td></tr>
+                  <tr><td><code>brand</code></td><td>No</td><td>Filter by brand.</td></tr>
+                  <tr><td><code>campaign_id</code></td><td>No</td><td>Filter by campaign.</td></tr>
+                  <tr><td><code>order_status</code></td><td>No</td><td><code>PENDING</code>, <code>CONFIRMED</code>, <code>REJECTED</code>, or <code>CANCELLED</code>.</td></tr>
+                  <tr><td><code>campaign_type</code></td><td>No</td><td>Affiliate Link or Coupon.</td></tr>
+                  <tr><td><code>updated_since</code></td><td>No</td><td>Return orders created or changed since an ISO 8601 timestamp.</td></tr>
+                  <tr><td><code>cursor</code></td><td>No</td><td>Opaque cursor for high-volume incremental pagination.</td></tr>
+                  <tr><td><code>page_size</code></td><td>No</td><td>Records requested per cursor page.</td></tr>
+                </tbody>
+              </table>
+
+              <h3 style="font-size:12px;margin-top:15px">Example Response</h3>
+              <div class="code">{
+  "data": [
+    {
+      "order_date": "2026-08-01",
+      "order_confirmed_date": "2026-08-04",
+      "brand_name": "Nike",
+      "campaign_id": "CMP-001",
+      "campaign_name": "Nike Online Store",
+      "campaign_type": "AFFILIATE_LINK",
+      "coupon_code": null,
+      "tracking_link": "https://mbor.io/hdfc/nike",
+      "order_value": {
+        "amount": 129.00,
+        "currency": "USD"
+      },
+      "order_status": "CONFIRMED",
+      "commission": {
+        "amount": 6.45,
+        "currency": "USD"
+      },
+      "last_updated_date": "2026-08-16",
+      "last_updated_time": "18:40"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 25,
+    "total_records": 284,
+    "total_pages": 12
+  }
+}</div>
+
+              <div class="note" style="margin-top:12px">
+                Some network sources, such as aggregate-only settlement sources, may not provide individual confirmed-order records. The API must not invent order-level rows where the upstream data does not support them.
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+
+      <section class="section section-anchor" id="statements-api">
+        <div class="section-head">
+          <div><h2>Payable Statements API</h2><p>Retrieve commission statements released to the authenticated client account.</p></div>
+        </div>
+        <div class="section-body">
+          <div class="note" style="margin-bottom:12px"><b>Use this API when:</b> your finance workflow needs released payable statements and statement-level order detail.</div>
+          <div class="note safe">
+            Statement responses contain only client-safe payable information. Network identifiers, network commission, MBO margin, reconciliation data, and internal finance notes are never returned.
+          </div>
+
+          <div class="endpoint" id="list-statements" style="margin-top:14px">
+            <div class="endpoint-head"><span class="method">GET</span><span class="path">/statements</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">List payable statements available to the authenticated client.</p>
+
+              <h3 style="font-size:12px">Query Parameters</h3>
+              <table>
+                <thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>from_date</code></td><td>date</td><td>No</td><td>Statement date range start.</td></tr>
+                  <tr><td><code>to_date</code></td><td>date</td><td>No</td><td>Statement date range end.</td></tr>
+                  <tr><td><code>status</code></td><td>string</td><td>No</td><td>Filter by statement status.</td></tr>
+                  <tr><td><code>currency</code></td><td>string</td><td>No</td><td>Currency filter.</td></tr>
+                  <tr><td><code>updated_since</code></td><td>datetime</td><td>No</td><td>Return records changed since this ISO 8601 timestamp.</td></tr>
+                  <tr><td><code>page</code></td><td>integer</td><td>No</td><td>Page number.</td></tr>
+                  <tr><td><code>page_size</code></td><td>integer</td><td>No</td><td>Records per page.</td></tr>
+                </tbody>
+              </table>
+
+              <h3 style="font-size:12px;margin-top:15px">Example Response</h3>
+              <div class="code">{
+  "data": [
+    {
+      "statement_id": "STM-HDFC-2026-08-001",
+      "statement_date": "2026-08-16",
+      "settlement_period": "2026-08",
+      "payable_orders": 5,
+      "gross_order_value": {
+        "amount": 2480.00,
+        "currency": "USD"
+      },
+      "commission": {
+        "amount": 530.00,
+        "currency": "USD"
+      },
+      "available_for_withdrawal": {
+        "amount": 530.00,
+        "currency": "USD"
+      },
+      "status": "AVAILABLE_FOR_WITHDRAWAL",
+      "last_updated_date": "2026-08-16",
+      "last_updated_time": "18:40"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 25,
+    "total_records": 4,
+    "total_pages": 1
+  }
+}</div>
+            </div>
+          </div>
+
+          <div class="endpoint" id="statement-detail">
+            <div class="endpoint-head"><span class="method">GET</span><span class="path">/statements/{statement_id}</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">Return the full client-safe statement summary.</p>
+
+              <div class="code">{
+  "statement_id": "STM-HDFC-2026-08-001",
+  "statement_date": "2026-08-16",
+  "settlement_period": "2026-08",
+  "currency": "USD",
+  "status": "AVAILABLE_FOR_WITHDRAWAL",
+  "issued_by": {
+    "name": "MBO Rewards",
+    "legal_name": "Marketing Blue Ocean"
+  },
+  "account": {
+    "account_name": "HDFC Bank",
+    "legal_name": "HDFC Bank Limited",
+    "country": {"code": "IN", "name": "India"}
+  },
+  "summary": {
+    "payable_orders": 5,
+    "gross_order_value": 2480.00,
+    "commission": 530.00,
+    "available_for_withdrawal": 530.00
+  },
+  "pdf_available": true,
+  "last_updated_date": "2026-08-16",
+  "last_updated_time": "18:40"
+}</div>
+
+              <h3 style="font-size:12px;margin-top:15px">Statement Statuses</h3>
+              <table>
+                <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
+                <tbody>
+                  <tr><td><code>AVAILABLE_FOR_WITHDRAWAL</code></td><td>The statement amount is available for a withdrawal request.</td></tr>
+                  <tr><td><code>REQUESTED</code></td><td>A withdrawal request has been submitted against the statement.</td></tr>
+                  <tr><td><code>APPROVED</code></td><td>The related withdrawal request has been approved.</td></tr>
+                  <tr><td><code>PAID</code></td><td>The statement amount has been paid.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="endpoint" id="statement-orders">
+            <div class="endpoint-head"><span class="method">GET</span><span class="path">/statements/{statement_id}/orders</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">Returns the payable-order rows included in the statement.</p>
+
+              <h3 style="font-size:12px">Client-Safe Order Fields</h3>
+              <table>
+                <thead><tr><th>Field</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>order_date</code></td><td>Date of the order.</td></tr>
+                  <tr><td><code>order_confirmed_date</code></td><td>Date the order became confirmed.</td></tr>
+                  <tr><td><code>brand_name</code></td><td>Brand.</td></tr>
+                  <tr><td><code>campaign_name</code></td><td>Campaign title.</td></tr>
+                  <tr><td><code>campaign_type</code></td><td>Affiliate Link or Coupon.</td></tr>
+                  <tr><td><code>coupon_code</code></td><td>Coupon code where applicable.</td></tr>
+                  <tr><td><code>tracking_link</code></td><td>Client tracking link.</td></tr>
+                  <tr><td><code>order_value</code></td><td>Order value.</td></tr>
+                  <tr><td><code>currency</code></td><td>Currency.</td></tr>
+                  <tr><td><code>commission</code></td><td>Commission included in the statement.</td></tr>
+                </tbody>
+              </table>
+
+              <h3 style="font-size:12px;margin-top:15px">Example Response</h3>
+              <div class="code">{
+  "statement_id": "STM-HDFC-2026-08-001",
+  "data": [
+    {
+      "order_date": "2026-08-01",
+      "order_confirmed_date": "2026-08-03",
+      "brand_name": "Nike",
+      "campaign_name": "Nike Online Store",
+      "campaign_type": "AFFILIATE_LINK",
+      "coupon_code": null,
+      "tracking_link": "https://mbor.io/hdfc/nike",
+      "order_value": {
+        "amount": 480.00,
+        "currency": "USD"
+      },
+      "commission": {
+        "amount": 24.00,
+        "currency": "USD"
+      }
+    }
+  ],
+  "totals": {
+    "payable_orders": 5,
+    "gross_order_value": {
+      "amount": 2480.00,
+      "currency": "USD"
+    },
+    "commission": {
+      "amount": 530.00,
+      "currency": "USD"
+    }
+  }
+}</div>
+            </div>
+          </div>
+
+          <div class="endpoint" id="statement-pdf">
+            <div class="endpoint-head"><span class="method">GET</span><span class="path">/statements/{statement_id}/pdf</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">Returns a secure reference for downloading the client-safe Payable Statement PDF.</p>
+
+              <div class="code">{
+  "statement_id": "STM-HDFC-2026-08-001",
+  "file_name": "STM-HDFC-2026-08-001.pdf",
+  "content_type": "application/pdf",
+  "download_url": "https://secure.mbo-rewards.com/statements/STM-HDFC-2026-08-001.pdf?token=...",
+  "expires_at": "2026-08-17T02:00:00Z"
+}</div>
+
+              <div class="note" style="margin-top:12px">
+                The download URL should be short-lived and scoped to the authenticated client. It must not expose internal storage paths or permit access to another client's statements.
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+
+      <section class="section section-anchor" id="withdrawals-api">
+        <div class="section-head">
+          <div><h2>Withdrawal Requests API</h2><p>Create and track withdrawal requests against commission that is available for withdrawal.</p></div>
+        </div>
+        <div class="section-body">
+          <div class="note" style="margin-bottom:12px"><b>Use this API when:</b> your system needs to create or track a withdrawal request programmatically.</div>
+          <div class="note safe">
+            A withdrawal request can only be created against an eligible payable statement or available balance belonging to the authenticated client.
+          </div>
+
+          <div class="endpoint" id="list-withdrawals" style="margin-top:14px">
+            <div class="endpoint-head"><span class="method">GET</span><span class="path">/withdrawal-requests</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">List withdrawal requests for the authenticated client.</p>
+
+              <h3 style="font-size:12px">Query Parameters</h3>
+              <table>
+                <thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>from_date</code></td><td>date</td><td>No</td><td>Request date range start.</td></tr>
+                  <tr><td><code>to_date</code></td><td>date</td><td>No</td><td>Request date range end.</td></tr>
+                  <tr><td><code>status</code></td><td>string</td><td>No</td><td>Filter by request status.</td></tr>
+                  <tr><td><code>currency</code></td><td>string</td><td>No</td><td>Currency filter.</td></tr>
+                  <tr><td><code>updated_since</code></td><td>datetime</td><td>No</td><td>Return records changed since this ISO 8601 timestamp.</td></tr>
+                  <tr><td><code>page</code></td><td>integer</td><td>No</td><td>Page number.</td></tr>
+                  <tr><td><code>page_size</code></td><td>integer</td><td>No</td><td>Records per page.</td></tr>
+                </tbody>
+              </table>
+
+              <h3 style="font-size:12px;margin-top:15px">Example Response</h3>
+              <div class="code">{
+  "data": [
+    {
+      "request_id": "WDR-000173",
+      "request_date": "2026-08-18",
+      "statement_id": "STM-HDFC-2026-08-001",
+      "settlement_period": "2026-08",
+      "requested_amount": {
+        "amount": 530.00,
+        "currency": "USD"
+      },
+      "invoice_number": "HDFC-INV-0826-001",
+      "status": "APPROVED",
+      "last_updated_date": "2026-08-18",
+      "last_updated_time": "14:25"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 25,
+    "total_records": 4,
+    "total_pages": 1
+  }
+}</div>
+            </div>
+          </div>
+
+          <div class="endpoint" id="create-withdrawal">
+            <div class="endpoint-head"><span class="method" style="background:#eef4ff;color:#2457d6">POST</span><span class="path">/withdrawal-requests</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">Create a withdrawal request against an available payable statement.</p>
+
+              <h3 style="font-size:12px">Request Body</h3>
+              <div class="code">{
+  "statement_id": "STM-HDFC-2026-08-001",
+  "requested_amount": {
+    "amount": 530.00,
+    "currency": "USD"
+  },
+  "invoice_number": "HDFC-INV-0826-001",
+  "invoice_document_id": "file_01HDFC0826001",
+  "note": "August 2026 withdrawal request"
+}</div>
+
+              <h3 style="font-size:12px;margin-top:15px">Fields</h3>
+              <table>
+                <thead><tr><th>Field</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>statement_id</code></td><td>Yes</td><td>Payable statement currently available for withdrawal.</td></tr>
+                  <tr><td><code>requested_amount.amount</code></td><td>Yes</td><td>Amount requested. Must not exceed the available statement amount.</td></tr>
+                  <tr><td><code>requested_amount.currency</code></td><td>Yes</td><td>Must match the statement currency.</td></tr>
+                  <tr><td><code>invoice_number</code></td><td>Conditional</td><td>Required when the client's billing method is <code>INVOICE_REQUIRED</code>.</td></tr>
+                  <tr><td><code>invoice_document_id</code></td><td>Conditional</td><td>Required when an invoice document is mandatory for the client.</td></tr>
+                  <tr><td><code>note</code></td><td>No</td><td>Optional client note.</td></tr>
+                </tbody>
+              </table>
+
+              <div class="note" style="margin-top:12px">
+                If the client's billing method does not require an invoice, <code>invoice_number</code> and <code>invoice_document_id</code> may be omitted.
+              </div>
+
+              <h3 style="font-size:12px;margin-top:15px">Example Response</h3>
+              <div class="code">{
+  "request_id": "WDR-000181",
+  "statement_id": "STM-HDFC-2026-08-001",
+  "requested_amount": {
+    "amount": 530.00,
+    "currency": "USD"
+  },
+  "status": "REQUESTED",
+  "created_date": "2026-08-18",
+  "created_time": "10:42"
+}</div>
+            </div>
+          </div>
+
+          <div class="endpoint" id="withdrawal-detail">
+            <div class="endpoint-head"><span class="method">GET</span><span class="path">/withdrawal-requests/{request_id}</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">Return the complete client-safe status of one withdrawal request.</p>
+
+              <div class="code">{
+  "request_id": "WDR-000173",
+  "request_date": "2026-08-18",
+  "statement_id": "STM-HDFC-2026-08-001",
+  "settlement_period": "2026-08",
+  "requested_amount": {
+    "amount": 530.00,
+    "currency": "USD"
+  },
+  "invoice": {
+    "invoice_number": "HDFC-INV-0826-001",
+    "document_available": true
+  },
+  "status": "APPROVED",
+  "latest_update": "Your request has been approved and is ready for payment.",
+  "status_history": [
+    {
+      "status": "REQUESTED",
+      "date": "2026-08-18",
+      "time": "10:42"
+    },
+    {
+      "status": "UNDER_REVIEW",
+      "date": "2026-08-18",
+      "time": "11:15"
+    },
+    {
+      "status": "APPROVED",
+      "date": "2026-08-18",
+      "time": "14:25"
+    }
+  ],
+  "last_updated_date": "2026-08-18",
+  "last_updated_time": "14:25"
+}</div>
+
+              <h3 style="font-size:12px;margin-top:15px">Request Statuses</h3>
+              <table>
+                <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
+                <tbody>
+                  <tr><td><code>REQUESTED</code></td><td>Request submitted successfully.</td></tr>
+                  <tr><td><code>UNDER_REVIEW</code></td><td>MBO Rewards is reviewing the request.</td></tr>
+                  <tr><td><code>APPROVED</code></td><td>Request approved and eligible for payment.</td></tr>
+                  <tr><td><code>REJECTED</code></td><td>Request rejected. A client-safe rejection reason may be returned.</td></tr>
+                  <tr><td><code>PROCESSING</code></td><td>Payment processing has started.</td></tr>
+                  <tr><td><code>PAID</code></td><td>Payment has been completed.</td></tr>
+                </tbody>
+              </table>
+
+              <h3 style="font-size:12px;margin-top:15px">Rejected Request Example</h3>
+              <div class="code">{
+  "request_id": "WDR-000154",
+  "status": "REJECTED",
+  "rejected_date": "2026-07-04",
+  "rejected_time": "16:20",
+  "rejection_reason": "Invoice number does not match the uploaded invoice document.",
+  "statement_status": "AVAILABLE_FOR_WITHDRAWAL"
+}</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+
+      <section class="section section-anchor" id="payments-api">
+        <div class="section-head">
+          <div><h2>Payments API</h2><p>Retrieve payments scheduled, processing, completed, or failed for the authenticated client.</p></div>
+        </div>
+        <div class="section-body">
+          <div class="note" style="margin-bottom:12px"><b>Use this API when:</b> your system needs payment status, payment date, or payment reference after approval.</div>
+          <div class="note safe">
+            Payment responses contain only the client-facing payment record and its related withdrawal request and payable statement. Internal payout batches, reconciliation data, bank-reconciliation records, network payment data, and MBO finance notes are never returned.
+          </div>
+
+          <div class="endpoint" id="list-payments" style="margin-top:14px">
+            <div class="endpoint-head"><span class="method">GET</span><span class="path">/payments</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">List payments for the authenticated client.</p>
+
+              <h3 style="font-size:12px">Query Parameters</h3>
+              <table>
+                <thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>from_date</code></td><td>date</td><td>No</td><td>Payment date range start.</td></tr>
+                  <tr><td><code>to_date</code></td><td>date</td><td>No</td><td>Payment date range end.</td></tr>
+                  <tr><td><code>status</code></td><td>string</td><td>No</td><td>Filter by payment status.</td></tr>
+                  <tr><td><code>currency</code></td><td>string</td><td>No</td><td>Currency filter.</td></tr>
+                  <tr><td><code>request_id</code></td><td>string</td><td>No</td><td>Filter by related withdrawal request.</td></tr>
+                  <tr><td><code>statement_id</code></td><td>string</td><td>No</td><td>Filter by related payable statement.</td></tr>
+                  <tr><td><code>updated_since</code></td><td>datetime</td><td>No</td><td>Return records changed since this ISO 8601 timestamp.</td></tr>
+                  <tr><td><code>page</code></td><td>integer</td><td>No</td><td>Page number.</td></tr>
+                  <tr><td><code>page_size</code></td><td>integer</td><td>No</td><td>Records per page.</td></tr>
+                </tbody>
+              </table>
+
+              <h3 style="font-size:12px;margin-top:15px">Example Response</h3>
+              <div class="code">{
+  "data": [
+    {
+      "payment_id": "PAY-000181",
+      "request_id": "WDR-000173",
+      "statement_id": "STM-HDFC-2026-08-001",
+      "settlement_period": "2026-08",
+      "amount": {
+        "amount": 530.00,
+        "currency": "USD"
+      },
+      "status": "SCHEDULED",
+      "payment_date": null,
+      "payment_time": null,
+      "payment_reference": null,
+      "payment_method": "BANK_TRANSFER",
+      "last_updated_date": "2026-08-18",
+      "last_updated_time": "15:10"
+    },
+    {
+      "payment_id": "PAY-000176",
+      "request_id": "WDR-000161",
+      "statement_id": "STM-HDFC-2026-07-002",
+      "settlement_period": "2026-07",
+      "amount": {
+        "amount": 640.00,
+        "currency": "USD"
+      },
+      "status": "PAID",
+      "payment_date": "2026-08-12",
+      "payment_time": "14:22",
+      "payment_reference": "UTR-9182041",
+      "payment_method": "BANK_TRANSFER",
+      "last_updated_date": "2026-08-12",
+      "last_updated_time": "14:22"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 25,
+    "total_records": 4,
+    "total_pages": 1
+  }
+}</div>
+            </div>
+          </div>
+
+          <div class="endpoint" id="payment-detail">
+            <div class="endpoint-head"><span class="method">GET</span><span class="path">/payments/{payment_id}</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">Return the complete client-safe payment record.</p>
+
+              <div class="code">{
+  "payment_id": "PAY-000176",
+  "request": {
+    "request_id": "WDR-000161",
+    "status": "PAID",
+    "invoice_number": "HDFC-INV-0726-002"
+  },
+  "statement": {
+    "statement_id": "STM-HDFC-2026-07-002",
+    "settlement_period": "2026-07"
+  },
+  "amount": {
+    "amount": 640.00,
+    "currency": "USD"
+  },
+  "payment_status": "PAID",
+  "payment_date": "2026-08-12",
+  "payment_time": "14:22",
+  "payment_reference": "UTR-9182041",
+  "payment_method": "BANK_TRANSFER",
+  "last_updated_date": "2026-08-12",
+  "last_updated_time": "14:22"
+}</div>
+
+              <h3 style="font-size:12px;margin-top:15px">Payment Statuses</h3>
+              <table>
+                <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
+                <tbody>
+                  <tr><td><code>SCHEDULED</code></td><td>Payment is approved and scheduled but has not started processing.</td></tr>
+                  <tr><td><code>PROCESSING</code></td><td>Payment processing has started.</td></tr>
+                  <tr><td><code>PAID</code></td><td>Payment has completed successfully.</td></tr>
+                  <tr><td><code>FAILED</code></td><td>Payment could not be completed. A client-safe reason may be returned where appropriate.</td></tr>
+                </tbody>
+              </table>
+
+              <div class="note" style="margin-top:12px">
+                <code>payment_date</code>, <code>payment_time</code>, and <code>payment_reference</code> remain null until an actual payment record exists. The API must not populate estimated or internal reconciliation timestamps as payment completion data.
+              </div>
+
+              <h3 style="font-size:12px;margin-top:15px">Failed Payment Example</h3>
+              <div class="code">{
+  "payment_id": "PAY-000190",
+  "request_id": "WDR-000186",
+  "status": "FAILED",
+  "amount": {
+    "amount": 420.00,
+    "currency": "USD"
+  },
+  "failure_reason": "Payment could not be completed. Please contact MBO Rewards support.",
+  "payment_date": null,
+  "payment_time": null,
+  "payment_reference": null,
+  "last_updated_date": "2026-08-18",
+  "last_updated_time": "17:20"
+}</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+
+      
+      <section class="section section-anchor" id="query-standards">
+        <div class="section-head"><div><h2>Query & Sync Standards</h2><p>Consistent list, sorting and incremental-sync behavior across APIs.</p></div></div>
+        <div class="section-body">
+          <div class="endpoint" id="sorting-standard">
+            <div class="endpoint-head"><span class="tag">STANDARD</span><span class="path">Sorting</span></div>
+            <div class="endpoint-body">
+              <table><thead><tr><th>Parameter</th><th>Example</th><th>Rule</th></tr></thead>
+              <tbody>
+                <tr><td><code>sort_by</code></td><td><code>order_date</code></td><td>Must be an endpoint-approved sortable field.</td></tr>
+                <tr><td><code>sort_order</code></td><td><code>desc</code></td><td><code>asc</code> or <code>desc</code>.</td></tr>
+              </tbody></table>
+            </div>
+          </div>
+
+          <div class="endpoint" id="cursor-pagination-standard">
+            <div class="endpoint-head"><span class="tag">STANDARD</span><span class="path">Cursor Pagination</span></div>
+            <div class="endpoint-body">
+              <p class="api-purpose">Preferred for large, frequently changing order/performance datasets.</p>
+              <div class="code">{
+  "pagination": {
+    "next_cursor": "eyJvcmRlcl9kYXRlIjoi...",
+    "has_more": true,
+    "page_size": 100
+  }
+}</div>
+            </div>
+          </div>
+
+          <div class="endpoint" id="incremental-sync-standard">
+            <div class="endpoint-head"><span class="tag">STANDARD</span><span class="path">Incremental Sync</span></div>
+            <div class="endpoint-body">
+              <p class="api-purpose">Use <code>updated_since</code> to retrieve records created or changed since the last successful client sync.</p>
+              <div class="code">GET /v1/performance/orders?updated_since=2026-08-16T10:00:00Z</div>
+            </div>
+          </div>
+        </div>
+      </section>
+<section class="section section-anchor" id="standards">
+        <div class="section-head">
+          <div><h2>Common API Standards</h2><p>Shared rules applied consistently across all MBO Rewards client API endpoints.</p></div>
+        </div>
+        <div class="section-body">
+          <div class="endpoint" id="response-envelope-standard">
+            <div class="endpoint-head"><span class="tag">STANDARD</span><span class="path">Response Envelope</span></div>
+            <div class="endpoint-body">
+              <p class="api-purpose">Successful API responses use <code>data</code> as the primary payload key. List responses may also include <code>pagination</code>. Errors use the separate <code>error</code> envelope.</p>
+              <div class="code">{
+  "data": {...},
+  "meta": {
+    "request_id": "req_01HDFC8F4K",
+    "api_version": "v1"
+  }
+}</div>
+            </div>
+          </div>
+
+
+          <div class="endpoint" id="pagination-standard">
+            <div class="endpoint-head"><span class="tag">STANDARD</span><span class="path">Pagination</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">List endpoints use page-based pagination.</p>
+              <table>
+                <thead><tr><th>Parameter</th><th>Default</th><th>Rule</th></tr></thead>
+                <tbody>
+                  <tr><td><code>page</code></td><td>1</td><td>Positive integer.</td></tr>
+                  <tr><td><code>page_size</code></td><td>25</td><td>Recommended maximum: 100.</td></tr>
+                </tbody>
+              </table>
+              <div class="code" style="margin-top:12px">{
+  "pagination": {
+    "page": 1,
+    "page_size": 25,
+    "total_records": 284,
+    "total_pages": 12
+  }
+}</div>
+            </div>
+          </div>
+
+          <div class="endpoint" id="filters-standard">
+            <div class="endpoint-head"><span class="tag">STANDARD</span><span class="path">Filtering</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">Filters are optional unless explicitly marked required by the endpoint.</p>
+              <table>
+                <thead><tr><th>Filter Type</th><th>Format</th><th>Example</th></tr></thead>
+                <tbody>
+                  <tr><td>Date range</td><td><code>YYYY-MM-DD</code></td><td><code>?from_date=2026-08-01&amp;to_date=2026-08-16</code></td></tr>
+                  <tr><td>Status</td><td>Uppercase enum</td><td><code>?status=PAID</code></td></tr>
+                  <tr><td>Campaign Type</td><td>Uppercase enum</td><td><code>?campaign_type=COUPON</code></td></tr>
+                  <tr><td>Country</td><td>String</td><td><code>?country=India</code></td></tr>
+                  <tr><td>Search</td><td>Free text</td><td><code>?search=Nike</code></td></tr>
+                </tbody>
+              </table>
+              <div class="note" style="margin-top:12px">
+                Unknown filter values should return a validation error rather than being silently ignored.
+              </div>
+            </div>
+          </div>
+
+          <div class="endpoint" id="datetime-standard">
+            <div class="endpoint-head"><span class="tag">STANDARD</span><span class="path">Date &amp; Time</span></div>
+            <div class="endpoint-body">
+              <table>
+                <thead><tr><th>Field Type</th><th>Format</th><th>Example</th></tr></thead>
+                <tbody>
+                  <tr><td>Date</td><td><code>YYYY-MM-DD</code></td><td><code>2026-08-16</code></td></tr>
+                  <tr><td>Time</td><td><code>HH:MM</code> (24-hour)</td><td><code>18:40</code></td></tr>
+                  <tr><td>Timestamp</td><td>ISO 8601 with timezone</td><td><code>2026-08-16T18:40:00+05:30</code></td></tr>
+                </tbody>
+              </table>
+              <div class="note" style="margin-top:12px">
+                Where the product UI stores date and time separately, the API may also return separate <code>last_updated_date</code> and <code>last_updated_time</code> fields. If a source does not provide a time value, the API should return <code>null</code> rather than inventing one.
+              </div>
+            </div>
+          </div>
+
+          <div class="endpoint" id="money-standard">
+            <div class="endpoint-head"><span class="tag">STANDARD</span><span class="path">Money &amp; Currency</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">Monetary values use a consistent amount/currency object.</p>
+              <div class="code">{
+  "amount": 530.00,
+  "currency": "USD"
+}</div>
+              <table style="margin-top:12px">
+                <thead><tr><th>Rule</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td>Amount</td><td>Numeric value, not a formatted string.</td></tr>
+                  <tr><td>Currency</td><td>ISO 4217 currency code such as <code>USD</code>, <code>INR</code>, or <code>AED</code>.</td></tr>
+                  <tr><td>No mixed currencies</td><td>Totals should not combine multiple currencies into one numeric total.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="endpoint" id="versioning-standard">
+            <div class="endpoint-head"><span class="tag">STANDARD</span><span class="path">Versioning</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">The API version is part of the base path.</p>
+              <div class="code">https://api.mbo-rewards.com/v1</div>
+              <div class="note" style="margin-top:12px">
+                Breaking changes require a new version path. Non-breaking additions, such as adding an optional field, may remain within the same version.
+              </div>
+            </div>
+          </div>
+
+          <div class="endpoint" id="idempotency-standard">
+            <div class="endpoint-head"><span class="tag">STANDARD</span><span class="path">Idempotency</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">POST requests that create a financial object should support an idempotency key.</p>
+              <table>
+                <thead><tr><th>Header</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>Idempotency-Key</code></td><td>Recommended for financial POSTs</td><td>Unique client-generated key used to prevent accidental duplicate creation.</td></tr>
+                </tbody>
+              </table>
+              <div class="code" style="margin-top:12px">POST /v1/withdrawal-requests
+Idempotency-Key: hdfc-withdrawal-2026-08-001</div>
+              <div class="note" style="margin-top:12px">
+                Reusing the same idempotency key with the same request payload should return the original result. Reusing the key with a different payload should return a conflict error.
+              </div>
+            </div>
+          </div>
+
+          <div class="endpoint" id="rate-limit-standard">
+            <div class="endpoint-head"><span class="tag">STANDARD</span><span class="path">Rate Limits</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">Exact production limits can be configured later, but the response contract should be standardized now.</p>
+              <table>
+                <thead><tr><th>Header</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>X-RateLimit-Limit</code></td><td>Total requests allowed in the current window.</td></tr>
+                  <tr><td><code>X-RateLimit-Remaining</code></td><td>Requests remaining in the current window.</td></tr>
+                  <tr><td><code>X-RateLimit-Reset</code></td><td>UTC timestamp when the limit resets.</td></tr>
+                  <tr><td><code>Retry-After</code></td><td>Seconds to wait after a <code>429</code> response.</td></tr>
+                </tbody>
+              </table>
+              <div class="note" style="margin-top:12px">
+                The exact numeric limit should be set during infrastructure implementation rather than invented in the documentation prototype.
+              </div>
+            </div>
+          </div>
+
+          <div class="endpoint" id="request-id-standard">
+            <div class="endpoint-head"><span class="tag">STANDARD</span><span class="path">Request IDs</span></div>
+            <div class="endpoint-body">
+              <p style="font-size:11px;color:#475467;margin-top:0">Every API response should include a request identifier for support and tracing.</p>
+              <div class="code">X-MBO-Request-ID: req_01HDFC8F4K</div>
+              <p style="font-size:11px;color:#475467">The same request ID should also be included inside error payloads.</p>
+            </div>
+          </div>
+
+          <div class="endpoint">
+            <div class="endpoint-head"><span class="tag">STANDARD</span><span class="path">Error Response Schema</span></div>
+            <div class="endpoint-body">
+              <div class="code">{
+  "error": {
+    "code": "INVALID_REQUEST",
+    "message": "The request could not be processed.",
+    "details": [
+      {
+        "field": "from_date",
+        "issue": "from_date must be earlier than or equal to to_date"
+      }
+    ],
+    "request_id": "req_01HDFC8F4K"
+  }
+}</div>
+              <table style="margin-top:12px">
+                <thead><tr><th>HTTP Status</th><th>Use</th></tr></thead>
+                <tbody>
+                  <tr><td>400</td><td>Validation / malformed request.</td></tr>
+                  <tr><td>401</td><td>Authentication failure.</td></tr>
+                  <tr><td>403</td><td>Authenticated but not allowed.</td></tr>
+                  <tr><td>404</td><td>Requested client-safe resource not found.</td></tr>
+                  <tr><td>409</td><td>State conflict / duplicate / idempotency conflict.</td></tr>
+                  <tr><td>429</td><td>Rate limit exceeded.</td></tr>
+                  <tr><td>500</td><td>Unexpected server error.</td></tr>
+                  <tr><td>503</td><td>Service temporarily unavailable.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="endpoint">
+            <div class="endpoint-head"><span class="tag">STANDARD</span><span class="path">HTTP Method Rules</span></div>
+            <div class="endpoint-body">
+              <table>
+                <thead><tr><th>Method</th><th>Use</th></tr></thead>
+                <tbody>
+                  <tr><td><code>GET</code></td><td>Retrieve client-safe resources.</td></tr>
+                  <tr><td><code>POST</code></td><td>Create a client-initiated resource, such as a withdrawal request.</td></tr>
+                  <tr><td><code>PATCH</code></td><td>Reserved for future partial updates where the client is allowed to edit a resource.</td></tr>
+                  <tr><td><code>DELETE</code></td><td>Not exposed for financial records.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      
+      <section class="section section-anchor" id="reference-data">
+        <div class="section-head"><div><h2>Reference Data & Standardization</h2><p>Canonical values used throughout the MBO Rewards Client API.</p></div></div>
+        <div class="section-body">
+
+          <div class="ref-grid">
+            <div class="ref-card"><span>Country</span><b>ISO 3166-1 alpha-2</b><p><code>IN</code>, <code>AE</code>, <code>US</code>, <code>GB</code></p></div>
+            <div class="ref-card"><span>Currency</span><b>ISO 4217</b><p><code>INR</code>, <code>AED</code>, <code>USD</code>, <code>GBP</code></p></div>
+            <div class="ref-card"><span>Timezone</span><b>IANA timezone ID</b><p><code>Asia/Kolkata</code>, <code>Asia/Dubai</code></p></div>
+            <div class="ref-card"><span>Language</span><b>ISO language code</b><p><code>en</code>, <code>ar</code>, <code>hi</code></p></div>
+            <div class="ref-card"><span>Date</span><b>ISO 8601</b><p><code>2026-08-17</code></p></div>
+            <div class="ref-card"><span>DateTime</span><b>ISO 8601 + timezone</b><p><code>2026-08-17T01:45:00+05:30</code></p></div>
+          </div>
+
+          <h3 style="font-size:13px;margin-top:18px">Reference Endpoints</h3>
+          <table>
+            <thead><tr><th>Endpoint</th><th>Purpose</th></tr></thead>
+            <tbody>
+              <tr><td><code>GET /reference/countries</code></td><td>Supported countries using ISO alpha-2 codes.</td></tr>
+              <tr><td><code>GET /reference/currencies</code></td><td>Supported ISO 4217 currencies.</td></tr>
+              <tr><td><code>GET /reference/timezones</code></td><td>Supported IANA timezone identifiers.</td></tr>
+              <tr><td><code>GET /reference/languages</code></td><td>Supported language codes.</td></tr>
+              <tr><td><code>GET /reference/campaign-types</code></td><td>Canonical campaign types.</td></tr>
+              <tr><td><code>GET /reference/commission-types</code></td><td>Canonical commission types.</td></tr>
+              <tr><td><code>GET /reference/tracking-methods</code></td><td>Canonical attribution/tracking methods.</td></tr>
+              <tr><td><code>GET /reference/customer-types</code></td><td>Canonical customer classifications.</td></tr>
+              <tr><td><code>GET /reference/order-statuses</code></td><td>Canonical order statuses.</td></tr>
+              <tr><td><code>GET /reference/campaign-statuses</code></td><td>Canonical campaign statuses.</td></tr>
+              <tr><td><code>GET /reference/statement-statuses</code></td><td>Canonical statement statuses.</td></tr>
+              <tr><td><code>GET /reference/withdrawal-statuses</code></td><td>Canonical withdrawal statuses.</td></tr>
+              <tr><td><code>GET /reference/payment-statuses</code></td><td>Canonical payment statuses.</td></tr>
+            </tbody>
+          </table>
+
+          <h3 style="font-size:13px;margin-top:18px">Canonical Statuses</h3>
+          <p style="font-size:11px;color:#667085">Orders</p>
+          <div class="status-list"><span class="status-chip">PENDING</span><span class="status-chip">CONFIRMED</span><span class="status-chip">REJECTED</span><span class="status-chip">CANCELLED</span></div>
+
+          <p style="font-size:11px;color:#667085">Campaigns</p>
+          <div class="status-list"><span class="status-chip">DRAFT</span><span class="status-chip">SCHEDULED</span><span class="status-chip">LIVE</span><span class="status-chip">PAUSED</span><span class="status-chip">EXPIRED</span><span class="status-chip">ENDED</span></div>
+
+          <p style="font-size:11px;color:#667085">Withdrawals</p>
+          <div class="status-list"><span class="status-chip">REQUESTED</span><span class="status-chip">UNDER_REVIEW</span><span class="status-chip">APPROVED</span><span class="status-chip">REJECTED</span><span class="status-chip">PROCESSING</span><span class="status-chip">PAID</span></div>
+
+          <p style="font-size:11px;color:#667085">Payments</p>
+          <div class="status-list"><span class="status-chip">SCHEDULED</span><span class="status-chip">PROCESSING</span><span class="status-chip">PAID</span><span class="status-chip">FAILED</span></div>
+
+          <h3 style="font-size:13px;margin-top:18px">Campaign & Tracking Types</h3>
+          <table>
+            <thead><tr><th>Concept</th><th>Canonical Values</th></tr></thead>
+            <tbody>
+              <tr><td>Campaign Type</td><td><code>AFFILIATE_LINK</code>, <code>COUPON</code>, <code>PRODUCT</code>. <code>PROMOTION</code> is reserved for a future Promotions API.</td></tr>
+              <tr><td>Tracking Method</td><td><code>LINK</code>, <code>COUPON</code>, <code>LINK_AND_COUPON</code></td></tr>
+              <tr><td>Commission Type</td><td><code>PERCENTAGE</code>, <code>FIXED</code></td></tr>
+              <tr><td>Customer Type</td><td><code>NEW</code>, <code>EXISTING</code>, <code>UNKNOWN</code></td></tr>
+            </tbody>
+          </table>
+
+
+          <h3 style="font-size:13px;margin-top:18px">Public Resource IDs</h3>
+          <table>
+            <thead><tr><th>Resource</th><th>Prefix</th><th>Example</th></tr></thead>
+            <tbody>
+              <tr><td>Client</td><td><code>CLI</code></td><td><code>CLI-HDFC-001</code></td></tr>
+              <tr><td>Brand</td><td><code>BRD</code></td><td><code>BRD-0001</code></td></tr>
+              <tr><td>Campaign</td><td><code>CMP</code></td><td><code>CMP-001</code></td></tr>
+              <tr><td>Product</td><td><code>PRD</code></td><td><code>PRD-001</code></td></tr>
+              <tr><td>Statement</td><td><code>STM</code></td><td><code>STM-HDFC-2026-08-001</code></td></tr>
+              <tr><td>Withdrawal Request</td><td><code>WDR</code></td><td><code>WDR-000173</code></td></tr>
+              <tr><td>Payment</td><td><code>PAY</code></td><td><code>PAY-000176</code></td></tr>
+            </tbody>
+          </table>
+
+          <h3 style="font-size:13px;margin-top:18px">Country Applicability</h3>
+          <div class="code">{
+  "countries": [
+    {"code": "AE", "name": "United Arab Emirates"},
+    {"code": "SA", "name": "Saudi Arabia"},
+    {"code": "QA", "name": "Qatar"}
+  ]
+}</div>
+
+          <h3 style="font-size:13px;margin-top:18px">Currency Separation</h3>
+          <div class="note">
+            Order currency, commission currency, settlement currency, and reporting currency must be treated as separate concepts. MBO must never silently combine or convert them.
+          </div>
+
+          <h3 style="font-size:13px;margin-top:18px">Null Values</h3>
+          <div class="code">{
+  "coupon_code": null,
+  "order_confirmed_date": null,
+  "customer_type": "UNKNOWN"
+}</div>
+        </div>
+      </section>
+
+      <section class="section section-anchor" id="deprecation-policy">
+        <div class="section-head"><div><h2>Deprecation Policy</h2><p>Rules for evolving the API without unexpectedly breaking client integrations.</p></div></div>
+        <div class="section-body">
+          <table>
+            <thead><tr><th>Change</th><th>Policy</th></tr></thead>
+            <tbody>
+              <tr><td>Non-breaking addition</td><td>May remain within the current API version.</td></tr>
+              <tr><td>Breaking contract change</td><td>Requires a new API version.</td></tr>
+              <tr><td>Deprecated field/endpoint</td><td>Marked deprecated, announced in changelog, then removed after a migration period.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section section-anchor" id="changelog">
+        <div class="section-head"><div><h2>Changelog</h2><p>Client-visible API changes by release.</p></div></div>
+        <div class="section-body">
+          <table>
+            <thead><tr><th>Date</th><th>Type</th><th>Change</th></tr></thead>
+            <tbody>
+              <tr><td>2026-08-17</td><td>Added</td><td>Reference-data standardization, Product API, API scopes, Account API, cursor pagination, sorting, incremental sync and deprecation policy.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+<section class="section section-anchor" id="errors">
+        <div class="section-head"><div><h2>Authentication Errors</h2><p>Standard authentication failures for the client API.</p></div></div>
+        <div class="section-body">
+          <table>
+            <thead><tr><th>HTTP</th><th>Code</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td>401</td><td><code>AUTHENTICATION_REQUIRED</code></td><td>Client ID or API key was not provided.</td></tr>
+              <tr><td>401</td><td><code>INVALID_API_KEY</code></td><td>API key is invalid for the supplied client/environment.</td></tr>
+              <tr><td>403</td><td><code>CLIENT_INACTIVE</code></td><td>Client account is not active.</td></tr>
+              <tr><td>403</td><td><code>API_ACCESS_DISABLED</code></td><td>Client delivery method does not include API access.</td></tr>
+              <tr><td>404</td><td><code>CAMPAIGN_NOT_FOUND</code></td><td>Campaign does not exist or is not available to this client.</td></tr>
+              <tr><td>404</td><td><code>STATEMENT_NOT_FOUND</code></td><td>Statement does not exist or is not available to this client.</td></tr>
+              <tr><td>409</td><td><code>STATEMENT_NOT_WITHDRAWABLE</code></td><td>The statement is not currently available for withdrawal.</td></tr>
+              <tr><td>400</td><td><code>INVALID_WITHDRAWAL_AMOUNT</code></td><td>Requested amount is invalid or exceeds the available amount.</td></tr>
+              <tr><td>400</td><td><code>CURRENCY_MISMATCH</code></td><td>Requested currency does not match the statement currency.</td></tr>
+              <tr><td>400</td><td><code>INVOICE_REQUIRED</code></td><td>Invoice number/document is required for this client.</td></tr>
+              <tr><td>409</td><td><code>DUPLICATE_WITHDRAWAL_REQUEST</code></td><td>An active request already exists for the statement.</td></tr>
+              <tr><td>404</td><td><code>WITHDRAWAL_REQUEST_NOT_FOUND</code></td><td>Request does not exist or is not available to this client.</td></tr>
+              <tr><td>404</td><td><code>PAYMENT_NOT_FOUND</code></td><td>Payment does not exist or is not available to this client.</td></tr>
+              <tr><td>400</td><td><code>INVALID_REQUEST</code></td><td>Request validation failed.</td></tr>
+              <tr><td>409</td><td><code>IDEMPOTENCY_CONFLICT</code></td><td>The same idempotency key was reused with a different request payload.</td></tr>
+              <tr><td>429</td><td><code>RATE_LIMIT_EXCEEDED</code></td><td>The client has exceeded the allowed request rate.</td></tr>
+              <tr><td>503</td><td><code>SERVICE_UNAVAILABLE</code></td><td>The API is temporarily unavailable.</td></tr>
+            </tbody>
+          </table>
+
+          <div class="code" style="margin-top:12px">{
+  "error": {
+    "code": "INVALID_API_KEY",
+    "message": "The API credentials are invalid for this environment.",
+    "request_id": "req_01HDFC8F4K"
+  }
+}</div>
+        </div>
+      </section>
+
+      <section class="section section-anchor" id="safe-fields">
+        <div class="section-head"><div><h2>Client-Safe Field Rule</h2><p>The API mirrors the same information allowed in the Client Portal.</p></div></div>
+        <div class="section-body">
+          <div class="grid2">
+            <div class="box">
+              <span>Allowed</span>
+              <b>Campaign ID, Brand, Campaign Name, Campaign Type, Customer Offer, Commission, Coupon Code, Tracking Link, Validity, Country, T&amp;C, Status, Last Updated</b>
+            </div>
+            <div class="box">
+              <span>Never Returned</span>
+              <b>Network Name, Network Campaign ID, Raw Network Link, Network Commission, MBO Margin, Source Selection, Raw Payload, Other Clients</b>
+            </div>
+          </div>
+        </div>
+      </section>
+    
+    </div>
+  </main>
+
+  <aside class="right">
+    <div class="right-title">On this page</div>
+    <div id="rightNav"><a href="#overview">Overview</a><a href="#authentication">Authentication</a><a href="#campaigns">Campaigns</a><a href="#products-api">Products</a><a href="#performance">Performance</a><a href="#statements-api">Statements</a><a href="#withdrawals-api">Withdrawals</a><a href="#payments-api">Payments</a><a href="#reference-data">Reference Data</a></div>
+  </aside>
+</div>
+
+<button id="backTop" class="back-top" type="button">↑</button>
+
+<script>
+(function(){
+  const left=document.getElementById('leftNav');
+  const mobileBtn=document.getElementById('mobileNavBtn');
+  const search=document.getElementById('docsSearch');
+  const navLinks=[...document.querySelectorAll('#docsNav a[href^="#"]')];
+  const rightLinks=[...document.querySelectorAll('#rightNav a[href^="#"]')];
+
+  mobileBtn?.addEventListener('click',()=>left.classList.toggle('open'));
+
+  document.querySelectorAll('.nav-toggle').forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      const g=btn.closest('.nav-group');
+      const collapsed=g.classList.toggle('collapsed');
+      btn.setAttribute('aria-expanded',collapsed?'false':'true');
+    });
+  });
+
+  function target(link){
+    const id=(link.getAttribute('href')||'').slice(1);
+    return id?document.getElementById(id):null;
+  }
+
+  navLinks.forEach(a=>a.addEventListener('click',()=>{
+    left.classList.remove('open');
+  }));
+
+  search?.addEventListener('input',()=>{
+    const q=search.value.trim().toLowerCase();
+    document.querySelectorAll('.nav-group').forEach(group=>{
+      let matches=0;
+      group.querySelectorAll('a[href^="#"]').forEach(a=>{
+        const t=target(a);
+        const hay=((a.textContent||'')+' '+(t?.textContent||'')).toLowerCase();
+        const show=!q||hay.includes(q);
+        a.style.display=show?'':'none';
+        if(show)matches++;
+      });
+      group.style.display=matches?'':'none';
+      if(q&&matches)group.classList.remove('collapsed');
+    });
+  });
+
+  function activate(id){
+    navLinks.forEach(a=>a.classList.toggle('active',a.getAttribute('href')==='#'+id));
+    rightLinks.forEach(a=>a.classList.toggle('active',a.getAttribute('href')==='#'+id));
+  }
+
+  const sections=[...document.querySelectorAll('[id].section, .hero[id]')];
+  if('IntersectionObserver' in window){
+    const obs=new IntersectionObserver(entries=>{
+      const v=entries.filter(e=>e.isIntersecting).sort((a,b)=>a.boundingClientRect.top-b.boundingClientRect.top);
+      if(v.length)activate(v[0].target.id);
+    },{rootMargin:'-82px 0px -72% 0px',threshold:[0,0.01]});
+    sections.forEach(s=>obs.observe(s));
+  }
+
+  document.querySelectorAll('.code').forEach(block=>{
+    if(block.querySelector('.copy-code'))return;
+    const b=document.createElement('button');
+    b.className='copy-code'; b.type='button'; b.textContent='Copy';
+    b.addEventListener('click',async()=>{
+      const clone=block.cloneNode(true); clone.querySelector('.copy-code')?.remove();
+      const txt=clone.innerText.trim();
+      try{await navigator.clipboard.writeText(txt);b.textContent='Copied'}catch(e){b.textContent='Select & copy'}
+      setTimeout(()=>b.textContent='Copy',1200);
+    });
+    block.prepend(b);
+  });
+
+  const env=document.getElementById('envSelect');
+  env?.addEventListener('change',()=>{
+    document.querySelectorAll('.overview-card strong').forEach(el=>{
+      if(el.textContent.includes('api.mbo-rewards.com') || el.textContent.includes('sandbox-api.mbo-rewards.com')){
+        el.textContent=env.value==='sandbox'?'sandbox-api.mbo-rewards.com':'api.mbo-rewards.com';
+      }
+    });
+  });
+
+  const back=document.getElementById('backTop');
+  window.addEventListener('scroll',()=>back.classList.toggle('show',window.scrollY>500),{passive:true});
+  back.addEventListener('click',()=>window.scrollTo({top:0,behavior:'smooth'}));
+
+  activate((location.hash||'#overview').slice(1));
+})();
+</script>
+</body>
+</html>

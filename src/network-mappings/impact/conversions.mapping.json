@@ -1,0 +1,115 @@
+{
+  "supplier": "IMPACT",
+  "resourceKey": "conversions",
+  "mappingVersion": "1",
+  "fields": [
+    {
+      "transform": "COALESCE",
+      "sources": ["Id", "ActionId", "action_id", "id"],
+      "targetField": "supplierConversionId",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["Oid", "OrderId", "oid", "order_id", "ReferringDate"],
+      "targetField": "supplierOrderId",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["CampaignId", "campaign_id"],
+      "targetField": "supplierCampaignId",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["Payout", "Amount", "Commission", "ActionEarnings", "payout"],
+      "targetField": "supplierCommission",
+      "required": false,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["Currency", "PayoutCurrency", "currency"],
+      "targetField": "currency",
+      "required": false,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "CURRENCY",
+      "sourcePath": "Currency",
+      "targetField": "currencyNormalized",
+      "required": false,
+      "quality": "DERIVED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["SaleAmount", "Amount", "OrderValue", "intendedAmount"],
+      "targetField": "orderValue",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["EventDate", "CreationDate", "LockingDate", "event_date"],
+      "targetField": "eventAt",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "DATE",
+      "sourcePath": "EventDate",
+      "targetField": "eventAtIso",
+      "required": false,
+      "quality": "DERIVED"
+    },
+    {
+      "transform": "ENUM",
+      "sourcePath": "State",
+      "targetField": "validationStatusHint",
+      "required": false,
+      "quality": "DERIVED",
+      "enumMap": {
+        "PENDING": "VALIDATION_PENDING",
+        "APPROVED": "VALIDATION_APPROVED",
+        "REVERSED": "VALIDATION_REJECTED",
+        "Rejected": "VALIDATION_REJECTED"
+      }
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["SubId1", "subId1", "SubId"],
+      "targetField": "attribution.clientId",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["SubId2", "subId2"],
+      "targetField": "attribution.assignmentId",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["SubId3", "subId3", "ClickId"],
+      "targetField": "attribution.clickId",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["PromoCode", "CouponCode", "voucher"],
+      "targetField": "couponCode",
+      "required": false,
+      "quality": "OPTIONAL"
+    }
+  ],
+  "notes": [
+    "Actions map to Order/Conversion via ConversionPromotion — not FinancialTransaction.",
+    "Finance remains Wave D SoT after validation."
+  ]
+}
