@@ -9,7 +9,7 @@ datasource db {
 }
 
 model Entity {
-  id              String   @id @default(uuid())
+  id              String    @id @default(uuid())
   externalId      String
   networkSource   String
   entityType      String
@@ -25,13 +25,18 @@ model Entity {
   eventDate       DateTime?
   normalizedData  Json
   rawData         Json
-  isManual        Boolean  @default(false)
+  isManual        Boolean   @default(false)
   manualData      Json?
   fieldPolicies   Json?
   lastSyncedData  Json?
-  hasSyncConflict Boolean  @default(false)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  hasSyncConflict Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  supplierCampaigns SupplierCampaign[]
+  supplierCoupons   SupplierCoupon[]
+  mapperErrors      MapperError[]
+  rawPayloads       RawPayload[]
 
   @@unique([externalId, networkSource, entityType])
   @@index([entityType])
@@ -40,11 +45,6 @@ model Entity {
   @@index([entityType, networkSource, updatedAt])
   @@index([campaignName, eventDate])
   @@index([code, eventDate])
-
-  supplierCampaigns SupplierCampaign[]
-  supplierCoupons     SupplierCoupon[]
-  mapperErrors        MapperError[]
-  rawPayloads         RawPayload[]
 }
 
 /// Wave B — append-only supplier API payload store (immutable historical lineage).
@@ -81,29 +81,29 @@ model RawPayload {
   createdAt          DateTime         @default(now())
 
   /// Pointer 4 — immutable source-evidence identity (never rewritten by mapping).
-  network            String?
-  networkAccountId   String?
-  sourceObject       String?
-  endpointOrReport   String?
-  apiVersion         String?
-  syncRunId          String?
-  requestWindow      Json?
-  httpStatus         Int?
+  network          String?
+  networkAccountId String?
+  sourceObject     String?
+  endpointOrReport String?
+  apiVersion       String?
+  syncRunId        String?
+  requestWindow    Json?
+  httpStatus       Int?
   /// JSON | CSV | FILE | TEXT
-  bodyKind           String           @default("JSON")
-  bodyRef            String?
-  payloadText        String?
+  bodyKind         String  @default("JSON")
+  bodyRef          String?
+  payloadText      String?
 
-  networkAccount     MarketplaceAccount? @relation(fields: [networkAccountId], references: [id], onDelete: SetNull)
-  syncRun            NetworkSyncRun?     @relation(fields: [syncRunId], references: [id], onDelete: SetNull)
+  networkAccount MarketplaceAccount? @relation(fields: [networkAccountId], references: [id], onDelete: SetNull)
+  syncRun        NetworkSyncRun?     @relation(fields: [syncRunId], references: [id], onDelete: SetNull)
 
-  supplierCampaigns SupplierCampaign[]
-  supplierCoupons   SupplierCoupon[]
-  conversions       Conversion[]
-  orders            Order[]
-  productSources    ProductSource[]
+  supplierCampaigns       SupplierCampaign[]
+  supplierCoupons         SupplierCoupon[]
+  conversions             Conversion[]
+  orders                  Order[]
+  productSources          ProductSource[]
   supplierCommissionRules SupplierCommissionRule[]
-  productFeedItems  ProductFeedItem[]
+  productFeedItems        ProductFeedItem[]
 
   @@unique([supplier, sourceAccountLabel, resourceKey, externalId, payloadHash])
   @@index([supplier, entityType, receivedAt(sort: Desc)])
@@ -209,13 +209,13 @@ model MappingRegistryRule {
 }
 
 model SyncJobLog {
-  id            String   @id @default(uuid())
-  jobName        String
-  status         String
-  attempt        Int      @default(1)
-  message        String?
-  metadata       Json?
-  createdAt      DateTime @default(now())
+  id        String   @id @default(uuid())
+  jobName   String
+  status    String
+  attempt   Int      @default(1)
+  message   String?
+  metadata  Json?
+  createdAt DateTime @default(now())
 }
 
 enum UserRole {
@@ -275,45 +275,45 @@ model AccessLog {
 }
 
 model MarketplaceAccount {
-  id                     String   @id @default(uuid())
-  platform               String
-  accountLabel           String   @default("default")
-  authType               String
-  accountExternalId      String?
-  agencyId               String?
-  contactId              String?
-  encryptedAccessToken   String
-  encryptedRefreshToken  String?
-  tokenExpiresAt         DateTime?
-  maskedApiKey           String?
-  scope                  String?
-  connectedAt            DateTime @default(now())
-  updatedAt              DateTime @updatedAt
+  id                    String    @id @default(uuid())
+  platform              String
+  accountLabel          String    @default("default")
+  authType              String
+  accountExternalId     String?
+  agencyId              String?
+  contactId             String?
+  encryptedAccessToken  String
+  encryptedRefreshToken String?
+  tokenExpiresAt        DateTime?
+  maskedApiKey          String?
+  scope                 String?
+  connectedAt           DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
   // Phase 1/5 — incremental sync and static-resource cache timestamps
-  lastSuccessfulSync     DateTime?
-  lastCampaignSyncAt     DateTime?
-  lastCouponSyncAt       DateTime?
+  lastSuccessfulSync    DateTime?
+  lastCampaignSyncAt    DateTime?
+  lastCouponSyncAt      DateTime?
   /// Network Health — order/conversion sync evidence (null = never / unknown).
-  lastOrderSyncAt        DateTime?
+  lastOrderSyncAt       DateTime?
   /// Network Health — payment/invoice sync evidence (null = never / unknown).
-  lastPaymentSyncAt      DateTime?
+  lastPaymentSyncAt     DateTime?
   /// Configured sync cadence in minutes when known; null = UNKNOWN (do not invent).
-  syncFrequencyMinutes   Int?
-  lastAuthCheckAt        DateTime?
-  lastSyncError          String?
+  syncFrequencyMinutes  Int?
+  lastAuthCheckAt       DateTime?
+  lastSyncError         String?
   /// PRODUCTION | SANDBOX — where this publisher account is used.
-  environment            String    @default("PRODUCTION")
+  environment           String    @default("PRODUCTION")
   /// Opaque secret-manager reference. Never the secret itself.
-  secretRef              String?
+  secretRef             String?
   /// Catalog/campaign/coupon/order ingest for this account.
-  syncEnabled            Boolean   @default(true)
+  syncEnabled           Boolean   @default(true)
   /// Payment/invoice ingest for this account.
-  financeSyncEnabled     Boolean   @default(true)
+  financeSyncEnabled    Boolean   @default(true)
   /// NOT_CONFIGURED | UNKNOWN | HEALTHY | EXPIRED | FAILED
-  credentialHealth       String    @default("UNKNOWN")
+  credentialHealth      String    @default("UNKNOWN")
 
-  syncRuns               NetworkSyncRun[]
-  rawPayloads            RawPayload[]
+  syncRuns    NetworkSyncRun[]
+  rawPayloads RawPayload[]
 
   @@unique([platform, accountLabel])
   @@index([platform, authType])
@@ -322,35 +322,35 @@ model MarketplaceAccount {
 /// One isolated sync of a single source object for one NetworkAccount.
 /// Identity: network + network_account_id + source_object + endpoint + sync_run_id.
 model NetworkSyncRun {
-  id                   String    @id @default(uuid())
-  network              String
-  networkAccountId     String?
-  sourceObject         String
-  endpoint             String
+  id                 String    @id @default(uuid())
+  network            String
+  networkAccountId   String?
+  sourceObject       String
+  endpoint           String
   /// RUNNING | SUCCESS | PARTIAL | FAILED | CANCELLED (+ legacy STARTED/SUCCEEDED/SKIPPED/NOT_AVAILABLE)
-  status               String
-  recordCount          Int?
-  jobType              String?
-  checkpointBefore     Json?
-  checkpointAfter      Json?
-  recordsFetched       Int?
-  recordsCreated       Int?
-  recordsUpdated       Int?
-  recordsUnchanged     Int?
-  recordsQuarantined   Int?
-  retryCount           Int?
-  rateLimitTelemetry   Json?
-  trigger              String?
-  parentSyncRunId      String?
-  metadata             Json?
-  errorCode            String?
-  errorMessage         String?
-  startedAt            DateTime  @default(now())
-  finishedAt           DateTime?
-  createdAt            DateTime  @default(now())
+  status             String
+  recordCount        Int?
+  jobType            String?
+  checkpointBefore   Json?
+  checkpointAfter    Json?
+  recordsFetched     Int?
+  recordsCreated     Int?
+  recordsUpdated     Int?
+  recordsUnchanged   Int?
+  recordsQuarantined Int?
+  retryCount         Int?
+  rateLimitTelemetry Json?
+  trigger            String?
+  parentSyncRunId    String?
+  metadata           Json?
+  errorCode          String?
+  errorMessage       String?
+  startedAt          DateTime  @default(now())
+  finishedAt         DateTime?
+  createdAt          DateTime  @default(now())
 
-  networkAccount       MarketplaceAccount? @relation(fields: [networkAccountId], references: [id], onDelete: SetNull)
-  rawPayloads          RawPayload[]
+  networkAccount MarketplaceAccount? @relation(fields: [networkAccountId], references: [id], onDelete: SetNull)
+  rawPayloads    RawPayload[]
 
   @@index([network, sourceObject, startedAt])
   @@index([networkAccountId, startedAt])
@@ -557,12 +557,12 @@ model SupplierCampaign {
   createdAt              DateTime             @default(now())
   updatedAt              DateTime             @updatedAt
 
-  coupons SupplierCoupon[]
-  couponCodeMasters CouponCodeMaster[]
-  merchantReview MerchantReview?
-  campaignSources CampaignSource[]
+  coupons                 SupplierCoupon[]
+  couponCodeMasters       CouponCodeMaster[]
+  merchantReview          MerchantReview?
+  campaignSources         CampaignSource[]
   supplierCommissionRules SupplierCommissionRule[]
-  mappingCertification MappingCertification?
+  mappingCertification    MappingCertification?
   networkPerformanceFacts NetworkPerformanceFact[]
 
   @@unique([supplier, supplierRegion, sourceAccountLabel, supplierCampaignId])
@@ -577,41 +577,41 @@ model SupplierCampaign {
 }
 
 model SupplierCoupon {
-  id                  String           @id @default(uuid())
-  supplierCampaignId  String
-  supplierCampaign    SupplierCampaign @relation(fields: [supplierCampaignId], references: [id], onDelete: Cascade)
-  entityId            String?
-  entity              Entity?          @relation(fields: [entityId], references: [id], onDelete: SetNull)
-  rawPayloadId        String?
-  rawPayloadRecord    RawPayload?      @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
-  supplierCouponId    String?
-  couponType          CouponType       @default(UNKNOWN)
-  couponCode          String?
-  couponLink          String?
-  couponDescription   String?
-  title               String?
+  id                   String           @id @default(uuid())
+  supplierCampaignId   String
+  supplierCampaign     SupplierCampaign @relation(fields: [supplierCampaignId], references: [id], onDelete: Cascade)
+  entityId             String?
+  entity               Entity?          @relation(fields: [entityId], references: [id], onDelete: SetNull)
+  rawPayloadId         String?
+  rawPayloadRecord     RawPayload?      @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
+  supplierCouponId     String?
+  couponType           CouponType       @default(UNKNOWN)
+  couponCode           String?
+  couponLink           String?
+  couponDescription    String?
+  title                String?
   promotionDescription String?
-  discountValue       String?
-  discountType        String?
-  couponStartDate     DateTime?
-  couponEndDate       DateTime?
-  couponStatus        CouponStatus     @default(UNKNOWN)
-  couponIsExclusive   Boolean?
-  customerType        String?
-  country             String?
-  networkSource       String?
-  sourceObject        String?
-  sourcePath          String?
-  mappingStatus       String?
-  fieldMappingOutcome String?
-  mappingVersion      String?
-  rawPayload          Json
-  normalizedPayload   Json
-  mapperVersion       String
-  firstSeenAt         DateTime         @default(now())
-  lastSyncedAt        DateTime         @default(now())
-  createdAt           DateTime         @default(now())
-  updatedAt           DateTime         @updatedAt
+  discountValue        String?
+  discountType         String?
+  couponStartDate      DateTime?
+  couponEndDate        DateTime?
+  couponStatus         CouponStatus     @default(UNKNOWN)
+  couponIsExclusive    Boolean?
+  customerType         String?
+  country              String?
+  networkSource        String?
+  sourceObject         String?
+  sourcePath           String?
+  mappingStatus        String?
+  fieldMappingOutcome  String?
+  mappingVersion       String?
+  rawPayload           Json
+  normalizedPayload    Json
+  mapperVersion        String
+  firstSeenAt          DateTime         @default(now())
+  lastSyncedAt         DateTime         @default(now())
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
 
   couponAssignments ClientCouponAssignment[]
   couponCodeMaster  CouponCodeMaster?
@@ -629,32 +629,32 @@ model SupplierCoupon {
 /// Operational coupon inventory (HTML Coupon Pool / CouponCodeMaster).
 /// Linked to SupplierCoupon when synced; quantities are MBO allocation inventory — not network redemptions.
 model CouponCodeMaster {
-  id                   String           @id @default(uuid())
-  supplier             SupplierKey
-  sourceAccountLabel   String           @default("default")
-  supplierCampaignId   String
-  supplierCampaign     SupplierCampaign @relation(fields: [supplierCampaignId], references: [id], onDelete: Cascade)
-  campaignSourceId     String?
-  supplierCouponId     String?          @unique
-  supplierCoupon       SupplierCoupon?  @relation(fields: [supplierCouponId], references: [id], onDelete: SetNull)
-  supplierCouponExtId  String?
-  couponCode           String
-  source               CouponCodeSource @default(UNKNOWN)
-  scope                CouponCodeScope  @default(UNKNOWN)
+  id                  String           @id @default(uuid())
+  supplier            SupplierKey
+  sourceAccountLabel  String           @default("default")
+  supplierCampaignId  String
+  supplierCampaign    SupplierCampaign @relation(fields: [supplierCampaignId], references: [id], onDelete: Cascade)
+  campaignSourceId    String?
+  supplierCouponId    String?          @unique
+  supplierCoupon      SupplierCoupon?  @relation(fields: [supplierCouponId], references: [id], onDelete: SetNull)
+  supplierCouponExtId String?
+  couponCode          String
+  source              CouponCodeSource @default(UNKNOWN)
+  scope               CouponCodeScope  @default(UNKNOWN)
   /// Inventory size when known. Null = unknown (do not invent).
-  totalQuantity        Int?
+  totalQuantity       Int?
   /// Explicit MBO allocation counter (platform usage). Synced from ClientCouponAssignment counts when linked.
-  assignedQuantity     Int              @default(0)
-  status               CouponStatus     @default(UNKNOWN)
-  validFrom            DateTime?
-  validUntil           DateTime?
-  newCodeAlert         Boolean          @default(false)
-  alertReviewedAt      DateTime?
-  detectedAt           DateTime         @default(now())
-  lastUpdatedAt        DateTime         @updatedAt
-  rawPayloadId         String?
-  metadata             Json?
-  createdAt            DateTime         @default(now())
+  assignedQuantity    Int              @default(0)
+  status              CouponStatus     @default(UNKNOWN)
+  validFrom           DateTime?
+  validUntil          DateTime?
+  newCodeAlert        Boolean          @default(false)
+  alertReviewedAt     DateTime?
+  detectedAt          DateTime         @default(now())
+  lastUpdatedAt       DateTime         @updatedAt
+  rawPayloadId        String?
+  metadata            Json?
+  createdAt           DateTime         @default(now())
 
   @@unique([supplier, sourceAccountLabel, supplierCampaignId, couponCode])
   @@index([supplier, newCodeAlert, status])
@@ -665,10 +665,10 @@ model CouponCodeMaster {
 
 /// Auditable mapping certification — only CERTIFIED rows may yield mapping_status=MAPPED.
 model MappingCertification {
-  id                 String                      @id @default(uuid())
-  supplierCampaignId String                      @unique
-  supplierCampaign   SupplierCampaign            @relation(fields: [supplierCampaignId], references: [id], onDelete: Cascade)
-  status             MappingCertificationStatus  @default(PENDING)
+  id                 String                     @id @default(uuid())
+  supplierCampaignId String                     @unique
+  supplierCampaign   SupplierCampaign           @relation(fields: [supplierCampaignId], references: [id], onDelete: Cascade)
+  status             MappingCertificationStatus @default(PENDING)
   /// Evidence checklist: required canonical fields present + mapper version + raw payload id.
   checklist          Json
   certifiedAt        DateTime?
@@ -676,8 +676,8 @@ model MappingCertification {
   revokedAt          DateTime?
   revokedBy          String?
   reason             String?
-  createdAt          DateTime                    @default(now())
-  updatedAt          DateTime                    @updatedAt
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
 
   @@index([status])
   @@map("mapping_certifications")
@@ -686,76 +686,76 @@ model MappingCertification {
 /// Network-grain performance fact (HTML 14E). NOT client DailyReport.
 /// network_clicks and mbo_link_clicks are independent; never silently substitute.
 model NetworkPerformanceFact {
-  id                    String            @id @default(uuid())
+  id                     String              @id @default(uuid())
   /// Deterministic grain key — unique identity for upserts.
-  grainKey              String            @unique
-  supplier              SupplierKey
-  sourceAccountLabel    String            @default("default")
-  reportDate            DateTime          @db.Date
-  reportExternalId      String?
-  campaignSourceId      String?
-  supplierCampaignDbId  String?
-  supplierCampaign      SupplierCampaign? @relation(fields: [supplierCampaignDbId], references: [id], onDelete: SetNull)
-  supplierCampaignId    String?
-  brandName             String?
-  campaignName          String?
-  category              String?
-  country               String?           @db.Char(2)
-  currency              String?           @db.Char(3)
+  grainKey               String              @unique
+  supplier               SupplierKey
+  sourceAccountLabel     String              @default("default")
+  reportDate             DateTime            @db.Date
+  reportExternalId       String?
+  campaignSourceId       String?
+  supplierCampaignDbId   String?
+  supplierCampaign       SupplierCampaign?   @relation(fields: [supplierCampaignDbId], references: [id], onDelete: SetNull)
+  supplierCampaignId     String?
+  brandName              String?
+  campaignName           String?
+  category               String?
+  country                String?             @db.Char(2)
+  currency               String?             @db.Char(3)
   campaignTypeCommercial String?
-  campaignChannelType   CampaignChannelType @default(UNKNOWN)
-  couponId              String?
-  couponCode            String?
-  couponSource          String?
-  couponScope           String?
-  networkTrackingLink   String?
-  mboTrackingLink       String?
-  trackingLinkId        String?
-  networkClickId        String?
-  mboClickId            String?
-  subId1                String?
-  subId2                String?
-  subId3                String?
-  impressions           Int?
-  networkClicks         Int?
-  mboLinkClicks         Int?
-  uniqueClicks          Int?
-  grossOrders           Int?
-  pendingOrders         Int?
-  confirmedOrders       Int?
-  cancelledOrders       Int?
-  rejectedOrders        Int?
-  paidOrders            Int?
-  grossOrderValue       Decimal?          @db.Decimal(18, 4)
-  pendingOrderValue     Decimal?          @db.Decimal(18, 4)
-  confirmedOrderValue   Decimal?          @db.Decimal(18, 4)
-  cancelledOrderValue   Decimal?          @db.Decimal(18, 4)
-  rejectedOrderValue    Decimal?          @db.Decimal(18, 4)
-  paidOrderValue        Decimal?          @db.Decimal(18, 4)
-  grossCommission       Decimal?          @db.Decimal(18, 4)
-  pendingCommission     Decimal?          @db.Decimal(18, 4)
-  confirmedCommission   Decimal?          @db.Decimal(18, 4)
-  cancelledCommission   Decimal?          @db.Decimal(18, 4)
-  rejectedCommission    Decimal?          @db.Decimal(18, 4)
-  payableCommission     Decimal?          @db.Decimal(18, 4)
-  paidCommission        Decimal?          @db.Decimal(18, 4)
-  mboReceivable         Decimal?          @db.Decimal(18, 4)
-  mboActuallyReceived   Decimal?          @db.Decimal(18, 4)
-  discountPercent       Decimal?          @db.Decimal(8, 4)
-  customerType          String?
-  devicePlatform        String?
-  conversionRate        Decimal?          @db.Decimal(12, 6)
-  aov                   Decimal?          @db.Decimal(18, 4)
-  epc                   Decimal?          @db.Decimal(18, 4)
-  attributionStatus     String?
-  reconciliationStatus  String?
-  rawPayloadId          String?
-  sourceEndpoint        String?
-  reportGranularity     String?
-  lastSyncedAt          DateTime?
-  lastUpdatedAt         DateTime          @updatedAt
-  metadata              Json?
-  createdAt             DateTime          @default(now())
+  campaignChannelType    CampaignChannelType @default(UNKNOWN)
+  couponId               String?
+  couponCode             String?
+  couponSource           String?
+  couponScope            String?
+  networkTrackingLink    String?
+  mboTrackingLink        String?
+  trackingLinkId         String?
+  networkClickId         String?
+  mboClickId             String?
+  subId1                 String?
+  subId2                 String?
+  subId3                 String?
+  impressions            Int?
+  networkClicks          Int?
+  mboLinkClicks          Int?
+  uniqueClicks           Int?
+  grossOrders            Int?
+  pendingOrders          Int?
+  confirmedOrders        Int?
+  cancelledOrders        Int?
+  rejectedOrders         Int?
+  paidOrders             Int?
+  grossOrderValue        Decimal?            @db.Decimal(18, 4)
+  pendingOrderValue      Decimal?            @db.Decimal(18, 4)
+  confirmedOrderValue    Decimal?            @db.Decimal(18, 4)
+  cancelledOrderValue    Decimal?            @db.Decimal(18, 4)
+  rejectedOrderValue     Decimal?            @db.Decimal(18, 4)
+  paidOrderValue         Decimal?            @db.Decimal(18, 4)
+  grossCommission        Decimal?            @db.Decimal(18, 4)
+  pendingCommission      Decimal?            @db.Decimal(18, 4)
+  confirmedCommission    Decimal?            @db.Decimal(18, 4)
+  cancelledCommission    Decimal?            @db.Decimal(18, 4)
+  rejectedCommission     Decimal?            @db.Decimal(18, 4)
+  payableCommission      Decimal?            @db.Decimal(18, 4)
+  paidCommission         Decimal?            @db.Decimal(18, 4)
+  mboReceivable          Decimal?            @db.Decimal(18, 4)
+  mboActuallyReceived    Decimal?            @db.Decimal(18, 4)
+  discountPercent        Decimal?            @db.Decimal(8, 4)
+  customerType           String?
+  devicePlatform         String?
+  conversionRate         Decimal?            @db.Decimal(12, 6)
+  aov                    Decimal?            @db.Decimal(18, 4)
+  epc                    Decimal?            @db.Decimal(18, 4)
+  attributionStatus      String?
+  reconciliationStatus   String?
+  rawPayloadId           String?
+  sourceEndpoint         String?
+  reportGranularity      String?
+  lastSyncedAt           DateTime?
+  lastUpdatedAt          DateTime            @updatedAt
+  metadata               Json?
+  createdAt              DateTime            @default(now())
 
   @@index([supplier, reportDate])
   @@index([campaignSourceId, reportDate])
@@ -765,28 +765,28 @@ model NetworkPerformanceFact {
 
 /// Persisted Network reconciliation row (HTML 14H Reported / Confirmed / Paid).
 model NetworkReconciliationRow {
-  id                    String              @id @default(uuid())
-  grainKey              String              @unique
-  supplier              SupplierKey
-  sourceAccountLabel    String              @default("default")
-  billingMonth          Int
-  billingYear           Int
-  campaignSourceId      String?
-  supplierCampaignId    String?
-  brandName             String?
-  campaignName          String?
-  reportedCommission    Decimal?            @db.Decimal(18, 4)
-  confirmedCommission   Decimal?            @db.Decimal(18, 4)
-  paidCommission        Decimal?            @db.Decimal(18, 4)
-  reportedVsConfirmed   Decimal?            @db.Decimal(18, 4)
-  confirmedVsPaid       Decimal?            @db.Decimal(18, 4)
-  status                NetworkReconStatus  @default(UNKNOWN)
-  currency              String?             @db.Char(3)
-  reconciledAt          DateTime            @default(now())
-  orderDrilldown        Json?
-  metadata              Json?
-  createdAt             DateTime            @default(now())
-  updatedAt             DateTime            @updatedAt
+  id                  String             @id @default(uuid())
+  grainKey            String             @unique
+  supplier            SupplierKey
+  sourceAccountLabel  String             @default("default")
+  billingMonth        Int
+  billingYear         Int
+  campaignSourceId    String?
+  supplierCampaignId  String?
+  brandName           String?
+  campaignName        String?
+  reportedCommission  Decimal?           @db.Decimal(18, 4)
+  confirmedCommission Decimal?           @db.Decimal(18, 4)
+  paidCommission      Decimal?           @db.Decimal(18, 4)
+  reportedVsConfirmed Decimal?           @db.Decimal(18, 4)
+  confirmedVsPaid     Decimal?           @db.Decimal(18, 4)
+  status              NetworkReconStatus @default(UNKNOWN)
+  currency            String?            @db.Char(3)
+  reconciledAt        DateTime           @default(now())
+  orderDrilldown      Json?
+  metadata            Json?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
 
   @@index([billingYear, billingMonth, supplier])
   @@index([status])
@@ -870,26 +870,26 @@ enum MerchantReviewStatus {
 }
 
 model Merchant {
-  id                    String                     @id @default(uuid())
-  displayName           String
-  normalizedName        String
-  slug                  String                     @unique
-  website               String?
-  supplierTrackingLink  String?
-  couponDescription     String?
-  category              String?
-  logoUrl               String?
-  country               String?                    @db.Char(2)
-  status                MerchantStatus             @default(DRAFT)
-  verificationStatus    MerchantVerificationStatus @default(UNVERIFIED)
-  isVerified            Boolean                    @default(false)
-  notes                 String?
-  mergedIntoId       String?
-  mergedInto         Merchant?                  @relation("MerchantMerge", fields: [mergedIntoId], references: [id], onDelete: SetNull)
-  mergedFrom         Merchant[]                 @relation("MerchantMerge")
-  createdAt          DateTime                   @default(now())
-  updatedAt          DateTime                   @updatedAt
-  deletedAt          DateTime?
+  id                   String                     @id @default(uuid())
+  displayName          String
+  normalizedName       String
+  slug                 String                     @unique
+  website              String?
+  supplierTrackingLink String?
+  couponDescription    String?
+  category             String?
+  logoUrl              String?
+  country              String?                    @db.Char(2)
+  status               MerchantStatus             @default(DRAFT)
+  verificationStatus   MerchantVerificationStatus @default(UNVERIFIED)
+  isVerified           Boolean                    @default(false)
+  notes                String?
+  mergedIntoId         String?
+  mergedInto           Merchant?                  @relation("MerchantMerge", fields: [mergedIntoId], references: [id], onDelete: SetNull)
+  mergedFrom           Merchant[]                 @relation("MerchantMerge")
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
+  deletedAt            DateTime?
 
   aliases            MerchantAlias[]
   supplierCampaigns  SupplierCampaign[]
@@ -995,10 +995,10 @@ model CanonicalCampaign {
   updatedAt       DateTime                @updatedAt
   deletedAt       DateTime?
 
-  sources CampaignSource[]
-  assignments ClientCampaignAssignment[]
-  dailyReports  DailyReport[]
-  orders        Order[]
+  sources      CampaignSource[]
+  assignments  ClientCampaignAssignment[]
+  dailyReports DailyReport[]
+  orders       Order[]
 
   @@index([merchantId])
   @@index([status])
@@ -1009,32 +1009,32 @@ model CanonicalCampaign {
 }
 
 model CampaignSource {
-  id                 String                           @id @default(uuid())
+  id                  String                           @id @default(uuid())
   canonicalCampaignId String
-  canonicalCampaign  CanonicalCampaign                @relation(fields: [canonicalCampaignId], references: [id], onDelete: Cascade)
-  supplierCampaignId String
-  supplierCampaign   SupplierCampaign                 @relation(fields: [supplierCampaignId], references: [id], onDelete: Restrict)
-  priority           Int                              @default(100)
-  isPrimary          Boolean                          @default(false)
-  relationshipStatus CampaignSourceRelationshipStatus @default(UNKNOWN)
-  supportsLink       Boolean                          @default(false)
-  supportsCoupon     Boolean                          @default(false)
-  grossCommission    Decimal?                         @db.Decimal(18, 4)
-  channelSupport     String[]                         @default([])
-  isActive           Boolean                          @default(true)
-  status             CampaignSourceStatus             @default(LINKED)
-  createdAt          DateTime                         @default(now())
-  updatedAt          DateTime                         @updatedAt
+  canonicalCampaign   CanonicalCampaign                @relation(fields: [canonicalCampaignId], references: [id], onDelete: Cascade)
+  supplierCampaignId  String
+  supplierCampaign    SupplierCampaign                 @relation(fields: [supplierCampaignId], references: [id], onDelete: Restrict)
+  priority            Int                              @default(100)
+  isPrimary           Boolean                          @default(false)
+  relationshipStatus  CampaignSourceRelationshipStatus @default(UNKNOWN)
+  supportsLink        Boolean                          @default(false)
+  supportsCoupon      Boolean                          @default(false)
+  grossCommission     Decimal?                         @db.Decimal(18, 4)
+  channelSupport      String[]                         @default([])
+  isActive            Boolean                          @default(true)
+  status              CampaignSourceStatus             @default(LINKED)
+  createdAt           DateTime                         @default(now())
+  updatedAt           DateTime                         @updatedAt
 
-  trackingLinks TrackingLink[]
-  assignments   ClientCampaignAssignment[]
-  clicks        Click[]
-  conversions   Conversion[]
-  dailyReports  DailyReport[]
-  orders        Order[]
+  trackingLinks           TrackingLink[]
+  assignments             ClientCampaignAssignment[]
+  clicks                  Click[]
+  conversions             Conversion[]
+  dailyReports            DailyReport[]
+  orders                  Order[]
   supplierCommissionRules SupplierCommissionRule[]
-  productFeeds  ProductFeed[]
-  products      Product[]
+  productFeeds            ProductFeed[]
+  products                Product[]
 
   @@unique([canonicalCampaignId, supplierCampaignId])
   @@index([canonicalCampaignId, isActive, priority])
@@ -1093,24 +1093,24 @@ enum CommissionRuleType {
 }
 
 model TrackingLink {
-  id                  String             @id @default(uuid())
+  id                  String                   @id @default(uuid())
   assignmentId        String
   assignment          ClientCampaignAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
   campaignSourceId    String?
-  campaignSource      CampaignSource?    @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
+  campaignSource      CampaignSource?          @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
   /// Human-readable path segment (client-merchant[-campaign]). Not unique alone — uniqueness is via subId/token.
   slug                String?
   /// Secure unique token used in /r/{slug}/{token}. Legacy links may use mbo_* format.
-  subId               String             @unique
+  subId               String                   @unique
   supplierTrackingUrl String?
   mboTrackingUrl      String
   deeplinkTemplate    String?
-  trackingType        TrackingType       @default(STANDARD)
-  status              TrackingLinkStatus @default(GENERATED)
-  isPrimary           Boolean            @default(false)
+  trackingType        TrackingType             @default(STANDARD)
+  status              TrackingLinkStatus       @default(GENERATED)
+  isPrimary           Boolean                  @default(false)
   expiresAt           DateTime?
-  createdAt           DateTime           @default(now())
-  updatedAt           DateTime           @updatedAt
+  createdAt           DateTime                 @default(now())
+  updatedAt           DateTime                 @updatedAt
   deletedAt           DateTime?
 
   clicks      Click[]
@@ -1124,20 +1124,20 @@ model TrackingLink {
 }
 
 model ClientCouponAssignment {
-  id                 String                 @id @default(uuid())
+  id                 String                   @id @default(uuid())
   assignmentId       String
   assignment         ClientCampaignAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
   supplierCouponId   String?
-  supplierCoupon     SupplierCoupon?        @relation(fields: [supplierCouponId], references: [id], onDelete: SetNull)
+  supplierCoupon     SupplierCoupon?          @relation(fields: [supplierCouponId], references: [id], onDelete: SetNull)
   supplierCouponCode String?
   clientCouponCode   String?
-  couponType         CouponType             @default(UNKNOWN)
+  couponType         CouponType               @default(UNKNOWN)
   discountPercentage String?
-  status             CouponAssignmentStatus @default(ASSIGNED)
+  status             CouponAssignmentStatus   @default(ASSIGNED)
   validFrom          DateTime?
   validUntil         DateTime?
-  createdAt          DateTime               @default(now())
-  updatedAt          DateTime               @updatedAt
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
 
   @@index([assignmentId, status])
   @@index([supplierCouponId])
@@ -1145,35 +1145,35 @@ model ClientCouponAssignment {
 }
 
 model ClientCommissionRule {
-  id               String               @id @default(uuid())
-  assignmentId     String
-  assignment       ClientCampaignAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  id                String                   @id @default(uuid())
+  assignmentId      String
+  assignment        ClientCampaignAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
   /// Ratio basis for PERCENT / PERCENT_OF_ACTUAL / DISPLAY_RANGE (e.g. gross=100, client=70).
-  grossCommission  Decimal              @db.Decimal(18, 4)
-  clientCommission Decimal              @db.Decimal(18, 4)
-  mboCommission    Decimal              @db.Decimal(18, 4)
-  commissionType   CommissionRuleType   @default(UNKNOWN)
-  currency         String?              @db.Char(3)
+  grossCommission   Decimal                  @db.Decimal(18, 4)
+  clientCommission  Decimal                  @db.Decimal(18, 4)
+  mboCommission     Decimal                  @db.Decimal(18, 4)
+  commissionType    CommissionRuleType       @default(UNKNOWN)
+  currency          String?                  @db.Char(3)
   /// Epic 2 — FIXED_CLIENT_PERCENT_OF_ORDER_VALUE (e.g. 3.5 = 3.5% of order value)
-  orderValuePercent Decimal?            @db.Decimal(8, 4)
+  orderValuePercent Decimal?                 @db.Decimal(8, 4)
   /// Epic 2 — FIXED_CLIENT_AMOUNT_PER_CONFIRMED_ORDER
-  fixedAmount      Decimal?             @db.Decimal(18, 4)
+  fixedAmount       Decimal?                 @db.Decimal(18, 4)
   /// Epic 2 — MANUAL_APPROVED_CLIENT_COMMISSION
-  manualAmount     Decimal?             @db.Decimal(18, 4)
-  manualApproved   Boolean              @default(false)
-  manualApprovedAt DateTime?
-  manualApprovedBy String?
+  manualAmount      Decimal?                 @db.Decimal(18, 4)
+  manualApproved    Boolean                  @default(false)
+  manualApprovedAt  DateTime?
+  manualApprovedBy  String?
   /// Epic 2 — DISPLAY_RANGE_WITH_ACTUAL_SPLIT (display only)
-  displayRangeMin  Decimal?             @db.Decimal(18, 4)
-  displayRangeMax  Decimal?             @db.Decimal(18, 4)
-  displayLabel     String?
-  effectiveFrom    DateTime
-  effectiveUntil   DateTime?
-  status           CommissionRuleStatus   @default(DRAFT)
-  createdAt        DateTime             @default(now())
-  updatedAt        DateTime             @updatedAt
+  displayRangeMin   Decimal?                 @db.Decimal(18, 4)
+  displayRangeMax   Decimal?                 @db.Decimal(18, 4)
+  displayLabel      String?
+  effectiveFrom     DateTime
+  effectiveUntil    DateTime?
+  status            CommissionRuleStatus     @default(DRAFT)
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
 
-  conversions Conversion[]
+  conversions           Conversion[]
   financialTransactions FinancialTransaction[]
 
   @@unique([assignmentId, effectiveFrom])
@@ -1182,48 +1182,96 @@ model ClientCommissionRule {
   @@map("client_commission_rules")
 }
 
-/// Normalized supplier-side commission facts (v15 SupplierCommissionRule).
-/// Adapters map into this; commercial calc may read facts — never campaign display snapshots as FT truth.
+/// Normalized supplier-side commission facts (MBO SupplierCommissionRule).
+/// One row = one distinct payable supplier outcome. Campaign summaries are display-only.
 model SupplierCommissionRule {
-  id               String         @id @default(uuid())
-  campaignSourceId String?
-  campaignSource   CampaignSource? @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
+  id                 String            @id @default(uuid())
+  campaignSourceId   String?
+  campaignSource     CampaignSource?   @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
   supplierCampaignId String?
-  supplierCampaign SupplierCampaign? @relation(fields: [supplierCampaignId], references: [id], onDelete: SetNull)
-  supplier         SupplierKey
-  sourceAccountLabel String       @default("default")
-  sourceRuleId     String?
-  /// Supplier-facing type label (CPS/CPA/PERCENT/FIXED/TIERED/etc.) — informational
-  supplierRuleType String?
-  /// Normalized basis: PERCENT_OF_SALE | FIXED_AMOUNT | TIERED | UNKNOWN
-  basis            String         @default("UNKNOWN")
-  ratePercent      Decimal?       @db.Decimal(8, 4)
-  fixedAmount      Decimal?       @db.Decimal(18, 4)
-  currency         String?        @db.Char(3)
-  customerType     String?
-  country          String?
-  categoryProductGoal String?
-  couponOrTier     String?
-  networkSource    String?
-  sourceObject     String?
-  sourcePath       String?
-  mappingStatus    String?
-  fieldMappingOutcome String?
-  ruleVersion      String?
-  effectiveFrom    DateTime       @default(now())
-  effectiveUntil   DateTime?
-  rawPayloadId     String?
-  rawPayloadRecord RawPayload?    @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
-  metadata         Json?
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
+  supplierCampaign   SupplierCampaign? @relation(fields: [supplierCampaignId], references: [id], onDelete: SetNull)
+  supplier           SupplierKey
+  sourceAccountLabel String            @default("default")
 
+  /// Source lineage. Source groups/rules never replace MBO outcome identity.
+  sourceGroupId   String?
+  sourceGroupName String?
+  sourceRuleId    String?
+  sourceRuleName  String?
+
+  /// Stable MBO identity for one payable outcome under the source rule/group.
+  outcomeKey         String
+  /// UI ordering only: Commission 1...N. Never a financial identity.
+  commissionSequence Int?
+
+  commissionModel  String?
+  commissionType   String?
+  /// Supplier-facing type label (CPS/CPA/PERCENT/FIXED/TIERED/etc.) — informational.
+  supplierRuleType String?
+  /// Canonical payout basis such as PERCENT_OF_SALE, FIXED_AMOUNT, CPA, CPL, CPI, CPC, CPM.
+  basis            String   @default("UNKNOWN")
+  ratePercent      Decimal? @db.Decimal(8, 4)
+  fixedAmount      Decimal? @db.Decimal(18, 4)
+  currency         String?  @db.Char(3)
+  actionType       String?
+
+  /// Verified supplier precedence only. Null means no verified source precedence.
+  priority Int?
+  rank     Int?
+
+  /// Legacy/convenience display fields. Conditions relation is authoritative for matching.
+  customerType        String?
+  country             String?
+  categoryProductGoal String?
+  couponOrTier        String?
+
+  networkSource       String?
+  sourceObject        String?
+  sourcePath          String?
+  mappingStatus       String?
+  fieldMappingOutcome String?
+  ruleVersion         String?
+  effectiveFrom       DateTime    @default(now())
+  effectiveUntil      DateTime?
+  rawPayloadId        String?
+  rawPayloadRecord    RawPayload? @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
+  /// Complete source rule/group fragment retained as evidence in addition to immutable RawPayload lineage.
+  rawRuleReference    Json?
+  metadata            Json?
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+
+  conditions SupplierCommissionCondition[]
+
+  @@unique([supplier, sourceAccountLabel, outcomeKey, effectiveFrom], map: "supplier_commission_rules_outcome_identity_key")
   @@index([campaignSourceId, effectiveFrom])
   @@index([supplierCampaignId])
   @@index([supplier, sourceAccountLabel])
   @@index([networkSource])
   @@index([sourceRuleId])
+  @@index([sourceGroupId])
+  @@index([supplierCampaignId, commissionSequence])
   @@map("supplier_commission_rules")
+}
+
+/// Conditions attached to one SupplierCommissionRule payable outcome.
+/// Multiple rows on one rule are AND conditions unless verified source semantics explicitly say otherwise.
+model SupplierCommissionCondition {
+  id                   String                 @id @default(uuid())
+  commissionRuleId     String
+  commissionRule       SupplierCommissionRule @relation(fields: [commissionRuleId], references: [id], onDelete: Cascade)
+  conditionType        String
+  operator             String?
+  value                String
+  sourceConditionType  String?
+  sourceConditionValue Json?
+  metadata             Json?
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+
+  @@index([commissionRuleId], map: "supplier_commission_conditions_rule_idx")
+  @@index([conditionType, value], map: "supplier_commission_conditions_type_value_idx")
+  @@map("supplier_commission_conditions")
 }
 
 // ---------------------------------------------------------------------------
@@ -1283,58 +1331,58 @@ enum ClientPaymentTrigger {
 }
 
 model Client {
-  id              String           @id @default(uuid())
-  name            String
-  slug            String           @unique
+  id                   String                @id @default(uuid())
+  name                 String
+  slug                 String                @unique
   /// Legal entity name (agreement / commercials).
-  legalName       String?
-  industry        String?
-  category        String?
-  subCategory     String?
-  country         String?          @db.Char(2)
-  currency        String?          @db.Char(3)
-  timezone        String?
-  logoUrl         String?
-  status          ClientStatus     @default(PROSPECT)
-  commercialModel CommercialModel?
+  legalName            String?
+  industry             String?
+  category             String?
+  subCategory          String?
+  country              String?               @db.Char(2)
+  currency             String?               @db.Char(3)
+  timezone             String?
+  logoUrl              String?
+  status               ClientStatus          @default(PROSPECT)
+  commercialModel      CommercialModel?
   /// Client share of approved supplier commission (0–100). Used with OFFERS_PLUS_COMMISSION.
-  clientSharePercent Decimal?      @db.Decimal(5, 2)
+  clientSharePercent   Decimal?              @db.Decimal(5, 2)
   /// Portal vs API access control (§27). Default preserves existing dual access.
-  deliveryMethod  ClientDeliveryMethod @default(API_AND_PORTAL)
-  agreementStatus ClientAgreementStatus @default(NONE)
+  deliveryMethod       ClientDeliveryMethod  @default(API_AND_PORTAL)
+  agreementStatus      ClientAgreementStatus @default(NONE)
   agreementEffectiveAt DateTime?
   agreementRenewalAt   DateTime?
   agreementDocumentUrl String?
-  paymentCycle    ClientPaymentCycle?
-  paymentTrigger  ClientPaymentTrigger?
+  paymentCycle         ClientPaymentCycle?
+  paymentTrigger       ClientPaymentTrigger?
   /// Sandbox/Production endpoint toggles: { SANDBOX: { status, campaignEndpoint, productEndpoint, reportingEndpoint }, PRODUCTION: {...} }
   apiEnvironmentConfig Json?
   /// Client portal preferences (notifications, etc.).
-  portalPreferences Json?
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
-  deletedAt       DateTime?
+  portalPreferences    Json?
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+  deletedAt            DateTime?
 
-  brandRequests  ClientBrandRequest[]
-  assignments    ClientCampaignAssignment[]
-  dailyReports   DailyReport[]
-  users          User[]
-  apiCredentials ClientApiCredential[]
-  bankAccount    ClientBankAccount?
-  withdrawals    ClientWithdrawal[]
-  supportRequests ClientSupportRequest[]
-  orders         Order[]
-  exceptionCases ExceptionCase[]
-  financialTransactions FinancialTransaction[]
-  commissionAdjustments CommissionAdjustment[]
-  clientStatements ClientStatement[]
-  clientInvoices   ClientInvoice[]
-  clientPayments   ClientPayment[]
-  clientProductAssignments ClientProductAssignment[]
-  productTrackingLinks ProductTrackingLink[]
-  taxProfile       ClientTaxProfile?
-  taxLedgers       TaxLedger[]
-  boostinyPaymentSourceMappings BoostinyPaymentSourceMapping[]
+  brandRequests                     ClientBrandRequest[]
+  assignments                       ClientCampaignAssignment[]
+  dailyReports                      DailyReport[]
+  users                             User[]
+  apiCredentials                    ClientApiCredential[]
+  bankAccount                       ClientBankAccount?
+  withdrawals                       ClientWithdrawal[]
+  supportRequests                   ClientSupportRequest[]
+  orders                            Order[]
+  exceptionCases                    ExceptionCase[]
+  financialTransactions             FinancialTransaction[]
+  commissionAdjustments             CommissionAdjustment[]
+  clientStatements                  ClientStatement[]
+  clientInvoices                    ClientInvoice[]
+  clientPayments                    ClientPayment[]
+  clientProductAssignments          ClientProductAssignment[]
+  productTrackingLinks              ProductTrackingLink[]
+  taxProfile                        ClientTaxProfile?
+  taxLedgers                        TaxLedger[]
+  boostinyPaymentSourceMappings     BoostinyPaymentSourceMapping[]
   boostinyPartnerPaymentSettlements BoostinyPartnerPaymentSettlement[]
 
   @@index([status])
@@ -1375,35 +1423,35 @@ enum ApiCredentialEnvironment {
 
 /// Client payout bank details (account number encrypted at rest).
 model ClientBankAccount {
-  id                   String           @id @default(uuid())
-  clientId             String           @unique
-  client               Client           @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  accountHolder        String
-  bankName             String
-  accountNumberLast4   String           @db.VarChar(4)
-  accountNumberEnc     String
-  ifscCode             String
-  accountType          String           @default("Current")
-  status               ClientBankStatus @default(VERIFIED)
-  createdAt            DateTime         @default(now())
-  updatedAt            DateTime         @updatedAt
+  id                 String           @id @default(uuid())
+  clientId           String           @unique
+  client             Client           @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  accountHolder      String
+  bankName           String
+  accountNumberLast4 String           @db.VarChar(4)
+  accountNumberEnc   String
+  ifscCode           String
+  accountType        String           @default("Current")
+  status             ClientBankStatus @default(VERIFIED)
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
 
   @@map("client_bank_accounts")
 }
 
 model ClientWithdrawal {
-  id            String                  @id @default(uuid())
-  clientId      String
-  client        Client                  @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  reference     String                  @unique
-  amount        Decimal                 @db.Decimal(18, 4)
-  currency      String                  @default("INR") @db.Char(3)
-  status        ClientWithdrawalStatus  @default(REQUESTED)
-  requestedBy   String?
-  notes         String?
-  processedAt   DateTime?
-  createdAt     DateTime                @default(now())
-  updatedAt     DateTime                @updatedAt
+  id          String                 @id @default(uuid())
+  clientId    String
+  client      Client                 @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  reference   String                 @unique
+  amount      Decimal                @db.Decimal(18, 4)
+  currency    String                 @default("INR") @db.Char(3)
+  status      ClientWithdrawalStatus @default(REQUESTED)
+  requestedBy String?
+  notes       String?
+  processedAt DateTime?
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
 
   @@index([clientId, createdAt])
   @@index([clientId, status])
@@ -1411,17 +1459,17 @@ model ClientWithdrawal {
 }
 
 model ClientSupportRequest {
-  id          String                      @id @default(uuid())
-  clientId    String
-  client      Client                      @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  type        ClientSupportRequestType
-  category    String?
-  subject     String?
-  body        String
-  status      ClientSupportRequestStatus  @default(OPEN)
-  createdBy   String?
-  createdAt   DateTime                    @default(now())
-  updatedAt   DateTime                    @updatedAt
+  id        String                     @id @default(uuid())
+  clientId  String
+  client    Client                     @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  type      ClientSupportRequestType
+  category  String?
+  subject   String?
+  body      String
+  status    ClientSupportRequestStatus @default(OPEN)
+  createdBy String?
+  createdAt DateTime                   @default(now())
+  updatedAt DateTime                   @updatedAt
 
   @@index([clientId, createdAt])
   @@index([clientId, status])
@@ -1451,22 +1499,22 @@ model ClientApiCredential {
 }
 
 model ClientBrandRequest {
-  id                 String             @id @default(uuid())
-  clientId           String
-  client             Client             @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  merchantId         String?
-  merchant           Merchant?          @relation(fields: [merchantId], references: [id], onDelete: SetNull)
-  requestedBrandName String
-  requestedBy        String?
-  priority           Int                @default(100)
-  status             BrandRequestStatus @default(REQUESTED)
-  notes              String?
-  requestedAt        DateTime           @default(now())
-  resolvedAt         DateTime?
-  fulfilledAssignmentId String?           @unique
-  fulfilledAssignment ClientCampaignAssignment? @relation("BrandRequestFulfillment", fields: [fulfilledAssignmentId], references: [id], onDelete: SetNull)
-  createdAt          DateTime           @default(now())
-  updatedAt          DateTime           @updatedAt
+  id                    String                    @id @default(uuid())
+  clientId              String
+  client                Client                    @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  merchantId            String?
+  merchant              Merchant?                 @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+  requestedBrandName    String
+  requestedBy           String?
+  priority              Int                       @default(100)
+  status                BrandRequestStatus        @default(REQUESTED)
+  notes                 String?
+  requestedAt           DateTime                  @default(now())
+  resolvedAt            DateTime?
+  fulfilledAssignmentId String?                   @unique
+  fulfilledAssignment   ClientCampaignAssignment? @relation("BrandRequestFulfillment", fields: [fulfilledAssignmentId], references: [id], onDelete: SetNull)
+  createdAt             DateTime                  @default(now())
+  updatedAt             DateTime                  @updatedAt
 
   @@index([clientId, status])
   @@index([merchantId])
@@ -1475,15 +1523,15 @@ model ClientBrandRequest {
 }
 
 model ClientCampaignAssignment {
-  id                  String             @id @default(uuid())
+  id                  String            @id @default(uuid())
   clientId            String
-  client              Client             @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  client              Client            @relation(fields: [clientId], references: [id], onDelete: Cascade)
   canonicalCampaignId String
-  canonicalCampaign   CanonicalCampaign  @relation(fields: [canonicalCampaignId], references: [id], onDelete: Restrict)
+  canonicalCampaign   CanonicalCampaign @relation(fields: [canonicalCampaignId], references: [id], onDelete: Restrict)
   campaignSourceId    String?
-  campaignSource      CampaignSource?    @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
-  status              AssignmentStatus   @default(ASSIGNED)
-  published           Boolean            @default(false)
+  campaignSource      CampaignSource?   @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
+  status              AssignmentStatus  @default(ASSIGNED)
+  published           Boolean           @default(false)
   publishedAt         DateTime?
   unpublishedAt       DateTime?
   startDate           DateTime?
@@ -1492,18 +1540,18 @@ model ClientCampaignAssignment {
   notes               String?
   /// Operator-edited client-facing snapshot for this assignment (does not rewrite master catalog).
   clientFacing        Json?
-  createdAt           DateTime           @default(now())
-  updatedAt           DateTime           @updatedAt
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
 
-  fulfilledBrandRequest ClientBrandRequest? @relation("BrandRequestFulfillment")
-  trackingLinks         TrackingLink[]
-  couponAssignments     ClientCouponAssignment[]
-  commissionRules       ClientCommissionRule[]
-  clicks                Click[]
-  conversions           Conversion[]
-  orders                Order[]
+  fulfilledBrandRequest    ClientBrandRequest?       @relation("BrandRequestFulfillment")
+  trackingLinks            TrackingLink[]
+  couponAssignments        ClientCouponAssignment[]
+  commissionRules          ClientCommissionRule[]
+  clicks                   Click[]
+  conversions              Conversion[]
+  orders                   Order[]
   clientProductAssignments ClientProductAssignment[]
-  productTrackingLinks  ProductTrackingLink[]
+  productTrackingLinks     ProductTrackingLink[]
 
   @@index([clientId, status])
   @@index([canonicalCampaignId, status])
@@ -1661,46 +1709,46 @@ enum ExceptionCaseStatus {
 
 /// Commercial transaction/order from a supplier (Wave C transaction truth).
 model Order {
-  id                       String                @id @default(uuid())
-  supplier                 SupplierKey
-  sourceAccountLabel       String                @default("default")
+  id                             String                    @id @default(uuid())
+  supplier                       SupplierKey
+  sourceAccountLabel             String                    @default("default")
   /// Supplier order identity. When absent, ingestion may use conv:{supplierConversionId}.
-  supplierOrderId          String
-  clientId                 String?
-  client                   Client?               @relation(fields: [clientId], references: [id], onDelete: SetNull)
-  merchantId               String?
-  merchant                 Merchant?             @relation(fields: [merchantId], references: [id], onDelete: SetNull)
-  canonicalCampaignId      String?
-  canonicalCampaign        CanonicalCampaign?    @relation(fields: [canonicalCampaignId], references: [id], onDelete: SetNull)
-  campaignSourceId         String?
-  campaignSource           CampaignSource?       @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
-  clientAssignmentId       String?
-  clientAssignment         ClientCampaignAssignment? @relation(fields: [clientAssignmentId], references: [id], onDelete: SetNull)
-  clickId                  String?
-  click                    Click?                @relation(fields: [clickId], references: [id], onDelete: SetNull)
-  orderValue               Decimal?              @db.Decimal(18, 4)
-  currency                 String?               @db.Char(3)
-  orderDate                DateTime?
-  receivedAt               DateTime              @default(now())
-  validationStatus         ValidationStatus      @default(VALIDATION_PENDING)
-  supplierPaymentStatus    SupplierPaymentStatus @default(PAYMENT_PENDING)
-  clientPaymentStatus      ClientPaymentStatus   @default(CLIENT_PAYMENT_NOT_READY)
-  validationChangedAt      DateTime?
-  supplierPaymentChangedAt DateTime?
-  clientPaymentChangedAt   DateTime?
+  supplierOrderId                String
+  clientId                       String?
+  client                         Client?                   @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  merchantId                     String?
+  merchant                       Merchant?                 @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+  canonicalCampaignId            String?
+  canonicalCampaign              CanonicalCampaign?        @relation(fields: [canonicalCampaignId], references: [id], onDelete: SetNull)
+  campaignSourceId               String?
+  campaignSource                 CampaignSource?           @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
+  clientAssignmentId             String?
+  clientAssignment               ClientCampaignAssignment? @relation(fields: [clientAssignmentId], references: [id], onDelete: SetNull)
+  clickId                        String?
+  click                          Click?                    @relation(fields: [clickId], references: [id], onDelete: SetNull)
+  orderValue                     Decimal?                  @db.Decimal(18, 4)
+  currency                       String?                   @db.Char(3)
+  orderDate                      DateTime?
+  receivedAt                     DateTime                  @default(now())
+  validationStatus               ValidationStatus          @default(VALIDATION_PENDING)
+  supplierPaymentStatus          SupplierPaymentStatus     @default(PAYMENT_PENDING)
+  clientPaymentStatus            ClientPaymentStatus       @default(CLIENT_PAYMENT_NOT_READY)
+  validationChangedAt            DateTime?
+  supplierPaymentChangedAt       DateTime?
+  clientPaymentChangedAt         DateTime?
   /// Historical commission snapshot preserved on late rejection (Wave D ledger later).
-  lastApprovedClientCommission   Decimal?        @db.Decimal(18, 4)
-  lastApprovedMboCommission      Decimal?        @db.Decimal(18, 4)
-  lastApprovedSupplierCommission Decimal?        @db.Decimal(18, 4)
-  rawPayloadId             String?
-  rawPayloadRecord         RawPayload?           @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
-  metadata                 Json?
-  createdAt                DateTime              @default(now())
-  updatedAt                DateTime              @updatedAt
+  lastApprovedClientCommission   Decimal?                  @db.Decimal(18, 4)
+  lastApprovedMboCommission      Decimal?                  @db.Decimal(18, 4)
+  lastApprovedSupplierCommission Decimal?                  @db.Decimal(18, 4)
+  rawPayloadId                   String?
+  rawPayloadRecord               RawPayload?               @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
+  metadata                       Json?
+  createdAt                      DateTime                  @default(now())
+  updatedAt                      DateTime                  @updatedAt
 
-  items          OrderItem[]
-  conversions    Conversion[]
-  exceptionCases ExceptionCase[]
+  items                 OrderItem[]
+  conversions           Conversion[]
+  exceptionCases        ExceptionCase[]
   financialTransactions FinancialTransaction[]
   commissionAdjustments CommissionAdjustment[]
 
@@ -1716,31 +1764,31 @@ model Order {
 }
 
 model OrderItem {
-  id             String   @id @default(uuid())
-  orderId        String
-  order          Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  id                  String            @id @default(uuid())
+  orderId             String
+  order               Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
   /// Stable line identity within an order (supplier item id or derived key).
-  lineKey        String
-  supplierItemId String?
-  sku            String?
-  productId      String?
+  lineKey             String
+  supplierItemId      String?
+  sku                 String?
+  productId           String?
   /// Optional link to normalized Product catalog (Wave F).
-  productRecordId String?
-  productRecord   Product? @relation(fields: [productRecordId], references: [id], onDelete: SetNull)
-  productName    String?
-  quantity       Decimal? @db.Decimal(18, 4)
-  unitPrice      Decimal? @db.Decimal(18, 4)
-  itemValue      Decimal? @db.Decimal(18, 4)
-  currency       String?  @db.Char(3)
-  category       String?
-  commission     Decimal? @db.Decimal(18, 4)
+  productRecordId     String?
+  productRecord       Product?          @relation(fields: [productRecordId], references: [id], onDelete: SetNull)
+  productName         String?
+  quantity            Decimal?          @db.Decimal(18, 4)
+  unitPrice           Decimal?          @db.Decimal(18, 4)
+  itemValue           Decimal?          @db.Decimal(18, 4)
+  currency            String?           @db.Char(3)
+  category            String?
+  commission          Decimal?          @db.Decimal(18, 4)
   /// Epic 9 VAL-006 — nullable: null = historical/unknown (no item-level decision).
   /// When any item on an order has a non-null status, only VALIDATION_APPROVED items contribute to commercial basis.
-  validationStatus ValidationStatus?
+  validationStatus    ValidationStatus?
   validationChangedAt DateTime?
-  metadata       Json?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  metadata            Json?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
 
   @@unique([orderId, lineKey])
   @@index([orderId])
@@ -1783,42 +1831,42 @@ model ExceptionCase {
 }
 
 model Conversion {
-  id                   String                   @id @default(uuid())
+  id                   String                    @id @default(uuid())
   clickId              String?
-  click                Click?                   @relation(fields: [clickId], references: [id], onDelete: SetNull)
+  click                Click?                    @relation(fields: [clickId], references: [id], onDelete: SetNull)
   /// Wave C — optional link to commercial Order (null for historical rows).
   orderId              String?
-  order                Order?                   @relation(fields: [orderId], references: [id], onDelete: SetNull)
-  supplier             SupplierKey              @default(UNKNOWN)
+  order                Order?                    @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  supplier             SupplierKey               @default(UNKNOWN)
   supplierConversionId String
-  sourceAccountLabel   String                   @default("default")
+  sourceAccountLabel   String                    @default("default")
   trackingLinkId       String?
-  trackingLink         TrackingLink?            @relation(fields: [trackingLinkId], references: [id], onDelete: SetNull)
+  trackingLink         TrackingLink?             @relation(fields: [trackingLinkId], references: [id], onDelete: SetNull)
   campaignSourceId     String?
-  campaignSource       CampaignSource?          @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
+  campaignSource       CampaignSource?           @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
   clientAssignmentId   String?
   clientAssignment     ClientCampaignAssignment? @relation(fields: [clientAssignmentId], references: [id], onDelete: SetNull)
   commissionRuleId     String?
-  commissionRule       ClientCommissionRule?    @relation(fields: [commissionRuleId], references: [id], onDelete: SetNull)
+  commissionRule       ClientCommissionRule?     @relation(fields: [commissionRuleId], references: [id], onDelete: SetNull)
   subId                String?
-  supplierCommission   Decimal                  @db.Decimal(18, 4)
-  approvedCommission   Decimal?                 @db.Decimal(18, 4)
-  clientCommission     Decimal?                 @db.Decimal(18, 4)
-  mboCommission        Decimal?                 @db.Decimal(18, 4)
-  currency             String?                  @db.Char(3)
+  supplierCommission   Decimal                   @db.Decimal(18, 4)
+  approvedCommission   Decimal?                  @db.Decimal(18, 4)
+  clientCommission     Decimal?                  @db.Decimal(18, 4)
+  mboCommission        Decimal?                  @db.Decimal(18, 4)
+  currency             String?                   @db.Char(3)
   /// LEGACY collapsed status — preserved for Wave A reporting compatibility.
-  status               ConversionStatus         @default(PENDING)
-  attributionStatus    AttributionStatus        @default(PENDING)
+  status               ConversionStatus          @default(PENDING)
+  attributionStatus    AttributionStatus         @default(PENDING)
   conversionDate       DateTime
   approvedDate         DateTime?
   metadata             Json?
   /// Wave B lineage to immutable RawPayload when promoted from sync.
   rawPayloadId         String?
-  rawPayloadRecord     RawPayload?              @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
-  createdAt            DateTime                 @default(now())
-  updatedAt            DateTime                 @updatedAt
+  rawPayloadRecord     RawPayload?               @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
+  createdAt            DateTime                  @default(now())
+  updatedAt            DateTime                  @updatedAt
 
-  exceptionCases ExceptionCase[]
+  exceptionCases        ExceptionCase[]
   financialTransactions FinancialTransaction[]
   commissionAdjustments CommissionAdjustment[]
 
@@ -1883,44 +1931,44 @@ enum ClientPaymentRecordStatus {
 
 /// Immutable-style financial recognition row (Wave D). Adjust via CommissionAdjustment + new rows.
 model FinancialTransaction {
-  id                     String                     @id @default(uuid())
+  id                          String                     @id @default(uuid())
   /// Deterministic identity: earn:{conversionId} | rev:{type}:{conversionId} | adj:{type}:{conversionId}:{key}
-  recognitionKey         String                     @unique
-  transactionType        FinancialTransactionType
-  status                 FinancialTransactionStatus @default(FINANCIAL_RECOGNIZED)
-  orderId                String?
-  order                  Order?                     @relation(fields: [orderId], references: [id], onDelete: SetNull)
-  conversionId           String?
-  conversion             Conversion?                @relation(fields: [conversionId], references: [id], onDelete: SetNull)
-  clientId               String
-  client                 Client                     @relation(fields: [clientId], references: [id], onDelete: Restrict)
-  supplier               SupplierKey
-  campaignSourceId       String?
-  commissionRuleId       String?
-  commissionRule         ClientCommissionRule?      @relation(fields: [commissionRuleId], references: [id], onDelete: SetNull)
+  recognitionKey              String                     @unique
+  transactionType             FinancialTransactionType
+  status                      FinancialTransactionStatus @default(FINANCIAL_RECOGNIZED)
+  orderId                     String?
+  order                       Order?                     @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  conversionId                String?
+  conversion                  Conversion?                @relation(fields: [conversionId], references: [id], onDelete: SetNull)
+  clientId                    String
+  client                      Client                     @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  supplier                    SupplierKey
+  campaignSourceId            String?
+  commissionRuleId            String?
+  commissionRule              ClientCommissionRule?      @relation(fields: [commissionRuleId], references: [id], onDelete: SetNull)
   /// Link to original earn row for reversals/adjustments.
-  relatedTransactionId   String?
-  relatedTransaction     FinancialTransaction?      @relation("FinancialTxnRelation", fields: [relatedTransactionId], references: [id], onDelete: SetNull)
-  relatedFrom            FinancialTransaction[]     @relation("FinancialTxnRelation")
+  relatedTransactionId        String?
+  relatedTransaction          FinancialTransaction?      @relation("FinancialTxnRelation", fields: [relatedTransactionId], references: [id], onDelete: SetNull)
+  relatedFrom                 FinancialTransaction[]     @relation("FinancialTxnRelation")
   /// Signed amounts in original currency (supplier commission basis).
-  supplierReceivable     Decimal                    @db.Decimal(18, 4)
-  clientPayable          Decimal                    @db.Decimal(18, 4)
-  mboMargin              Decimal                    @db.Decimal(18, 4)
-  originalCurrency       String                     @db.Char(3)
+  supplierReceivable          Decimal                    @db.Decimal(18, 4)
+  clientPayable               Decimal                    @db.Decimal(18, 4)
+  mboMargin                   Decimal                    @db.Decimal(18, 4)
+  originalCurrency            String                     @db.Char(3)
   /// Reporting amounts after FX (same sign as original).
-  reportingSupplierReceivable Decimal?              @db.Decimal(18, 4)
-  reportingClientPayable      Decimal?              @db.Decimal(18, 4)
-  reportingMboMargin          Decimal?              @db.Decimal(18, 4)
-  reportingCurrency      String?                    @db.Char(3)
-  fxRate                 Decimal?                   @db.Decimal(18, 8)
-  fxDate                 DateTime?
-  fxSource               String?
-  ruleSnapshot           Json?
-  calculationMetadata    Json?
-  effectiveAt            DateTime                   @default(now())
-  createdAt              DateTime                   @default(now())
-  updatedAt              DateTime                   @updatedAt
-  metadata               Json?
+  reportingSupplierReceivable Decimal?                   @db.Decimal(18, 4)
+  reportingClientPayable      Decimal?                   @db.Decimal(18, 4)
+  reportingMboMargin          Decimal?                   @db.Decimal(18, 4)
+  reportingCurrency           String?                    @db.Char(3)
+  fxRate                      Decimal?                   @db.Decimal(18, 8)
+  fxDate                      DateTime?
+  fxSource                    String?
+  ruleSnapshot                Json?
+  calculationMetadata         Json?
+  effectiveAt                 DateTime                   @default(now())
+  createdAt                   DateTime                   @default(now())
+  updatedAt                   DateTime                   @updatedAt
+  metadata                    Json?
 
   adjustmentsAsOriginal CommissionAdjustment[] @relation("AdjustmentOriginalTxn")
   adjustmentsAsResult   CommissionAdjustment[] @relation("AdjustmentResultTxn")
@@ -1969,13 +2017,13 @@ model CommissionAdjustment {
 }
 
 model FxRateRecord {
-  id             String   @id @default(uuid())
-  fromCurrency   String   @db.Char(3)
-  toCurrency     String   @db.Char(3)
-  rate           Decimal  @db.Decimal(18, 8)
-  effectiveDate  DateTime @db.Date
-  source         String   @default("manual")
-  createdAt      DateTime @default(now())
+  id            String   @id @default(uuid())
+  fromCurrency  String   @db.Char(3)
+  toCurrency    String   @db.Char(3)
+  rate          Decimal  @db.Decimal(18, 8)
+  effectiveDate DateTime @db.Date
+  source        String   @default("manual")
+  createdAt     DateTime @default(now())
 
   @@unique([fromCurrency, toCurrency, effectiveDate, source])
   @@index([fromCurrency, toCurrency, effectiveDate])
@@ -1983,18 +2031,18 @@ model FxRateRecord {
 }
 
 model ClientStatement {
-  id              String               @id @default(uuid())
-  clientId        String
-  client          Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  periodStart     DateTime             @db.Date
-  periodEnd       DateTime             @db.Date
-  currency        String               @db.Char(3)
-  openingBalance  Decimal              @default(0) @db.Decimal(18, 4)
-  closingBalance  Decimal              @default(0) @db.Decimal(18, 4)
-  status          ClientStatementStatus @default(OPEN)
-  createdAt       DateTime             @default(now())
-  updatedAt       DateTime             @updatedAt
-  metadata        Json?
+  id             String                @id @default(uuid())
+  clientId       String
+  client         Client                @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  periodStart    DateTime              @db.Date
+  periodEnd      DateTime              @db.Date
+  currency       String                @db.Char(3)
+  openingBalance Decimal               @default(0) @db.Decimal(18, 4)
+  closingBalance Decimal               @default(0) @db.Decimal(18, 4)
+  status         ClientStatementStatus @default(OPEN)
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+  metadata       Json?
 
   lines      ClientStatementLine[]
   invoices   ClientInvoice[]
@@ -2006,16 +2054,16 @@ model ClientStatement {
 }
 
 model ClientStatementLine {
-  id                      String               @id @default(uuid())
-  statementId             String
-  statement               ClientStatement      @relation(fields: [statementId], references: [id], onDelete: Cascade)
-  financialTransactionId  String?
-  financialTransaction    FinancialTransaction? @relation(fields: [financialTransactionId], references: [id], onDelete: SetNull)
-  description             String?
-  amount                  Decimal              @db.Decimal(18, 4)
-  currency                String               @db.Char(3)
-  effectiveAt             DateTime
-  createdAt               DateTime             @default(now())
+  id                     String                @id @default(uuid())
+  statementId            String
+  statement              ClientStatement       @relation(fields: [statementId], references: [id], onDelete: Cascade)
+  financialTransactionId String?
+  financialTransaction   FinancialTransaction? @relation(fields: [financialTransactionId], references: [id], onDelete: SetNull)
+  description            String?
+  amount                 Decimal               @db.Decimal(18, 4)
+  currency               String                @db.Char(3)
+  effectiveAt            DateTime
+  createdAt              DateTime              @default(now())
 
   @@index([statementId])
   @@index([financialTransactionId])
@@ -2023,24 +2071,24 @@ model ClientStatementLine {
 }
 
 model ClientInvoice {
-  id            String             @id @default(uuid())
-  invoiceNumber String             @unique
+  id            String              @id @default(uuid())
+  invoiceNumber String              @unique
   clientId      String
-  client        Client             @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  client        Client              @relation(fields: [clientId], references: [id], onDelete: Cascade)
   statementId   String?
-  statement     ClientStatement?   @relation(fields: [statementId], references: [id], onDelete: SetNull)
-  currency      String             @db.Char(3)
-  subtotal      Decimal            @db.Decimal(18, 4)
-  adjustments   Decimal            @default(0) @db.Decimal(18, 4)
+  statement     ClientStatement?    @relation(fields: [statementId], references: [id], onDelete: SetNull)
+  currency      String              @db.Char(3)
+  subtotal      Decimal             @db.Decimal(18, 4)
+  adjustments   Decimal             @default(0) @db.Decimal(18, 4)
   /// Epic 5 — GST/tax from TaxLedger when contract config present (never invented).
-  taxAmount     Decimal            @default(0) @db.Decimal(18, 4)
-  total         Decimal            @db.Decimal(18, 4)
+  taxAmount     Decimal             @default(0) @db.Decimal(18, 4)
+  total         Decimal             @db.Decimal(18, 4)
   status        ClientInvoiceStatus @default(DRAFT)
   issuedAt      DateTime?
   dueAt         DateTime?
   paidAt        DateTime?
-  createdAt     DateTime           @default(now())
-  updatedAt     DateTime           @updatedAt
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
   metadata      Json?
 
   payments   ClientPayment[]
@@ -2052,19 +2100,19 @@ model ClientInvoice {
 }
 
 model ClientPayment {
-  id             String                   @id @default(uuid())
-  clientId       String
-  client         Client                   @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  invoiceId      String?
-  invoice        ClientInvoice?           @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
-  amount         Decimal                  @db.Decimal(18, 4)
-  currency       String                   @db.Char(3)
-  status         ClientPaymentRecordStatus @default(PENDING)
-  paidAt         DateTime?
-  reference      String?
-  createdAt      DateTime                 @default(now())
-  updatedAt      DateTime                 @updatedAt
-  metadata       Json?
+  id        String                    @id @default(uuid())
+  clientId  String
+  client    Client                    @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  invoiceId String?
+  invoice   ClientInvoice?            @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  amount    Decimal                   @db.Decimal(18, 4)
+  currency  String                    @db.Char(3)
+  status    ClientPaymentRecordStatus @default(PENDING)
+  paidAt    DateTime?
+  reference String?
+  createdAt DateTime                  @default(now())
+  updatedAt DateTime                  @updatedAt
+  metadata  Json?
 
   @@index([clientId, status])
   @@index([invoiceId])
@@ -2099,49 +2147,49 @@ enum TaxLedgerStatus {
 
 /// Contract-level tax configuration. Never invent rates.
 model ClientTaxProfile {
-  id                 String               @id @default(uuid())
-  clientId           String               @unique
-  client             Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  taxEnabled         Boolean              @default(false)
-  taxCountry         String?              @db.VarChar(8)
+  id                String               @id @default(uuid())
+  clientId          String               @unique
+  client            Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  taxEnabled        Boolean              @default(false)
+  taxCountry        String?              @db.VarChar(8)
   /// Percent from client contract only — nullable until finance/legal supplies it.
-  taxRatePercent     Decimal?             @db.Decimal(9, 4)
-  taxType            TaxType              @default(UNKNOWN)
-  legalReviewStatus  TaxLegalReviewStatus @default(PENDING)
-  notes              String?
-  metadata           Json?
-  createdAt          DateTime             @default(now())
-  updatedAt          DateTime             @updatedAt
+  taxRatePercent    Decimal?             @db.Decimal(9, 4)
+  taxType           TaxType              @default(UNKNOWN)
+  legalReviewStatus TaxLegalReviewStatus @default(PENDING)
+  notes             String?
+  metadata          Json?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
 
   @@map("client_tax_profiles")
 }
 
 /// Append-oriented tax record (v15 TaxLedger). Traceable to FT / statement / invoice.
 model TaxLedger {
-  id                       String               @id @default(uuid())
+  id                     String                @id @default(uuid())
   /// Deterministic: tax:{invoiceId} | tax-adj:{invoiceId}:{key}
-  recognitionKey           String               @unique
-  clientId                 String
-  client                   Client               @relation(fields: [clientId], references: [id], onDelete: Restrict)
-  financialTransactionId   String?
-  financialTransaction     FinancialTransaction? @relation(fields: [financialTransactionId], references: [id], onDelete: SetNull)
-  clientStatementId        String?
-  clientStatement          ClientStatement?     @relation(fields: [clientStatementId], references: [id], onDelete: SetNull)
-  clientInvoiceId          String?
-  clientInvoice            ClientInvoice?       @relation(fields: [clientInvoiceId], references: [id], onDelete: SetNull)
-  invoiceNumber            String?
-  taxCountry               String?              @db.VarChar(8)
-  taxRate                  Decimal?             @db.Decimal(9, 4)
-  taxAmount                Decimal              @db.Decimal(18, 4)
-  taxableAmount            Decimal              @db.Decimal(18, 4)
-  currency                 String               @db.Char(3)
-  taxType                  TaxType              @default(UNKNOWN)
-  calculationPolicy        TaxCalculationPolicy @default(LEGAL_REVIEW_REQUIRED)
-  status                   TaxLedgerStatus      @default(DRAFT)
-  effectiveAt              DateTime             @default(now())
-  createdAt                DateTime             @default(now())
-  updatedAt                DateTime             @updatedAt
-  metadata                 Json?
+  recognitionKey         String                @unique
+  clientId               String
+  client                 Client                @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  financialTransactionId String?
+  financialTransaction   FinancialTransaction? @relation(fields: [financialTransactionId], references: [id], onDelete: SetNull)
+  clientStatementId      String?
+  clientStatement        ClientStatement?      @relation(fields: [clientStatementId], references: [id], onDelete: SetNull)
+  clientInvoiceId        String?
+  clientInvoice          ClientInvoice?        @relation(fields: [clientInvoiceId], references: [id], onDelete: SetNull)
+  invoiceNumber          String?
+  taxCountry             String?               @db.VarChar(8)
+  taxRate                Decimal?              @db.Decimal(9, 4)
+  taxAmount              Decimal               @db.Decimal(18, 4)
+  taxableAmount          Decimal               @db.Decimal(18, 4)
+  currency               String                @db.Char(3)
+  taxType                TaxType               @default(UNKNOWN)
+  calculationPolicy      TaxCalculationPolicy  @default(LEGAL_REVIEW_REQUIRED)
+  status                 TaxLedgerStatus       @default(DRAFT)
+  effectiveAt            DateTime              @default(now())
+  createdAt              DateTime              @default(now())
+  updatedAt              DateTime              @updatedAt
+  metadata               Json?
 
   @@index([clientId, status])
   @@index([clientInvoiceId])
@@ -2197,41 +2245,41 @@ enum ProductTrackingLinkStatus {
 
 /// Canonical product catalog row (current state — not transaction-time).
 model Product {
-  id           String              @id @default(uuid())
-  merchantId   String?
-  merchant     Merchant?           @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+  id                         String              @id @default(uuid())
+  merchantId                 String?
+  merchant                   Merchant?           @relation(fields: [merchantId], references: [id], onDelete: SetNull)
   /// Optional parent feed when created via ProductFeed ingest (Epic 4).
-  productFeedId String?
-  productFeed   ProductFeed?       @relation(fields: [productFeedId], references: [id], onDelete: SetNull)
-  campaignSourceId String?
-  campaignSource   CampaignSource? @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
-  sku          String?
-  title        String
-  description  String?
-  url          String?
-  imageUrl     String?
-  category     String?
-  brand        String?
+  productFeedId              String?
+  productFeed                ProductFeed?        @relation(fields: [productFeedId], references: [id], onDelete: SetNull)
+  campaignSourceId           String?
+  campaignSource             CampaignSource?     @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
+  sku                        String?
+  title                      String
+  description                String?
+  url                        String?
+  imageUrl                   String?
+  category                   String?
+  brand                      String?
   /// Current catalog price — not financial payable.
-  price        Decimal?            @db.Decimal(18, 4)
-  salePrice    Decimal?            @db.Decimal(18, 4)
-  currency     String?             @db.Char(3)
+  price                      Decimal?            @db.Decimal(18, 4)
+  salePrice                  Decimal?            @db.Decimal(18, 4)
+  currency                   String?             @db.Char(3)
   /// Client display currency (INR for India region, else USD) — not commission basis.
-  clientReportingCurrency String?  @db.Char(3)
-  availability ProductAvailability @default(UNKNOWN)
-  status       ProductStatus       @default(UNKNOWN)
-  feedStatus   ProductFeedStatus?  @default(ACTIVE)
+  clientReportingCurrency    String?             @db.Char(3)
+  availability               ProductAvailability @default(UNKNOWN)
+  status                     ProductStatus       @default(UNKNOWN)
+  feedStatus                 ProductFeedStatus?  @default(ACTIVE)
   /// Internal only — never client API.
   supplierProductTrackingUrl String?
-  metadata     Json?
-  createdAt    DateTime            @default(now())
-  updatedAt    DateTime            @updatedAt
+  metadata                   Json?
+  createdAt                  DateTime            @default(now())
+  updatedAt                  DateTime            @updatedAt
 
-  sources                 ProductSource[]
-  orderItems              OrderItem[]
-  feedItems               ProductFeedItem[]
+  sources                  ProductSource[]
+  orderItems               OrderItem[]
+  feedItems                ProductFeedItem[]
   clientProductAssignments ClientProductAssignment[]
-  productTrackingLinks    ProductTrackingLink[]
+  productTrackingLinks     ProductTrackingLink[]
 
   @@index([merchantId])
   @@index([sku])
@@ -2243,25 +2291,25 @@ model Product {
 
 /// Supplier-specific product identity (no fuzzy merge).
 model ProductSource {
-  id                 String     @id @default(uuid())
+  id                 String      @id @default(uuid())
   productId          String
-  product            Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product            Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
   supplier           SupplierKey
-  sourceAccountLabel String     @default("default")
+  sourceAccountLabel String      @default("default")
   supplierProductId  String
   supplierSku        String?
   supplierCampaignId String?
   catalogId          String?
   /// Snapshot from supplier at last sync.
   title              String?
-  price              Decimal?   @db.Decimal(18, 4)
-  currency           String?    @db.Char(3)
+  price              Decimal?    @db.Decimal(18, 4)
+  currency           String?     @db.Char(3)
   rawPayloadId       String?
   rawPayload         RawPayload? @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
   mapperVersion      String?
   metadata           Json?
-  createdAt          DateTime   @default(now())
-  updatedAt          DateTime   @updatedAt
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
 
   feedItems ProductFeedItem[]
 
@@ -2308,27 +2356,27 @@ model ProductFeed {
 
 /// Feed-row snapshot distinct from normalized Product (v15 / DM-02).
 model ProductFeedItem {
-  id                 String            @id @default(uuid())
-  productFeedId      String
-  productFeed        ProductFeed       @relation(fields: [productFeedId], references: [id], onDelete: Cascade)
-  productId          String?
-  product            Product?          @relation(fields: [productId], references: [id], onDelete: SetNull)
-  productSourceId    String?
-  productSource      ProductSource?    @relation(fields: [productSourceId], references: [id], onDelete: SetNull)
-  supplierProductId  String
-  title              String?
-  price              Decimal?          @db.Decimal(18, 4)
-  currency           String?           @db.Char(3)
-  productUrl         String?
-  imageUrl           String?
+  id                  String            @id @default(uuid())
+  productFeedId       String
+  productFeed         ProductFeed       @relation(fields: [productFeedId], references: [id], onDelete: Cascade)
+  productId           String?
+  product             Product?          @relation(fields: [productId], references: [id], onDelete: SetNull)
+  productSourceId     String?
+  productSource       ProductSource?    @relation(fields: [productSourceId], references: [id], onDelete: SetNull)
+  supplierProductId   String
+  title               String?
+  price               Decimal?          @db.Decimal(18, 4)
+  currency            String?           @db.Char(3)
+  productUrl          String?
+  imageUrl            String?
   supplierTrackingUrl String?
-  status             ProductFeedStatus @default(ACTIVE)
-  rawPayloadId       String?
-  rawPayload         RawPayload?       @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
-  mapperVersion      String?
-  metadata           Json?
-  createdAt          DateTime          @default(now())
-  updatedAt          DateTime          @updatedAt
+  status              ProductFeedStatus @default(ACTIVE)
+  rawPayloadId        String?
+  rawPayload          RawPayload?       @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
+  mapperVersion       String?
+  metadata            Json?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
 
   @@unique([productFeedId, supplierProductId])
   @@index([productId])
@@ -2388,29 +2436,29 @@ model ProductTrackingLink {
 }
 
 model DailyReport {
-  id                     String            @id @default(uuid())
-  reportDate             DateTime          @db.Date
-  clientId               String
-  client                 Client            @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  merchantId             String
-  merchant               Merchant          @relation(fields: [merchantId], references: [id], onDelete: Restrict)
-  canonicalCampaignId    String
-  canonicalCampaign      CanonicalCampaign @relation(fields: [canonicalCampaignId], references: [id], onDelete: Restrict)
-  campaignSourceId       String?
-  campaignSource         CampaignSource?   @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
-  country                String?           @db.Char(2)
-  currency               String?           @db.Char(3)
-  clickCount             Int               @default(0)
-  conversionCount        Int               @default(0)
-  approvedConversionCount Int              @default(0)
-  grossCommission        Decimal           @default(0) @db.Decimal(18, 4)
-  clientCommission       Decimal           @default(0) @db.Decimal(18, 4)
-  mboCommission          Decimal           @default(0) @db.Decimal(18, 4)
-  conversionRate         Decimal?          @db.Decimal(8, 6)
-  epc                    Decimal?          @db.Decimal(18, 4)
-  ctr                    Decimal?          @db.Decimal(8, 6)
-  createdAt              DateTime          @default(now())
-  updatedAt              DateTime          @updatedAt
+  id                      String            @id @default(uuid())
+  reportDate              DateTime          @db.Date
+  clientId                String
+  client                  Client            @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  merchantId              String
+  merchant                Merchant          @relation(fields: [merchantId], references: [id], onDelete: Restrict)
+  canonicalCampaignId     String
+  canonicalCampaign       CanonicalCampaign @relation(fields: [canonicalCampaignId], references: [id], onDelete: Restrict)
+  campaignSourceId        String?
+  campaignSource          CampaignSource?   @relation(fields: [campaignSourceId], references: [id], onDelete: SetNull)
+  country                 String?           @db.Char(2)
+  currency                String?           @db.Char(3)
+  clickCount              Int               @default(0)
+  conversionCount         Int               @default(0)
+  approvedConversionCount Int               @default(0)
+  grossCommission         Decimal           @default(0) @db.Decimal(18, 4)
+  clientCommission        Decimal           @default(0) @db.Decimal(18, 4)
+  mboCommission           Decimal           @default(0) @db.Decimal(18, 4)
+  conversionRate          Decimal?          @db.Decimal(8, 6)
+  epc                     Decimal?          @db.Decimal(18, 4)
+  ctr                     Decimal?          @db.Decimal(8, 6)
+  createdAt               DateTime          @default(now())
+  updatedAt               DateTime          @updatedAt
 
   @@index([clientId, reportDate])
   @@index([merchantId, reportDate])
@@ -2511,32 +2559,32 @@ model BoostinyPaymentSourceMapping {
 
 /// Final aggregate settlement from Partner Payment CSV. confirmation_granularity = PAYMENT_SOURCE_CYCLE.
 model BoostinyPartnerPaymentSettlement {
-  id                   String                   @id @default(uuid())
+  id                      String                        @id @default(uuid())
   /// Deterministic: BOOSTINY|{sourceAccountLabel}|{paymentSource}|{cycle}
-  settlementKey        String                   @unique
-  sourceAccountLabel   String                   @default("default")
-  paymentSource        String
-  cycle                String
-  legalEntityName      String?
-  ordersCount          Int?
-  revenue              Decimal?                 @db.Decimal(18, 4)
-  salesAmountUsd       Decimal?                 @db.Decimal(18, 4)
-  extra                Decimal?                 @db.Decimal(18, 4)
-  deduction            Decimal?                 @db.Decimal(18, 4)
-  delayed              Decimal?                 @db.Decimal(18, 4)
-  currency             String                   @default("USD") @db.Char(3)
-  confirmationGranularity String                @default("PAYMENT_SOURCE_CYCLE")
-  status               BoostinySettlementStatus @default(PENDING_REVIEW)
-  clientId             String?
-  client               Client?                  @relation(fields: [clientId], references: [id], onDelete: SetNull)
-  mappingId            String?
-  mapping              BoostinyPaymentSourceMapping? @relation(fields: [mappingId], references: [id], onDelete: SetNull)
-  uploadBatchId        String?
-  rawRow               Json?
-  rawPayloadId         String?
-  blockReason          String?
-  createdAt            DateTime                 @default(now())
-  updatedAt            DateTime                 @updatedAt
+  settlementKey           String                        @unique
+  sourceAccountLabel      String                        @default("default")
+  paymentSource           String
+  cycle                   String
+  legalEntityName         String?
+  ordersCount             Int?
+  revenue                 Decimal?                      @db.Decimal(18, 4)
+  salesAmountUsd          Decimal?                      @db.Decimal(18, 4)
+  extra                   Decimal?                      @db.Decimal(18, 4)
+  deduction               Decimal?                      @db.Decimal(18, 4)
+  delayed                 Decimal?                      @db.Decimal(18, 4)
+  currency                String                        @default("USD") @db.Char(3)
+  confirmationGranularity String                        @default("PAYMENT_SOURCE_CYCLE")
+  status                  BoostinySettlementStatus      @default(PENDING_REVIEW)
+  clientId                String?
+  client                  Client?                       @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  mappingId               String?
+  mapping                 BoostinyPaymentSourceMapping? @relation(fields: [mappingId], references: [id], onDelete: SetNull)
+  uploadBatchId           String?
+  rawRow                  Json?
+  rawPayloadId            String?
+  blockReason             String?
+  createdAt               DateTime                      @default(now())
+  updatedAt               DateTime                      @updatedAt
 
   @@index([paymentSource, cycle])
   @@index([clientId, cycle])

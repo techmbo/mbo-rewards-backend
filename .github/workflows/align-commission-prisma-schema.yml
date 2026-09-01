@@ -1,0 +1,56 @@
+name: Align Commission Prisma Schema
+
+on:
+  push:
+    branches:
+      - fix/commission-architecture-pr1-pr2
+    paths:
+      - '.github/workflows/align-commission-prisma-schema.yml'
+      - 'scripts/align-commission-prisma-schema.cjs'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  align-schema:
+    runs-on: ubuntu-latest
+    env:
+      # Prisma validate requires datasource variables to exist, but it does not connect.
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/mbo_ci
+      DIRECT_URL: postgresql://ci:ci@localhost:5432/mbo_ci
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/commission-architecture-pr1-pr2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Align Prisma schema
+        run: node scripts/align-commission-prisma-schema.cjs
+
+      - name: Format and validate Prisma schema
+        run: |
+          npx prisma format --schema prisma/schema.prisma
+          npx prisma validate --schema prisma/schema.prisma
+
+      - name: Commit aligned schema
+        shell: bash
+        run: |
+          if git diff --quiet -- prisma/schema.prisma; then
+            echo 'No schema change required.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add prisma/schema.prisma
+          git commit -m 'Align Prisma schema with supplier commission conditions'
+          git push origin HEAD:fix/commission-architecture-pr1-pr2
