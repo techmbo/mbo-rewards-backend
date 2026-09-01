@@ -1,5 +1,5 @@
 /**
- * Pointer 18 — Reconciliation logic (pairwise checks).
+ * Pointer 18 / PR4 — Reconciliation logic (pairwise checks).
  *
  * Reconcile separately:
  * 1. Network Orders vs MBO Orders
@@ -8,7 +8,8 @@
  * 4. Network Payment vs MBO Actual Receipt
  * 5. MBO Receipt vs Client Payable
  *
- * On mismatch: create Exception; block client payable release when financially material.
+ * Missing source evidence is not a numeric mismatch and must never be filled from
+ * an internal MBO amount. It is CANNOT_RECONCILE / SOURCE_DATA_MISSING.
  */
 
 export const RECONCILIATION_PAIR = {
@@ -36,7 +37,12 @@ export const COUNT_MATERIALITY_THRESHOLD = 0;
 export const RECONCILIATION_STATUS = {
   MATCHED: "MATCHED",
   MISMATCH: "MISMATCH",
+  CANNOT_RECONCILE: "CANNOT_RECONCILE",
   SKIPPED: "SKIPPED",
+};
+
+export const RECONCILIATION_REASON_CODE = {
+  SOURCE_DATA_MISSING: "SOURCE_DATA_MISSING",
 };
 
 export const CLIENT_PAYABLE_BLOCKING_PAIRS = new Set([
@@ -55,6 +61,12 @@ function bothNull(left, right) {
   return left == null && right == null;
 }
 
+function missingSideReason({ leftNum, rightNum, leftLabel, rightLabel }) {
+  if (leftNum == null && rightNum != null) return `${leftLabel} missing`;
+  if (rightNum == null && leftNum != null) return `${rightLabel} missing`;
+  return null;
+}
+
 function buildCheck({
   pair,
   left,
@@ -64,16 +76,18 @@ function buildCheck({
   materialityThreshold,
   isCount = false,
 }) {
-  const leftNum = isCount ? toNumber(left) : toNumber(left);
-  const rightNum = isCount ? toNumber(right) : toNumber(right);
+  const leftNum = toNumber(left);
+  const rightNum = toNumber(right);
 
   if (bothNull(leftNum, rightNum)) {
     return {
       pair,
       label: RECONCILIATION_PAIR_LABELS[pair],
       status: RECONCILIATION_STATUS.SKIPPED,
+      reasonCode: null,
       ok: true,
       skipped: true,
+      sourceDataMissing: false,
       material: false,
       left: leftNum,
       right: rightNum,
@@ -84,33 +98,49 @@ function buildCheck({
     };
   }
 
-  const difference =
-    leftNum != null && rightNum != null ? leftNum - rightNum : null;
+  // One side exists and the other does not: no reconciliation can be performed.
+  if (leftNum == null || rightNum == null) {
+    return {
+      pair,
+      label: RECONCILIATION_PAIR_LABELS[pair],
+      status: RECONCILIATION_STATUS.CANNOT_RECONCILE,
+      reasonCode: RECONCILIATION_REASON_CODE.SOURCE_DATA_MISSING,
+      ok: false,
+      skipped: false,
+      sourceDataMissing: true,
+      // Fail closed for financial release. Count-source gaps are also material because
+      // the dataset is incomplete rather than numerically reconciled.
+      material: true,
+      left: leftNum,
+      right: rightNum,
+      leftLabel,
+      rightLabel,
+      difference: null,
+      mismatchReason: missingSideReason({ leftNum, rightNum, leftLabel, rightLabel }),
+    };
+  }
+
+  const difference = leftNum - rightNum;
   const threshold = isCount ? COUNT_MATERIALITY_THRESHOLD : materialityThreshold;
-  const absDiff = difference != null ? Math.abs(difference) : null;
-  const material = absDiff != null ? absDiff > threshold : true;
-  const ok = difference != null ? absDiff <= threshold : false;
+  const absDiff = Math.abs(difference);
+  const ok = absDiff <= threshold;
 
   let mismatchReason = null;
-  if (!ok && !bothNull(leftNum, rightNum)) {
-    if (leftNum == null) {
-      mismatchReason = `${leftLabel} missing`;
-    } else if (rightNum == null) {
-      mismatchReason = `${rightLabel} missing`;
-    } else if (isCount) {
-      mismatchReason = `Count delta ${difference > 0 ? "+" : ""}${difference}`;
-    } else {
-      mismatchReason = `Amount delta ${difference > 0 ? "+" : ""}${difference.toFixed(4)}`;
-    }
+  if (!ok) {
+    mismatchReason = isCount
+      ? `Count delta ${difference > 0 ? "+" : ""}${difference}`
+      : `Amount delta ${difference > 0 ? "+" : ""}${difference.toFixed(4)}`;
   }
 
   return {
     pair,
     label: RECONCILIATION_PAIR_LABELS[pair],
     status: ok ? RECONCILIATION_STATUS.MATCHED : RECONCILIATION_STATUS.MISMATCH,
+    reasonCode: null,
     ok,
     skipped: false,
-    material: !ok && material,
+    sourceDataMissing: false,
+    material: !ok && absDiff > threshold,
     left: leftNum,
     right: rightNum,
     leftLabel,
@@ -178,19 +208,26 @@ export function runReconciliationChecks({
     }),
   ];
 
-  const materialMismatches = checks.filter((c) => c.material);
-  const openMismatches = checks.filter((c) => !c.ok && !c.skipped);
+  const cannotReconcile = checks.filter(
+    (check) => check.status === RECONCILIATION_STATUS.CANNOT_RECONCILE,
+  );
+  const materialMismatches = checks.filter((check) => check.material);
+  const openMismatches = checks.filter((check) => !check.ok && !check.skipped);
 
   return {
     checks,
     allMatched: openMismatches.length === 0,
     hasMaterialMismatch: materialMismatches.length > 0,
+    hasSourceDataMissing: cannotReconcile.length > 0,
+    cannotReconcile,
     materialMismatches,
     openMismatches,
     summaryStatus:
-      openMismatches.length === 0
-        ? RECONCILIATION_STATUS.MATCHED
-        : RECONCILIATION_STATUS.MISMATCH,
+      cannotReconcile.length > 0
+        ? RECONCILIATION_STATUS.CANNOT_RECONCILE
+        : openMismatches.length === 0
+          ? RECONCILIATION_STATUS.MATCHED
+          : RECONCILIATION_STATUS.MISMATCH,
   };
 }
 
@@ -209,8 +246,10 @@ export function summarizeChecksForUi(checks = []) {
     pair: check.pair,
     label: check.label,
     status: check.status,
+    reasonCode: check.reasonCode ?? null,
     ok: check.ok,
     skipped: check.skipped,
+    sourceDataMissing: Boolean(check.sourceDataMissing),
     material: check.material,
     left: check.left,
     right: check.right,
@@ -221,14 +260,11 @@ export function summarizeChecksForUi(checks = []) {
   }));
 }
 
-function asObject(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
-}
-
 export function resolveNetworkReconRowStatus(reconciliationResult) {
   if (!reconciliationResult) return "UNKNOWN";
-  if (reconciliationResult.allMatched) return "MATCHED";
-  if (reconciliationResult.hasMaterialMismatch) return "MISMATCH";
+  if (reconciliationResult.hasSourceDataMissing) return RECONCILIATION_STATUS.CANNOT_RECONCILE;
+  if (reconciliationResult.allMatched) return RECONCILIATION_STATUS.MATCHED;
+  if (reconciliationResult.hasMaterialMismatch) return RECONCILIATION_STATUS.MISMATCH;
   if (reconciliationResult.openMismatches?.length) return "PARTIAL";
   return "PENDING";
 }
