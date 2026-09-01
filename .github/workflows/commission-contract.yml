@@ -1,0 +1,28 @@
+name: Commission Contract
+
+on:
+  pull_request:
+    branches: [backend1]
+    paths:
+      - 'src/modules/commercial/**'
+      - 'src/modules/ops/campaignCommissions.js'
+      - 'test/supplierCommissionArchitecture.contract.test.js'
+      - 'prisma/migrations/20260902010000_supplier_commission_conditions/**'
+      - '.github/workflows/commission-contract.yml'
+  workflow_dispatch:
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run supplier commission contract tests
+        run: node --test test/supplierCommissionArchitecture.contract.test.js
