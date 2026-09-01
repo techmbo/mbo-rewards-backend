@@ -80,35 +80,67 @@ function looksPercent(entry, valueText, fallbackUnit) {
   ).toLowerCase();
   if (/%/.test(String(valueText || ""))) return true;
   if (/percent|revshare|sale-share|cps|share/.test(model)) return true;
-  if (/fix|flat|cpa|cpl|cpc|amount|fixed cost/.test(model) && !/percent/.test(model)) return false;
+  if (/fix|flat|cpa|cpl|cpc|cpi|cpm|amount|fixed cost/.test(model) && !/percent/.test(model)) return false;
   const unit = String(fallbackUnit || "").toUpperCase();
   if (unit === "PERCENT") return true;
   if (unit === "FLAT" || unit === "FIXED") return false;
   return null;
 }
 
-function factKey(fact) {
-  return `${fact.kind}|${fact.value}|${fact.currency || ""}|${fact.display}`;
+function payoutBasisFrom(entry = {}, fallbackUnit = null, kind = null) {
+  const text = String(
+    entry?.basis ??
+      entry?.model ??
+      entry?.performance_model ??
+      entry?.performanceModel ??
+      entry?.pricing_model ??
+      entry?.pricingModel ??
+      entry?.type ??
+      entry?.payout_type ??
+      entry?.commissionType ??
+      entry?.commission_type ??
+      fallbackUnit ??
+      "",
+  ).toUpperCase();
+
+  // Only derive a basis from explicit source wording. Otherwise keep a neutral canonical basis.
+  if (/\bCPA\b/.test(text)) return "CPA";
+  if (/\bCPL\b/.test(text)) return "CPL";
+  if (/\bCPI\b/.test(text)) return "CPI";
+  if (/\bCPC\b/.test(text)) return "CPC";
+  if (/\bCPM\b/.test(text)) return "CPM";
+  if (/\bCPS\b/.test(text)) return kind === "PERCENT" ? "PERCENT_OF_SALE" : "CPS";
+  if (/PER[ _-]?ITEM|ITEM/.test(text) && /FIX|FLAT|AMOUNT/.test(text)) return "FIXED_PER_ITEM";
+  if (/PER[ _-]?ORDER|ORDER/.test(text) && /FIX|FLAT|AMOUNT/.test(text)) return "FIXED_PER_ORDER";
+  if (kind === "PERCENT") return "PERCENT_OF_SALE";
+  if (kind === "FIXED") return "FIXED_AMOUNT";
+  return "UNKNOWN";
 }
 
-function makePercentFact(value, { upTo = false } = {}) {
+function factKey(fact) {
+  return `${fact.kind}|${fact.value}|${fact.currency || ""}|${fact.basis || ""}|${fact.display}`;
+}
+
+function makePercentFact(value, { upTo = false, basis = "PERCENT_OF_SALE" } = {}) {
   const shown = trimNum(value);
   if (shown == null || Number(value) === 0) return null;
   return {
     kind: "PERCENT",
     value: Number(value),
     currency: null,
+    basis,
     display: upTo ? `Up to ${shown}%` : `${shown}%`,
   };
 }
 
-function makeFixedFact(value, currency) {
+function makeFixedFact(value, currency, { basis = "FIXED_AMOUNT" } = {}) {
   const shown = trimNum(value);
   if (shown == null || Number(value) === 0) return null;
   return {
     kind: "FIXED",
     value: Number(value),
     currency: currency || null,
+    basis,
     display: currency ? `${currency} ${shown}` : shown,
   };
 }
@@ -130,7 +162,7 @@ export function parseCommissionText(text) {
   for (const match of s.matchAll(/(up\s*to\s*)?(-?\d+(?:[.,]\d+)?)\s*%/gi)) {
     const n = Number(String(match[2]).replace(",", "."));
     if (!Number.isFinite(n) || n === 0) continue;
-    const fact = makePercentFact(n, { upTo: Boolean(match[1]) });
+    const fact = makePercentFact(n, { upTo: Boolean(match[1]), basis: "PERCENT_OF_SALE" });
     if (fact) facts.push(fact);
     mark(match.index, match.index + match[0].length);
   }
@@ -152,7 +184,7 @@ export function parseCommissionText(text) {
       currency = currencyFrom(match[4]);
     }
     if (!Number.isFinite(amount) || amount === 0) continue;
-    const fact = makeFixedFact(amount, currency);
+    const fact = makeFixedFact(amount, currency, { basis: "FIXED_AMOUNT" });
     if (fact) facts.push(fact);
   }
 
@@ -169,8 +201,8 @@ function structuredFacts(entry, { fallbackUnit, fallbackCurrency } = {}) {
     const percent = looksPercent({}, String(entry), fallbackUnit);
     return [
       percent === false
-        ? makeFixedFact(n, fallbackCurrency)
-        : makePercentFact(n),
+        ? makeFixedFact(n, fallbackCurrency, { basis: payoutBasisFrom({}, fallbackUnit, "FIXED") })
+        : makePercentFact(n, { basis: payoutBasisFrom({}, fallbackUnit, "PERCENT") }),
     ].filter(Boolean);
   }
 
@@ -185,16 +217,29 @@ function structuredFacts(entry, { fallbackUnit, fallbackCurrency } = {}) {
     null;
 
   if (valueField && typeof valueField === "object") {
-    return structuredFacts(valueField, { fallbackUnit, fallbackCurrency: currencyFrom(entry, fallbackCurrency) });
+    return structuredFacts(valueField, {
+      fallbackUnit,
+      fallbackCurrency: currencyFrom(entry, fallbackCurrency),
+    });
   }
 
   if (typeof valueField === "string" && /%|or\b|\$|rp|£|€/i.test(valueField)) {
     const parsed = parseCommissionText(valueField);
-    if (parsed.length) return parsed;
+    if (parsed.length) {
+      return parsed.map((fact) => ({
+        ...fact,
+        basis: payoutBasisFrom(entry, fallbackUnit, fact.kind),
+      }));
+    }
   }
   if (typeof entry.type === "string" && typeof valueField === "string") {
     const parsed = parseCommissionText(valueField);
-    if (parsed.length) return parsed;
+    if (parsed.length) {
+      return parsed.map((fact) => ({
+        ...fact,
+        basis: payoutBasisFrom(entry, fallbackUnit, fact.kind),
+      }));
+    }
   }
 
   const amount = numericFrom(valueField);
@@ -203,10 +248,14 @@ function structuredFacts(entry, { fallbackUnit, fallbackCurrency } = {}) {
   const valueText = valueField != null && typeof valueField !== "object" ? String(valueField) : "";
   const percent = looksPercent(entry, valueText, fallbackUnit);
   if (percent === false) {
-    const fact = makeFixedFact(amount, currency);
+    const fact = makeFixedFact(amount, currency, {
+      basis: payoutBasisFrom(entry, fallbackUnit, "FIXED"),
+    });
     return fact ? [fact] : [];
   }
-  const fact = makePercentFact(amount);
+  const fact = makePercentFact(amount, {
+    basis: payoutBasisFrom(entry, fallbackUnit, "PERCENT"),
+  });
   return fact ? [fact] : [];
 }
 
@@ -300,7 +349,7 @@ function collectSourceEntries({ groups, raw } = {}) {
 export { collectSourceEntries };
 
 /**
- * @returns {{ facts: object[], display: string|null }}
+ * @returns {{ facts: object[], display: string|null, averageDisplay: string|null }}
  */
 export function listCampaignCommissionFacts({
   groups = null,
@@ -341,9 +390,17 @@ export function listCampaignCommissionFacts({
   };
 }
 
+/**
+ * Current campaign Avg Commission is a display/reporting summary only.
+ * It must never be used as an order-level supplier or client payout rate.
+ *
+ * Comparable sets:
+ * - percentages with percentages;
+ * - fixed amounts only when currency AND payout basis are the same.
+ * Anything else returns MIXED.
+ */
 export function averageCommissionFacts(facts = []) {
-  const percents = [];
-  const fixedByCurrency = new Map();
+  const normalized = [];
   for (const fact of facts || []) {
     if (!fact) continue;
     const n =
@@ -353,27 +410,32 @@ export function averageCommissionFacts(facts = []) {
     if (n == null || n === 0) continue;
     const display = String(fact.display || "");
     const isPercent = fact.kind === "PERCENT" || /%/.test(display);
-    if (isPercent) {
-      percents.push(n);
-      continue;
-    }
-    const currency = fact.currency || null;
-    const key = currency || "";
-    const list = fixedByCurrency.get(key) || [];
-    list.push(n);
-    fixedByCurrency.set(key, list);
+    normalized.push({
+      kind: isPercent ? "PERCENT" : "FIXED",
+      value: n,
+      currency: fact.currency || null,
+      basis: fact.basis || (isPercent ? "PERCENT_OF_SALE" : "FIXED_AMOUNT"),
+    });
   }
-  const parts = [];
-  if (percents.length) {
-    const avg = percents.reduce((sum, v) => sum + v, 0) / percents.length;
+
+  if (!normalized.length) return null;
+
+  const kinds = new Set(normalized.map((fact) => fact.kind));
+  if (kinds.size > 1) return "MIXED";
+
+  if (kinds.has("PERCENT")) {
+    const avg = normalized.reduce((sum, fact) => sum + fact.value, 0) / normalized.length;
     const shown = trimNum(avg);
-    if (shown != null) parts.push(`${shown}%`);
+    return shown == null ? null : `${shown}%`;
   }
-  for (const [currency, amounts] of fixedByCurrency) {
-    const avg = amounts.reduce((sum, v) => sum + v, 0) / amounts.length;
-    const shown = trimNum(avg);
-    if (shown == null) continue;
-    parts.push(currency ? `${currency} ${shown}` : shown);
-  }
-  return parts.length ? parts.join(" · ") : null;
+
+  const currencies = new Set(normalized.map((fact) => fact.currency || ""));
+  const bases = new Set(normalized.map((fact) => fact.basis || "FIXED_AMOUNT"));
+  if (currencies.size > 1 || bases.size > 1) return "MIXED";
+
+  const avg = normalized.reduce((sum, fact) => sum + fact.value, 0) / normalized.length;
+  const shown = trimNum(avg);
+  if (shown == null) return null;
+  const currency = normalized[0].currency;
+  return currency ? `${currency} ${shown}` : shown;
 }
