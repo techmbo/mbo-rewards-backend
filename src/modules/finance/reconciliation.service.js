@@ -23,44 +23,48 @@ function netFinancialAmount(rows = [], field) {
   return total;
 }
 
+function sourceAmount(...candidates) {
+  for (const candidate of candidates) {
+    if (candidate == null || candidate === "") continue;
+    const value = Number(candidate);
+    if (Number.isFinite(value)) return value;
+  }
+  return null;
+}
+
 /**
  * Build pairwise reconciliation inputs for a single order.
+ *
+ * PR4 rule: source-side amounts stay source-side. Missing network invoice/payment/
+ * commission evidence is null; it is never replaced with MBO gross or another internal value.
  */
 export function buildOrderReconciliationInputs({ order = null, financialTransactions = [] } = {}) {
   const meta = asObject(order?.metadata);
   const mboGross = netFinancialAmount(financialTransactions, "supplierReceivable");
   const clientPayable = netFinancialAmount(financialTransactions, "clientPayable");
   const receipt = extractMboActualReceipt({ order, financialTransactions });
-  const receiptAmount =
-    receipt?.amount != null
-      ? Number(receipt.amount)
-      : receipt
-        ? mboGross
-        : null;
 
-  const networkCommission =
-    meta.networkCommission ??
-    meta.networkReportedCommission ??
-    meta.reportedCommission ??
-    (mboGross > 0 ? mboGross : null);
-  const networkInvoiceAmount =
-    meta.networkInvoiceAmount ??
-    meta.confirmedCommission ??
-    (String(order?.supplierPaymentStatus || "").includes("INVOICED") ||
-    String(order?.supplierPaymentStatus || "").includes("PAYABLE")
-      ? mboGross
-      : null);
-  const networkPaymentAmount =
-    meta.networkPaymentAmount ??
-    meta.networkPaidAmount ??
-    meta.paidCommission ??
-    (meta.networkPaymentEvidence || meta.networkPaymentStatus ? mboGross : null);
+  const receiptAmount = sourceAmount(receipt?.amount);
+  const networkCommission = sourceAmount(
+    meta.networkCommission,
+    meta.networkReportedCommission,
+    meta.reportedCommission,
+  );
+  const networkInvoiceAmount = sourceAmount(
+    meta.networkInvoiceAmount,
+    meta.networkInvoicedAmount,
+  );
+  const networkPaymentAmount = sourceAmount(
+    meta.networkPaymentAmount,
+    meta.networkPaidAmount,
+    meta.paidCommission,
+  );
 
   return {
     networkOrderCount: order?.supplierOrderId || order?.id ? 1 : null,
     mboOrderCount: order?.id ? 1 : null,
     networkCommission,
-    mboGrossNetworkCommission: mboGross > 0 ? mboGross : null,
+    mboGrossNetworkCommission: mboGross > 0 ? mboGross : mboGross === 0 ? 0 : null,
     networkInvoiceAmount,
     networkPaymentAmount,
     mboActualReceiptAmount: receiptAmount,
