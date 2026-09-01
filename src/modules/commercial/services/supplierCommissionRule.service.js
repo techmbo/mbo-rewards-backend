@@ -5,13 +5,21 @@
  * PR1 correction:
  * - outcomeKey is the normalized identity, not sourceRuleId alone;
  * - historical effective versions are retained;
- * - child SupplierCommissionCondition rows are replaced transactionally for the same outcome version;
- * - new DB columns are written with parameterized raw SQL until Prisma schema regeneration is completed.
+ * - child SupplierCommissionCondition rows are replaced transactionally for the same outcome version.
+ *
+ * PR3:
+ * - load all effective supplier rules with conditions;
+ * - select the payable supplier rule through the pure Supplier Commission Matcher;
+ * - expose expected-vs-actual comparison without replacing network actual commission truth.
  */
 
 import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../../database/prisma.js";
+import {
+  buildSupplierCommissionMatchFacts,
+  matchSupplierCommissionRule,
+} from "../supplierCommissionMatcher.js";
 
 function asDate(value, fallback = null) {
   if (!value) return fallback;
@@ -121,12 +129,22 @@ export class SupplierCommissionRuleService {
           data: {
             campaignSourceId: input.campaignSourceId ?? null,
             supplierCampaignId: input.supplierCampaignId ?? null,
+            sourceGroupId: input.sourceGroupId ?? null,
+            sourceGroupName: input.sourceGroupName ?? null,
             sourceRuleId: input.sourceRuleId ?? null,
+            sourceRuleName: input.sourceRuleName ?? null,
+            outcomeKey: input.outcomeKey,
+            commissionSequence: input.commissionSequence ?? null,
+            commissionModel: input.commissionModel ?? null,
+            commissionType: input.commissionType ?? null,
             supplierRuleType: input.supplierRuleType ?? null,
             basis: input.basis ?? "UNKNOWN",
             ratePercent: input.ratePercent ?? null,
             fixedAmount: input.fixedAmount ?? null,
             currency,
+            actionType: input.actionType ?? null,
+            priority: input.priority ?? null,
+            rank: input.rank ?? null,
             customerType: input.customerType ?? null,
             country: input.country ?? null,
             categoryProductGoal: input.categoryProductGoal ?? null,
@@ -139,8 +157,14 @@ export class SupplierCommissionRuleService {
             ruleVersion: input.ruleVersion ?? null,
             effectiveUntil,
             rawPayloadId: input.rawPayloadId ?? null,
+            rawRuleReference: input.rawRuleReference ?? null,
             metadata: input.metadata ?? null,
+            conditions: {
+              deleteMany: {},
+              create: conditions,
+            },
           },
+          include: { conditions: true },
         });
       } else {
         const priorOpen = versions.find(
@@ -159,12 +183,22 @@ export class SupplierCommissionRuleService {
             supplierCampaignId: input.supplierCampaignId ?? null,
             supplier: input.supplier,
             sourceAccountLabel,
+            sourceGroupId: input.sourceGroupId ?? null,
+            sourceGroupName: input.sourceGroupName ?? null,
             sourceRuleId: input.sourceRuleId ?? null,
+            sourceRuleName: input.sourceRuleName ?? null,
+            outcomeKey: input.outcomeKey,
+            commissionSequence: input.commissionSequence ?? null,
+            commissionModel: input.commissionModel ?? null,
+            commissionType: input.commissionType ?? null,
             supplierRuleType: input.supplierRuleType ?? null,
             basis: input.basis ?? "UNKNOWN",
             ratePercent: input.ratePercent ?? null,
             fixedAmount: input.fixedAmount ?? null,
             currency,
+            actionType: input.actionType ?? null,
+            priority: input.priority ?? null,
+            rank: input.rank ?? null,
             customerType: input.customerType ?? null,
             country: input.country ?? null,
             categoryProductGoal: input.categoryProductGoal ?? null,
@@ -178,79 +212,17 @@ export class SupplierCommissionRuleService {
             effectiveFrom,
             effectiveUntil,
             rawPayloadId: input.rawPayloadId ?? null,
+            rawRuleReference: input.rawRuleReference ?? null,
             metadata: input.metadata ?? null,
+            conditions: {
+              create: conditions,
+            },
           },
+          include: { conditions: true },
         });
       }
 
-      const rawRuleReferenceJson = jsonParam(input.rawRuleReference);
-      await tx.$executeRaw(Prisma.sql`
-        UPDATE "supplier_commission_rules"
-        SET
-          "sourceGroupId" = ${input.sourceGroupId ?? null},
-          "sourceGroupName" = ${input.sourceGroupName ?? null},
-          "sourceRuleName" = ${input.sourceRuleName ?? null},
-          "outcomeKey" = ${input.outcomeKey},
-          "commissionSequence" = ${input.commissionSequence ?? null},
-          "commissionModel" = ${input.commissionModel ?? null},
-          "commissionType" = ${input.commissionType ?? null},
-          "actionType" = ${input.actionType ?? null},
-          priority = ${input.priority ?? null},
-          rank = ${input.rank ?? null},
-          "rawRuleReference" = CASE
-            WHEN ${rawRuleReferenceJson}::text IS NULL THEN NULL
-            ELSE ${rawRuleReferenceJson}::jsonb
-          END
-        WHERE id = ${rule.id}
-      `);
-
-      await tx.$executeRaw(Prisma.sql`
-        DELETE FROM "supplier_commission_conditions"
-        WHERE "commissionRuleId" = ${rule.id}
-      `);
-
-      for (const condition of conditions) {
-        const sourceConditionJson = jsonParam(condition.sourceConditionValue);
-        const metadataJson = jsonParam(condition.metadata);
-        await tx.$executeRaw(Prisma.sql`
-          INSERT INTO "supplier_commission_conditions" (
-            id,
-            "commissionRuleId",
-            "conditionType",
-            operator,
-            value,
-            "sourceConditionType",
-            "sourceConditionValue",
-            metadata,
-            "createdAt",
-            "updatedAt"
-          ) VALUES (
-            ${randomUUID()},
-            ${rule.id},
-            ${condition.conditionType},
-            ${condition.operator},
-            ${condition.value},
-            ${condition.sourceConditionType},
-            CASE
-              WHEN ${sourceConditionJson}::text IS NULL THEN NULL
-              ELSE ${sourceConditionJson}::jsonb
-            END,
-            CASE
-              WHEN ${metadataJson}::text IS NULL THEN NULL
-              ELSE ${metadataJson}::jsonb
-            END,
-            NOW(),
-            NOW()
-          )
-        `);
-      }
-
-      return {
-        ...rule,
-        outcomeKey: input.outcomeKey,
-        commissionSequence: input.commissionSequence ?? null,
-        conditions,
-      };
+      return rule;
     });
   }
 
@@ -264,11 +236,98 @@ export class SupplierCommissionRuleService {
         effectiveFrom: { lte: atDate },
         OR: [{ effectiveUntil: null }, { effectiveUntil: { gt: atDate } }],
       },
-      orderBy: [{ effectiveFrom: "desc" }, { createdAt: "asc" }],
+      include: { conditions: true },
+      orderBy: [
+        { commissionSequence: "asc" },
+        { effectiveFrom: "desc" },
+        { createdAt: "asc" },
+      ],
     });
   }
 
-  /** Backward-compatible convenience only. PR3 matcher must select payable rules. */
+  /**
+   * PR3 authoritative supplier-rule selection for one transaction.
+   * Matching time should be the verified source/MBO action date; callers must not silently use "now"
+   * when a historical order/conversion date is available.
+   */
+  async matchForCampaignSource({
+    campaignSourceId,
+    at,
+    order = null,
+    conversion = null,
+    item = null,
+    click = null,
+    facts = {},
+    actualCommission = null,
+    actualCurrency = null,
+    client = null,
+  } = {}) {
+    if (!campaignSourceId) {
+      return {
+        status: "NO_MATCH",
+        reason: "missing_campaign_source_id",
+        matchedRule: null,
+        matchedSupplierCommissionRuleId: null,
+        matchedCommissionSequence: null,
+        expectedSupplierCommission: null,
+        expectedCurrency: null,
+        expectedCalculationStatus: "NOT_CALCULATED",
+        networkActualCommission: actualCommission == null ? null : Number(actualCommission),
+        actualCurrency: actualCurrency ?? conversion?.currency ?? order?.currency ?? null,
+        variance: null,
+        comparisonStatus: "NOT_COMPARABLE",
+        candidateRuleIds: [],
+        reviewReasons: [],
+      };
+    }
+
+    const matchAt = asDate(
+      at ?? order?.orderDate ?? conversion?.conversionDate,
+      null,
+    );
+    if (!matchAt) {
+      return {
+        status: "REVIEW_REQUIRED",
+        reason: "missing_match_date",
+        matchedRule: null,
+        matchedSupplierCommissionRuleId: null,
+        matchedCommissionSequence: null,
+        expectedSupplierCommission: null,
+        expectedCurrency: null,
+        expectedCalculationStatus: "NOT_CALCULATED",
+        networkActualCommission: actualCommission == null ? null : Number(actualCommission),
+        actualCurrency: actualCurrency ?? conversion?.currency ?? order?.currency ?? null,
+        variance: null,
+        comparisonStatus: "NOT_COMPARABLE",
+        candidateRuleIds: [],
+        reviewReasons: ["No verified order/action date was supplied for historical rule matching."],
+      };
+    }
+
+    const rules = await this.listEffectiveForCampaignSource(campaignSourceId, matchAt, client);
+    const matcherFacts = buildSupplierCommissionMatchFacts({
+      order,
+      conversion,
+      item,
+      click,
+      overrides: facts,
+    });
+
+    const networkActual =
+      actualCommission ??
+      conversion?.approvedCommission ??
+      conversion?.supplierCommission ??
+      null;
+
+    return matchSupplierCommissionRule({
+      rules,
+      facts: matcherFacts,
+      actualCommission: networkActual,
+      actualCurrency: actualCurrency ?? conversion?.currency ?? order?.currency ?? null,
+    });
+  }
+
+  /** Backward-compatible convenience only. New financial flows should use matchForCampaignSource. */
   async findEffectiveForCampaignSource(campaignSourceId, at = new Date(), client = null) {
     const rows = await this.listEffectiveForCampaignSource(campaignSourceId, at, client);
     return rows[0] || null;
