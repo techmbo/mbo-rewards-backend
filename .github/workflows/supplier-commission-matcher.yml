@@ -1,0 +1,31 @@
+name: Supplier Commission Matcher
+
+on:
+  pull_request:
+    branches:
+      - fix/commission-architecture-pr1-pr2
+      - backend1
+    paths:
+      - 'src/modules/commercial/supplierCommissionMatcher.js'
+      - 'src/modules/commercial/services/supplierCommissionRule.service.js'
+      - 'test/supplierCommissionMatcher.test.js'
+      - '.github/workflows/supplier-commission-matcher.yml'
+  workflow_dispatch:
+
+jobs:
+  matcher:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run matcher tests
+        run: node --test test/supplierCommissionMatcher.test.js
+      - name: Run supplier commission architecture regression tests
+        run: node --test test/supplierCommissionArchitecture.contract.test.js
