@@ -1,0 +1,120 @@
+{
+  "supplier": "OPTIMISE",
+  "resourceKey": "products",
+  "mappingVersion": "1",
+  "fields": [
+    {
+      "transform": "COALESCE",
+      "sources": ["ProductSKU", "productId", "product_id", "id", "sku", "SKU", "gtin", "mpn"],
+      "targetField": "supplierProductId",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["ProductSKU", "sku", "SKU", "productId", "mpn"],
+      "targetField": "supplierSku",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["ProductName", "name", "title", "product_name", "productName"],
+      "targetField": "title",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["ProductDescription", "description", "product_description"],
+      "targetField": "description",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["ProductURL", "product_url", "productUrl", "url", "link"],
+      "targetField": "url",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["ProductURL", "tracking_url", "trackingUrl", "affiliate_url", "deep_link"],
+      "targetField": "supplierProductTrackingUrl",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": [
+        "ProductImageLargeURL",
+        "ProductLargeImageURL",
+        "ProductImageMediumURL",
+        "ProductMediumImageURL",
+        "ProductImageSmallURL",
+        "ProductSmallImageURL",
+        "image_url",
+        "imageUrl",
+        "image",
+        "image_link"
+      ],
+      "targetField": "imageUrl",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["CategoryName", "CategoryPathAsString", "category", "product_category", "product_type"],
+      "targetField": "category",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["Brand", "brand", "brand_name", "merchant"],
+      "targetField": "brand",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["ProductPrice", "DiscountedPrice", "price", "regular_price"],
+      "targetField": "price",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["DiscountedPrice", "sale_price", "salePrice"],
+      "targetField": "salePrice",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["ProductPriceCurrency", "currency", "currency_code"],
+      "targetField": "currency",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["StockAvailability", "availability", "stock_status"],
+      "targetField": "availabilityRaw",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["PID", "FeedID", "feed_id", "campaignId", "productId"],
+      "targetField": "catalogId",
+      "required": false,
+      "quality": "OPTIONAL"
+    }
+  ],
+  "notes": [
+    "v15 11B Optimise Yes/High — FeedID + AID CSV/XML/Google Shopping.",
+    "Do not invent fields beyond catalog / common feed aliases."
+  ]
+}

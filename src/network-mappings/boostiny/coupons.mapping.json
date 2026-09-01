@@ -1,0 +1,78 @@
+{
+  "supplier": "BOOSTINY",
+  "resourceKey": "coupons",
+  "mappingVersion": "1",
+  "endpoint": "GET /publisher/coupons",
+  "fields": [
+    {
+      "transform": "COALESCE",
+      "sources": ["id", "coupon_id"],
+      "targetField": "supplierCouponId",
+      "required": false,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["coupon", "code", "coupon_code"],
+      "targetField": "couponCode",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["title", "name"],
+      "targetField": "title",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["description", "promotion_description"],
+      "targetField": "promotionDescription",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["discount", "discount_value"],
+      "targetField": "discountValue",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["start_date", "valid_from"],
+      "targetField": "couponStartDate",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["end_date", "valid_to", "expiry_date"],
+      "targetField": "couponEndDate",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["status"],
+      "targetField": "couponStatus",
+      "required": false,
+      "quality": "IMPORTANT"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["campaign_id", "campaignId", "campaign_name"],
+      "targetField": "supplierCampaignId",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["deeplink", "link", "url"],
+      "targetField": "couponLink",
+      "required": false,
+      "quality": "OPTIONAL"
+    }
+  ]
+}

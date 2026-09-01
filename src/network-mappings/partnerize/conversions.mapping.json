@@ -1,0 +1,94 @@
+{
+  "supplier": "PARTNERIZE",
+  "resourceKey": "conversions",
+  "mappingVersion": "1",
+  "fields": [
+    {
+      "transform": "COALESCE",
+      "sources": ["conversion_id", "conversionId", "id", "conversion.conversion_id"],
+      "targetField": "supplierConversionId",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["campaign_id", "campaignId", "conversion.campaign_id"],
+      "targetField": "supplierCampaignId",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["publisher_reference", "conversion_reference", "order_id", "conversion.order_id"],
+      "targetField": "supplierOrderId",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["commission", "publisher_commission", "conversion.commission", "value_commission"],
+      "targetField": "supplierCommission",
+      "required": false,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["currency", "conversion.currency"],
+      "targetField": "currency",
+      "required": false,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["conversion_value", "order_value", "conversion.conversion_value"],
+      "targetField": "orderValue",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["conversion_time", "conversion_date", "conversion.conversion_time"],
+      "targetField": "eventAt",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["adref"],
+      "targetField": "attribution.clientId",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["pubref"],
+      "targetField": "attribution.assignmentId",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["clickref"],
+      "targetField": "attribution.clickId",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["publisher_reference"],
+      "targetField": "attribution.rawRefs",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["voucher_code", "coupon_code", "code"],
+      "targetField": "couponCode",
+      "required": false,
+      "quality": "OPTIONAL"
+    }
+  ],
+  "notes": [
+    "Finance must not be created here — Order/Conversion → Validation → Finance."
+  ]
+}

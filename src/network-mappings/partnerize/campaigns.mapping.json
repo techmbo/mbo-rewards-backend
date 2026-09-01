@@ -1,0 +1,112 @@
+{
+  "supplier": "PARTNERIZE",
+  "resourceKey": "campaigns",
+  "mappingVersion": "2",
+  "fields": [
+    {
+      "transform": "COALESCE",
+      "sources": ["campaign_id", "campaignId", "id", "campaign.campaign_id", "campaigns[].id"],
+      "targetField": "supplierCampaignId",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["title", "campaign_title", "name", "campaign_name", "campaign.title", "campaigns[].title"],
+      "targetField": "campaignName",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": [
+        "advertiser.name",
+        "advertiser_name",
+        "brand_name",
+        "merchant_name",
+        "campaign.advertiser_name"
+      ],
+      "targetField": "merchantNameRaw",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["tracking_link", "tracking_url", "campaign.tracking_link"],
+      "targetField": "trackingUrl",
+      "required": false,
+      "quality": "OPTIONAL",
+      "notes": "supplier_tracking_url only — NEVER destination_url"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": [
+        "destination_url",
+        "default_destination",
+        "campaign.destination_url",
+        "campaigns[].default_destination"
+      ],
+      "targetField": "destinationUrl",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": [
+        "campaign_lifecycle_status",
+        "campaign.status",
+        "lifecycle_status"
+      ],
+      "targetField": "campaignStatus",
+      "required": false,
+      "quality": "IMPORTANT",
+      "notes": "Prefer discovery lifecycle; publisher-list status a → ACTIVE"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["publisher_status", "participation_code", "status", "campaigns[].status", "campaign.status"],
+      "targetField": "participationStatus",
+      "required": false,
+      "quality": "IMPORTANT",
+      "notes": "Master: status path param a/p/r → relationship"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["vertical.name", "category", "campaign.vertical.name"],
+      "targetField": "categoryName",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["currency.iso", "currency"],
+      "targetField": "currencyCode",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": [
+        "commissions.0.performance_value",
+        "active_commissions.0.performance_value",
+        "performance_value"
+      ],
+      "targetField": "defaultCommissionValue",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["allow_deep_linking", "allowDeepLinking", "deep_linking_enabled"],
+      "targetField": "deepLinkingEnabled",
+      "required": false,
+      "quality": "IMPORTANT",
+      "notes": "Partnerize y/n flag → deeplink asset"
+    }
+  ],
+  "notes": [
+    "v2: removed destination_url from trackingUrl sources (wrong mapping).",
+    "Publisher-list status a → campaign ACTIVE + JOINED relationship; prefer discovery campaign.status when present.",
+    "Tracking params adref/pubref/clickref CONFIRMED per v15 12F_Tracking_Param_Rules."
+  ]
+}

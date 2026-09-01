@@ -1,0 +1,78 @@
+{
+  "supplier": "OPTIMISE",
+  "resourceKey": "campaigns",
+  "mappingVersion": "1",
+  "fields": [
+    {
+      "transform": "COALESCE",
+      "sources": ["id", "campaignId", "campaign_id"],
+      "targetField": "supplierCampaignId",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["name", "campaignName", "title"],
+      "targetField": "campaignName",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["advertiserName", "advertiser", "companyName"],
+      "targetField": "merchantNameRaw",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["vertical.name", "vertical", "categoryName", "category"],
+      "targetField": "categoryName",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["markets", "countries", "countryCode", "country"],
+      "targetField": "countryCodes",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["status", "campaignStatus", "advertiserCampaignStatus"],
+      "targetField": "campaignStatus",
+      "required": false,
+      "quality": "IMPORTANT",
+      "notes": "Master: status. notapplied is relationship-only."
+    },
+    {
+      "transform": "COALESCE",
+      "sources": [
+        "publishers.0.campaignSubStatus",
+        "publishers.0.status",
+        "publisherEligibility",
+        "status"
+      ],
+      "targetField": "participationStatus",
+      "required": false,
+      "quality": "IMPORTANT",
+      "notes": "Master: publishers[].campaignSubStatus / publisherEligibility"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["commissionCost", "commission", "commissionGroup.0.commission"],
+      "targetField": "defaultCommissionValue",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["baseTrackingUrl", "trackingURL", "trackingUrl"],
+      "targetField": "trackingUrl",
+      "required": false,
+      "quality": "OPTIONAL"
+    }
+  ],
+  "notes": ["Legacy Optimise mapper remains primary; config enables replay."]
+}

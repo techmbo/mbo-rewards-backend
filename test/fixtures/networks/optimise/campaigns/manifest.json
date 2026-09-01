@@ -1,0 +1,29 @@
+{
+  "contractPointer": 24,
+  "network": "optimise",
+  "sourceObject": "campaigns",
+  "targetContract": {
+    "contractPointer": 24,
+    "mboTargetObject": "NetworkCampaign",
+    "contractRef": "mboCanonicalObjects.contract.js",
+    "mappingRegistryRef": "network-mappings/optimise/campaigns.mapping.json",
+    "mappingVersion": "OPT-CMP-1",
+    "sequenceRank": 1,
+    "sequenceStage": "campaigns"
+  },
+  "definitionOfDone": {
+    "contractPointer": 26,
+    "observedSchemaFile": "schema.observed.json",
+    "observedSchemaRecorded": true,
+    "tests": {
+      "attribution": { "status": "not_applicable", "detail": "Campaign source object — attribution N/A." },
+      "reconciliation": { "status": "not_applicable", "detail": "Campaign source object — reconciliation N/A." }
+    }
+  },
+  "files": {
+    "sourceFixture": "source.api.json",
+    "mappingRows": "mapping.rows.json",
+    "expectedCanonical": "canonical.expected.json"
+  },
+  "testCases": "platform_backend/test/p24.optimise.campaigns.integration.test.js"
+}

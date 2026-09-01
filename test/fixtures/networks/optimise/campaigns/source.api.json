@@ -1,0 +1,12 @@
+{
+  "id": 502,
+  "name": "Travel Deals Q1",
+  "advertiserName": "Acme Travel",
+  "vertical": { "name": "Travel" },
+  "markets": ["AE", "SA"],
+  "status": "live",
+  "publishers": [{ "campaignSubStatus": "approved" }],
+  "commissionCost": "8.5",
+  "baseTrackingUrl": "https://track.optimise.example/c/502",
+  "networkProprietaryField": "[redacted-sample-only]"
+}

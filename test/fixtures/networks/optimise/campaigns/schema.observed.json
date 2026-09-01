@@ -1,0 +1,20 @@
+{
+  "contractPointer": 26,
+  "network": "optimise",
+  "sourceObject": "campaigns",
+  "observedFromFixture": "source.api.json",
+  "paths": [
+    { "path": "id", "sampleType": "number", "outcome": "MAPPED", "mboTarget": "supplierCampaignId" },
+    { "path": "name", "sampleType": "string", "outcome": "MAPPED", "mboTarget": "campaignName" },
+    { "path": "advertiserName", "sampleType": "string", "outcome": "MAPPED", "mboTarget": "merchantNameRaw" },
+    { "path": "vertical", "sampleType": "object", "outcome": "MAPPED" },
+    { "path": "vertical.name", "sampleType": "string", "outcome": "MAPPED", "mboTarget": "categoryName" },
+    { "path": "markets", "sampleType": "array", "outcome": "MAPPED", "mboTarget": "countryCodes" },
+    { "path": "status", "sampleType": "string", "outcome": "MAPPED", "mboTarget": "campaignStatus" },
+    { "path": "publishers", "sampleType": "array", "outcome": "MAPPED" },
+    { "path": "publishers.0.campaignSubStatus", "sampleType": "string", "outcome": "MAPPED", "mboTarget": "participationStatus" },
+    { "path": "commissionCost", "sampleType": "string", "outcome": "MAPPED", "mboTarget": "defaultCommissionValue" },
+    { "path": "baseTrackingUrl", "sampleType": "string", "outcome": "MAPPED", "mboTarget": "trackingUrl" },
+    { "path": "networkProprietaryField", "sampleType": "string", "outcome": "SOURCE_ONLY" }
+  ]
+}

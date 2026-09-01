@@ -1,0 +1,95 @@
+{
+  "supplier": "IMPACT",
+  "resourceKey": "campaigns",
+  "mappingVersion": "1",
+  "fields": [
+    {
+      "transform": "COALESCE",
+      "sources": ["CampaignId", "Id", "id", "campaign_id"],
+      "targetField": "supplierCampaignId",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["CampaignName", "Name", "name", "campaign_name"],
+      "targetField": "campaignName",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["AdvertiserName", "Advertiser", "advertiser_name", "BrandName"],
+      "targetField": "merchantNameRaw",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["AdvertiserId", "advertiser_id"],
+      "targetField": "supplierAdvertiserId",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["CampaignUrl", "WebsiteUrl", "tracking_url", "TrackingLink"],
+      "targetField": "trackingUrl",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["Category", "Vertical", "category"],
+      "targetField": "categoryName",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["AllowedCountries", "ShippingRegions", "Countries", "Country"],
+      "targetField": "countryCodes",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["CampaignStatus", "State", "Deal.State"],
+      "targetField": "campaignStatus",
+      "required": false,
+      "quality": "IMPORTANT",
+      "notes": "Prefer CampaignStatus; do not use ContractStatus as lifecycle"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["ContractStatus", "InsertionOrderStatus", "Status", "state"],
+      "targetField": "participationStatusRaw",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "ENUM",
+      "sourcePath": "ContractStatus",
+      "targetField": "participationStatus",
+      "required": false,
+      "quality": "DERIVED",
+      "enumMap": {
+        "Active": "JOINED",
+        "ACTIVE": "JOINED",
+        "Joined": "JOINED",
+        "Expired": "NOT_JOINED",
+        "EXPIRED": "NOT_JOINED",
+        "NotJoined": "NOT_JOINED",
+        "NOT_JOINED": "NOT_JOINED",
+        "Pending": "PENDING",
+        "PENDING": "PENDING",
+        "Terminated": "NOT_JOINED"
+      }
+    }
+  ],
+  "notes": [
+    "Impact Campaigns object fields from Publisher API references.",
+    "ContractStatus → relationship; CampaignStatus → campaign lifecycle.",
+    "Unresolved Impact-specific fields remain in unmappedFields for review."
+  ]
+}

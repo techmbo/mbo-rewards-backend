@@ -1,0 +1,51 @@
+{
+  "supplier": "TRACKIER",
+  "resourceKey": "conversions",
+  "mappingVersion": "1",
+  "fields": [
+    {
+      "transform": "COALESCE",
+      "sources": ["id", "conversion_id", "conversionId"],
+      "targetField": "supplierConversionId",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["p1"],
+      "targetField": "attribution.clientId",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["p2"],
+      "targetField": "attribution.assignmentId",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["p3", "click_id"],
+      "targetField": "attribution.clickId",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["commission", "payout"],
+      "targetField": "supplierCommission",
+      "required": false,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["currency"],
+      "targetField": "currency",
+      "required": false,
+      "quality": "OPTIONAL"
+    }
+  ],
+  "notes": ["Preserves Wave A p1/p2/p3 + click_id attribution."],
+  "criticalUnmapped": []
+}

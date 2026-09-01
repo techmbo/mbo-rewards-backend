@@ -1,0 +1,69 @@
+{
+  "supplier": "BOOSTINY",
+  "resourceKey": "campaigns",
+  "mappingVersion": "1",
+  "fields": [
+    {
+      "transform": "COALESCE",
+      "sources": ["id", "campaign_id", "campaignId"],
+      "targetField": "supplierCampaignId",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["name", "campaign_name", "campaignName"],
+      "targetField": "campaignName",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["advertiser_name", "brand_name", "merchant_name"],
+      "targetField": "merchantNameRaw",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["category.name", "category", "sub_category"],
+      "targetField": "categoryName",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["targetCountries", "target_countries", "countries", "payouts.0.country"],
+      "targetField": "countryCodes",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["payouts.0.value", "payouts.0.model"],
+      "targetField": "defaultCommissionValue",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["status", "campaign_status"],
+      "targetField": "campaignStatus",
+      "required": false,
+      "quality": "IMPORTANT",
+      "notes": "Master: status → campaign_status"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["allocated", "application_status", "applicationStatus", "status"],
+      "targetField": "participationStatus",
+      "required": false,
+      "quality": "IMPORTANT",
+      "notes": "Master: allocated/status/application_status → relationship"
+    }
+  ],
+  "notes": [
+    "Legacy Boostiny mapper remains primary for promotion; config enables replay.",
+    "Live /publisher/campaigns may omit status fields — leave UNKNOWN, do not invent."
+  ]
+}

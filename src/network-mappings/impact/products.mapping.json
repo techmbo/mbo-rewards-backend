@@ -1,0 +1,95 @@
+{
+  "supplier": "IMPACT",
+  "resourceKey": "products",
+  "mappingVersion": "1",
+  "fields": [
+    {
+      "transform": "COALESCE",
+      "sources": ["Id", "CatalogItemId", "Sku", "SKU", "id", "sku"],
+      "targetField": "supplierProductId",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["Sku", "SKU", "CatalogItemId", "Id"],
+      "targetField": "supplierSku",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["Name", "Title", "name", "title"],
+      "targetField": "title",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["Description", "description"],
+      "targetField": "description",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["Url", "ProductUrl", "url", "product_url"],
+      "targetField": "url",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["ImageUrl", "image_url", "Image"],
+      "targetField": "imageUrl",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["Category", "category", "CategoryName"],
+      "targetField": "category",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["Brand", "brand", "Manufacturer"],
+      "targetField": "brand",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["Price", "CurrentPrice", "price", "amount"],
+      "targetField": "price",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["Currency", "CurrencyCode", "currency"],
+      "targetField": "currency",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["CatalogId", "catalog_id", "CampaignId"],
+      "targetField": "catalogId",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["Availability", "availability", "StockStatus"],
+      "targetField": "availabilityRaw",
+      "required": false,
+      "quality": "OPTIONAL"
+    }
+  ],
+  "notes": [
+    "Impact catalog/item fields — unresolved keys remain in unmappedFields.",
+    "Product price is catalog snapshot only — not financial payable."
+  ]
+}

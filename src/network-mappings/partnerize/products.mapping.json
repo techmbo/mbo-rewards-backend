@@ -1,0 +1,109 @@
+{
+  "supplier": "PARTNERIZE",
+  "resourceKey": "products",
+  "mappingVersion": "1",
+  "fields": [
+    {
+      "transform": "COALESCE",
+      "sources": ["product_id", "productId", "id", "sku", "SKU"],
+      "targetField": "supplierProductId",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["sku", "SKU", "product_id"],
+      "targetField": "supplierSku",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["name", "title", "product_name", "productName"],
+      "targetField": "title",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["description"],
+      "targetField": "description",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["product_url", "url", "link", "destination_url"],
+      "targetField": "url",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["tracking_url", "tracking_link", "affiliate_link", "deep_link"],
+      "targetField": "supplierProductTrackingUrl",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["image_url", "image", "image_link"],
+      "targetField": "imageUrl",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["category"],
+      "targetField": "category",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["brand", "advertiser_name"],
+      "targetField": "brand",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["price"],
+      "targetField": "price",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["sale_price"],
+      "targetField": "salePrice",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["currency"],
+      "targetField": "currency",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["availability"],
+      "targetField": "availabilityRaw",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["feed_id", "campaign_id", "creative_id"],
+      "targetField": "catalogId",
+      "required": false,
+      "quality": "OPTIONAL"
+    }
+  ],
+  "notes": [
+    "v15 11B Partnerize Yes/High — NOT N/A. Feed metadata + file rows map here.",
+    "Store feed_id/location on ProductFeed; product rows use this mapping."
+  ]
+}

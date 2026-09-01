@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MBO Rewards - Client Operations Admin</title>
+<style>
+:root{--bg:#f6f8fb;--panel:#fff;--line:#dfe6ee;--line2:#edf1f5;--text:#101828;--muted:#667085;--blue:#2563eb;--bluebg:#eef4ff;--green:#087a55;--greenbg:#eaf7ef;--amber:#9a6700;--amberbg:#fff7e6;--red:#b42318;--redbg:#fff1f0;--gray:#f2f4f7}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,input,select{font:inherit}
+.app{min-height:100vh;display:grid;grid-template-columns:270px minmax(0,1fr)}.sidebar{height:100vh;position:sticky;top:0;background:#fff;border-right:1px solid var(--line);padding:18px 10px;overflow:auto}.logo{padding:8px 10px 18px;border-bottom:1px solid var(--line2);margin-bottom:12px}.logo strong{display:block;color:#1d4ed8;font-size:18px}.logo span{display:block;color:var(--muted);font-size:12px;margin-top:4px}.nav-title{padding:12px 10px 6px;color:#98a2b3;font-weight:800;font-size:11px;text-transform:uppercase;letter-spacing:.06em}.nav a{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;margin:3px 0;border:1px solid transparent;border-radius:8px;font-weight:650;color:#344054;text-decoration:none;cursor:pointer}.nav a.active{background:var(--bluebg);color:#1d4ed8;border-color:#8db2ff}.count{font-size:11px;background:#f2f4f7;color:#667085;padding:2px 7px;border-radius:999px}
+.main{min-width:0}.topbar{height:64px;display:flex;align-items:center;justify-content:space-between;background:#fff;border-bottom:1px solid var(--line);padding:0 22px}.crumb{color:#98a2b3}.crumb b{color:#344054}.admin{padding:7px 11px;border:1px solid var(--line);border-radius:8px;color:#475467;background:#fff}.content{padding:22px}.page{display:none}.page.active{display:block}
+.pagehead{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:16px}.pagehead h1{margin:0;font-size:24px}.pagehead p{margin:5px 0 0;color:var(--muted)}.actions{display:flex;gap:8px;flex-wrap:wrap}.btn{padding:9px 12px;border:1px solid var(--line);border-radius:8px;background:#fff;color:#344054;font-weight:700;cursor:pointer}.btn.dark{background:#101828;color:#fff;border-color:#101828}.btn.blue{background:#2563eb;color:#fff;border-color:#2563eb}.btn.small{padding:6px 9px;font-size:12px}.btn.link{padding:0;border:0;background:transparent;color:#2563eb}
+.panel{background:#fff;border:1px solid var(--line);border-radius:9px;overflow:hidden;margin-bottom:16px}.panel-head{padding:14px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:12px}.panel-head h2{margin:0;font-size:16px}.panel-head p{margin:3px 0 0;color:var(--muted);font-size:12px}
+.filters{display:flex;gap:10px;flex-wrap:wrap;padding:12px 16px;background:#fbfcfd;border-bottom:1px solid var(--line)}.filter{min-width:150px}.filter.grow{flex:1;min-width:230px}.filter span,.field span{display:block;font-size:10px;color:#667085;text-transform:uppercase;font-weight:800;letter-spacing:.05em;margin-bottom:4px}.filter select,.filter input,.field select,.field input{width:100%;height:36px;border:1px solid var(--line);border-radius:7px;background:#fff;padding:0 9px}
+.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:16px}.kpi{padding:13px 14px;background:#fff;border:1px solid var(--line);border-radius:9px}.kpi span{display:block;color:#667085;font-size:11px;font-weight:800;text-transform:uppercase}.kpi strong{display:block;font-size:21px;margin-top:5px}.kpi small{color:#98a2b3}
+.table-wrap{overflow:auto}.data{width:100%;border-collapse:collapse;min-width:1200px}.data th{padding:10px 11px;background:#f8fafc;border-bottom:1px solid var(--line);font-size:11px;text-align:left;color:#475467;white-space:nowrap}.data td{padding:10px 11px;border-bottom:1px solid var(--line2);font-size:12px;white-space:nowrap;vertical-align:top}.mono{font:11px ui-monospace,SFMono-Regular,Menlo,monospace;color:#475467}
+.status{display:inline-flex;padding:3px 7px;border-radius:999px;font-size:11px;font-weight:800;white-space:nowrap}.good{background:var(--greenbg);color:var(--green)}.warn{background:var(--amberbg);color:var(--amber)}.bad{background:var(--redbg);color:var(--red)}.neutral{background:var(--gray);color:#475467}.bluep{background:var(--bluebg);color:#1d4ed8}
+.pagination{display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-top:1px solid var(--line);color:#667085}.pages{display:flex;gap:5px}.pages span{padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:#fff}.pages .active{background:var(--bluebg);color:#1d4ed8;border-color:#8db2ff}
+.client-head{display:flex;justify-content:space-between;gap:14px;align-items:center;padding:16px;background:#fff;border:1px solid var(--line);border-radius:9px;margin-bottom:14px}.client-left{display:flex;gap:12px;align-items:center}.client-logo{width:52px;height:52px;border:1px solid var(--line);border-radius:9px;background:#f8fafc;display:flex;align-items:center;justify-content:center;font-weight:850}.client-head h2{margin:0 0 4px;font-size:20px}.badges{display:flex;gap:6px;flex-wrap:wrap}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}.tabs button{padding:8px 11px;border:1px solid var(--line);border-radius:7px;background:#fff;color:#475467;font-weight:700;cursor:pointer}.tabs button.active{background:var(--bluebg);color:#1d4ed8;border-color:#8db2ff}.tabview{display:none}.tabview.active{display:block}
+.formgrid{display:grid;grid-template-columns:1fr 1fr;gap:0}.formrow{display:grid;grid-template-columns:190px 1fr;gap:12px;padding:11px 15px;border-bottom:1px solid var(--line2)}.formrow:nth-child(odd){border-right:1px solid var(--line2)}.formrow label{color:#667085}.formrow .value{font-weight:650}.formrow input,.formrow select{width:100%;height:36px;border:1px solid var(--line);border-radius:7px;padding:0 9px}
+.checks{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:14px 16px}.check{border:1px solid var(--line);border-radius:8px;padding:11px}.check strong{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:5px}.check small{color:#667085}.footer-actions{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:14px 16px;border-top:1px solid var(--line)}
+.secretbox{display:flex;align-items:center;gap:8px}.secret{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;background:#f8fafc;border:1px solid var(--line);border-radius:6px;padding:7px 9px;color:#667085}
+.notice{padding:10px 12px;border:1px solid #fedf89;background:#fffaf0;border-radius:8px;color:#7a5b00;font-size:12px;margin-bottom:14px}.env-actions{display:flex;align-items:center;gap:8px}.env-editing .value,.env-editing .secretbox{display:none}.env-editor{display:none}.env-editing .env-editor{display:block}.env-editor input,.env-editor select{width:100%;height:36px;border:1px solid var(--line);border-radius:7px;padding:0 9px;background:#fff}
+@media(max-width:1100px){.app{grid-template-columns:1fr}.sidebar{height:auto;position:relative}.topbar{display:none}.kpis,.checks,.formgrid{grid-template-columns:1fr}.content{padding:14px}}
+</style>
+</head>
+<body>
+<div class="app">
+<aside class="sidebar">
+<div class="logo"><strong>MBO Rewards</strong><span>Operation Panel · Client Operations</span></div>
+<div class="nav-title">Client Operations</div>
+<nav class="nav">
+<a class="active" onclick="showPage('clients',this)">Clients <span class="count">48</span></a>
+<a onclick="showPage('setup',this)">Client Setup</a>
+<a onclick="showPage('campaigns',this)">Client Campaigns <span class="count">295</span></a>
+<a onclick="showPage('api',this)">API Configuration</a>
+<a onclick="showPage('users',this)">Portal Users / Access</a>
+<a onclick="showPage('activation',this)">Activation Review <span class="count">4</span></a>
+<div class="nav-title">Reading & Implementation</div>
+<a onclick="showPage('guide',this)">Guide / Tech Notes</a>
+</nav>
+</aside>
+
+<main class="main">
+<div class="topbar"><div class="crumb">MBO Rewards Operation Panel / <b id="crumb">Client Operations</b></div><div class="admin">MBO Official · Admin</div></div>
+<div class="content">
+
+<section id="clients" class="page active">
+<div class="pagehead"><div><h1>Clients</h1><p>All MBO client accounts and their operational readiness.</p></div><div class="actions"><button class="btn dark" onclick="showPage('setup',document.querySelectorAll('.nav a')[1])">+ Add Client</button></div></div>
+<div class="kpis"><div class="kpi"><span>Total Clients</span><strong>48</strong><small>All accounts</small></div><div class="kpi"><span>Active</span><strong>37</strong><small>Live clients</small></div><div class="kpi"><span>Setup In Progress</span><strong>7</strong><small>Not activated</small></div><div class="kpi"><span>API Active</span><strong>31</strong><small>Production access</small></div><div class="kpi"><span>Needs Review</span><strong>4</strong><small>Activation blockers</small></div></div>
+<div class="panel">
+<div class="filters"><div class="filter"><span>Country</span><select><option>All</option><option>India</option><option>UAE</option></select></div><div class="filter"><span>Activation</span><select><option>All</option><option>Active</option><option>Setup In Progress</option></select></div><div class="filter"><span>API</span><select><option>All</option></select></div><div class="filter grow"><span>Search</span><input placeholder="Client name or ID"></div></div>
+<div class="table-wrap"><table class="data"><thead><tr><th>Client</th><th>Country</th><th>Client Type</th><th>Agreement</th><th>Commercials</th><th>Assigned Campaigns</th><th>Active Campaigns</th><th>API</th><th>Portal</th><th>Activation</th><th>Account</th><th>Last Updated</th><th>Action</th></tr></thead><tbody>
+<tr><td><b>HDFC Bank</b></td><td>India</td><td>Bank / Rewards</td><td><span class="status good">Signed</span></td><td><span class="status good">Configured</span></td><td>128</td><td>121</td><td><span class="status good">Production Active</span></td><td><span class="status good">Configured</span></td><td><span class="status good">Active</span></td><td><span class="status good">Active</span></td><td>15 Aug 2026</td><td><button class="btn small" onclick="openClient()">Open Client</button></td></tr>
+<tr><td><b>ICICI Bank</b></td><td>India</td><td>Bank / Rewards</td><td><span class="status good">Signed</span></td><td><span class="status good">Configured</span></td><td>86</td><td>82</td><td><span class="status warn">Sandbox Active</span></td><td><span class="status good">Configured</span></td><td><span class="status warn">Setup In Progress</span></td><td><span class="status good">Active</span></td><td>15 Aug 2026</td><td><button class="btn small">Open Client</button></td></tr>
+</tbody></table></div><div class="pagination"><span>Showing 1–25 of 48 clients</span><div class="pages"><span class="active">1</span><span>2</span><span>Next</span></div></div>
+</div>
+</section>
+
+<section id="clientWorkspace" class="page">
+<div class="pagehead"><div><h1>Client Workspace</h1><p>Admin-side view of one client. This is not the client portal.</p></div><div class="actions"><button class="btn" onclick="showPage('clients',document.querySelectorAll('.nav a')[0])">Back to Clients</button></div></div>
+<div class="client-head"><div class="client-left"><div class="client-logo">H</div><div><h2>HDFC Bank</h2><div style="color:#667085">India · Bank / Rewards</div><div class="badges"><span class="status good">Active</span><span class="status good">Agreement Signed</span><span class="status good">API Active</span><span class="status neutral">128 Campaigns</span></div></div></div></div>
+<div class="tabs"><button class="active" onclick="tab('overview',this)">Overview</button><button onclick="tab('campaigns',this)">Campaigns</button><button onclick="tab('api',this)">API</button><button onclick="tab('users',this)">Portal Users</button><button onclick="tab('activation',this)">Activation</button></div>
+<div id="cw-overview" class="tabview active">
+<div class="kpis"><div class="kpi"><span>Assigned Campaigns</span><strong>128</strong></div><div class="kpi"><span>Active Campaigns</span><strong>121</strong></div><div class="kpi"><span>API</span><strong>Active</strong></div><div class="kpi"><span>Portal Users</span><strong>2</strong></div><div class="kpi"><span>Activation</span><strong>Live</strong></div></div>
+<div class="panel"><div class="panel-head"><h2>Client Summary</h2></div><div class="formgrid"><div class="formrow"><label>Client Name</label><div class="value">HDFC Bank</div></div><div class="formrow"><label>Client ID</label><div class="value mono">cl_hdfc_001</div></div><div class="formrow"><label>Legal Name</label><div class="value">HDFC Bank Limited</div></div><div class="formrow"><label>Country</label><div class="value">India</div></div><div class="formrow"><label>Commercial Rule</label><div class="value">80% of confirmed commission</div></div><div class="formrow"><label>Delivery Mode</label><div class="value">API + Portal</div></div><div class="formrow"><label>Environment</label><div class="value">Production</div></div></div></div>
+</div>
+<div id="cw-campaigns" class="tabview"><div class="panel"><div class="panel-head"><div><h2>Client Campaigns</h2><p>Only published client-safe campaign assignments.</p></div></div><div class="table-wrap"><table class="data"><thead><tr><th>Brand</th><th>Campaign</th><th>Type</th><th>Customer Offer</th><th>Coupon</th><th>Expiry</th><th>Countries</th><th>MBO Tracking Link</th><th>Client Commission</th><th>Status</th><th>Visibility</th></tr></thead><tbody><tr><td>Myntra</td><td>Myntra Fashion Sale</td><td>Coupon Offer</td><td>30% Off</td><td>NEWSTYLE</td><td>15 Sep 2026</td><td>India</td><td class="mono">.../hdfc/myntra-sale</td><td>7%</td><td><span class="status good">Published</span></td><td><span class="status good">Visible</span></td></tr><tr><td>Nike</td><td>Nike Online Store</td><td>Affiliate Link</td><td>No Special Offer</td><td>—</td><td>—</td><td>UAE, Saudi Arabia</td><td class="mono">.../hdfc/nike</td><td>6%</td><td><span class="status good">Published</span></td><td><span class="status good">Visible</span></td></tr></tbody></table></div></div></div>
+<div id="cw-api" class="tabview">
+<div class="panel" id="cwSandbox">
+<div class="panel-head"><div><h2>Sandbox Environment</h2><p>Used for client developer testing before production launch.</p></div><div class="env-actions"><span class="status good">Active</span><button class="btn small" onclick="toggleEnvEdit('cwSandbox',true)">Edit Sandbox</button></div></div>
+<div class="formgrid">
+<div class="formrow"><label>API Access</label><div class="value">Enabled</div><div class="env-editor"><select><option>Enabled</option><option>Disabled</option></select></div></div>
+<div class="formrow"><label>API Key</label><div class="secretbox"><span class="secret">mbo_test_••••••••••••7A2M</span><button class="btn small">Rotate Key</button></div></div>
+<div class="formrow"><label>Campaign Endpoint</label><div class="value">Enabled</div><div class="env-editor"><select><option>Enabled</option><option>Disabled</option></select></div></div>
+<div class="formrow"><label>Product Endpoint</label><div class="value">Enabled</div><div class="env-editor"><select><option>Enabled</option><option>Disabled</option></select></div></div>
+<div class="formrow"><label>Reporting Endpoint</label><div class="value">Enabled</div><div class="env-editor"><select><option>Enabled</option><option>Disabled</option></select></div></div>
+<div class="formrow"><label>Data Mode</label><div class="value">Test / Sample Data</div><div class="env-editor"><select><option>Test / Sample Data</option><option>Controlled Production-like Data</option></select></div></div>
+<div class="formrow"><label>Tracking Links</label><div class="value">Test MBO Links</div><div class="env-editor"><select><option>Test MBO Links</option><option>Disabled</option></select></div></div>
+<div class="formrow"><label>Last Key Rotation</label><div class="value">20 Jul 2026</div></div>
+</div><div class="footer-actions env-editor"><span style="color:#667085">Edit Sandbox configuration.</span><div class="actions"><button class="btn" onclick="toggleEnvEdit('cwSandbox',false)">Cancel</button><button class="btn dark" onclick="toggleEnvEdit('cwSandbox',false)">Save Sandbox</button></div></div>
+</div>
+
+<div class="panel" id="cwProduction">
+<div class="panel-head"><div><h2>Production Environment</h2><p>Live client API using published campaigns and live MBO tracking links.</p></div><div class="env-actions"><span class="status good">Active</span><button class="btn small" onclick="toggleEnvEdit('cwProduction',true)">Edit Production</button></div></div>
+<div class="formgrid">
+<div class="formrow"><label>API Access</label><div class="value">Enabled</div><div class="env-editor"><select><option>Enabled</option><option>Disabled</option></select></div></div>
+<div class="formrow"><label>API Key</label><div class="secretbox"><span class="secret">mbo_live_••••••••••••4X9K</span><button class="btn small">Rotate Key</button></div></div>
+<div class="formrow"><label>Campaign Endpoint</label><div class="value">Enabled</div><div class="env-editor"><select><option>Enabled</option><option>Disabled</option></select></div></div>
+<div class="formrow"><label>Product Endpoint</label><div class="value">Enabled</div><div class="env-editor"><select><option>Enabled</option><option>Disabled</option></select></div></div>
+<div class="formrow"><label>Reporting Endpoint</label><div class="value">Enabled</div><div class="env-editor"><select><option>Enabled</option><option>Disabled</option></select></div></div>
+<div class="formrow"><label>Data Mode</label><div class="value">Live Published Assignments</div><div class="env-editor"><select><option>Live Published Assignments</option></select></div></div>
+<div class="formrow"><label>Tracking Links</label><div class="value">Live MBO Links</div><div class="env-editor"><select><option>Live MBO Links</option><option>Disabled</option></select></div></div>
+<div class="formrow"><label>Last Key Rotation</label><div class="value">01 Aug 2026</div></div>
+</div><div class="footer-actions env-editor"><span style="color:#667085">Edit Production configuration.</span><div class="actions"><button class="btn" onclick="toggleEnvEdit('cwProduction',false)">Cancel</button><button class="btn dark" onclick="toggleEnvEdit('cwProduction',false)">Save Production</button></div></div>
+</div>
+</div>
+<div id="cw-users" class="tabview"><div class="panel"><div class="panel-head"><div><h2>Portal Users</h2></div><button class="btn small">Invite User</button></div><div class="table-wrap"><table class="data" style="min-width:850px"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Invite</th><th>Status</th><th>Last Login</th><th>Action</th></tr></thead><tbody><tr><td>Rewards Admin</td><td>rewards.admin@example.com</td><td>Client Admin</td><td>Accepted</td><td><span class="status good">Active</span></td><td>15 Aug 2026</td><td><button class="btn small">Manage</button></td></tr><tr><td>Campaign Viewer</td><td>campaigns@example.com</td><td>Viewer</td><td>Invited</td><td><span class="status warn">Pending</span></td><td>—</td><td><button class="btn small">Manage</button></td></tr></tbody></table></div></div></div>
+<div id="cw-activation" class="tabview"><div class="panel"><div class="panel-head"><h2>Activation Review</h2></div><div class="checks"><div class="check"><strong>Profile <span class="status good">Passed</span></strong><small>Required client fields complete.</small></div><div class="check"><strong>Agreement <span class="status good">Passed</span></strong><small>Signed agreement on file.</small></div><div class="check"><strong>Commercials <span class="status good">Passed</span></strong><small>Commission rule configured.</small></div><div class="check"><strong>Campaigns <span class="status good">Passed</span></strong><small>121 active campaigns.</small></div><div class="check"><strong>API <span class="status good">Passed</span></strong><small>Production API enabled.</small></div><div class="check"><strong>Portal <span class="status good">Passed</span></strong><small>Active portal administrator.</small></div></div><div class="footer-actions"><span style="color:#667085">Client is currently active.</span><button class="btn">Suspend Client</button></div></div></div>
+</section>
+
+<section id="setup" class="page">
+<div class="pagehead"><div><h1>Client Setup</h1><p>Create or complete the client account before activation. Campaign assignment is handled in Master Catalog.</p></div><div class="actions"><button class="btn dark">Save Client Setup</button></div></div>
+<div class="panel"><div class="panel-head"><h2>Profile</h2></div><div class="formgrid"><div class="formrow"><label>Client Display Name</label><input value="New Client"></div><div class="formrow"><label>Legal Entity Name</label><input placeholder="Legal company name"></div><div class="formrow"><label>Primary Country</label><select><option>India</option><option>UAE</option></select></div><div class="formrow"><label>Client Type</label><select><option>Bank / Rewards</option><option>Rewards Platform</option></select></div></div></div>
+<div class="panel"><div class="panel-head"><h2>Agreement</h2></div><div class="formgrid"><div class="formrow"><label>Agreement Status</label><select><option>Draft</option><option>Sent</option><option>Signed</option></select></div><div class="formrow"><label>Effective Date</label><input type="date"></div></div></div>
+<div class="panel"><div class="panel-head"><h2>Commercials</h2></div><div class="formgrid"><div class="formrow"><label>Commercial Model</label><select><option>% of confirmed commission</option><option>Fixed share / custom</option></select></div><div class="formrow"><label>Client Share</label><input placeholder="e.g. 80%"></div><div class="formrow"><label>Payment Cycle</label><select><option>Monthly</option><option>Quarterly</option></select></div></div></div>
+<div class="panel"><div class="panel-head"><h2>Access Setup</h2></div><div class="formgrid"><div class="formrow"><label>Delivery Mode</label><select><option>API + Portal</option><option>API Only</option><option>Portal Only</option></select></div><div class="formrow"><label>API Environments</label><div class="value">Configured separately in API Configuration</div></div></div></div>
+</section>
+
+<section id="campaigns" class="page">
+<div class="pagehead"><div><h1>Client Campaigns</h1><p>All published campaigns across clients. This is the post-assignment operational view.</p></div></div>
+<div class="panel"><div class="filters"><div class="filter"><span>Client</span><select><option>All</option><option>HDFC Bank</option></select></div><div class="filter"><span>Campaign Type</span><select><option>All</option></select></div><div class="filter"><span>Status</span><select><option>Published</option></select></div><div class="filter grow"><span>Search</span><input placeholder="Brand or campaign"></div></div><div class="table-wrap"><table class="data"><thead><tr><th>Client</th><th>Brand</th><th>Campaign</th><th>Type</th><th>Customer Offer</th><th>Coupon</th><th>Expiry</th><th>Countries</th><th>MBO Tracking Link</th><th>Client Commission</th><th>Completeness</th><th>Publish</th><th>Visibility</th><th>Action</th></tr></thead><tbody><tr><td>HDFC Bank</td><td>Myntra</td><td>Myntra Fashion Sale</td><td>Coupon Offer</td><td>30% Off</td><td>NEWSTYLE</td><td>15 Sep 2026</td><td>India</td><td class="mono">.../hdfc/myntra-sale</td><td>7%</td><td><span class="status good">Complete</span></td><td><span class="status good">Published</span></td><td><span class="status good">Visible</span></td><td><button class="btn small">Open</button></td></tr></tbody></table></div></div>
+</section>
+
+<section id="api" class="page">
+<div class="pagehead"><div><h1>API Configuration</h1><p>Sandbox and Production are separate environments with separate credentials and activation states.</p></div></div>
+
+<div class="panel">
+<div class="filters"><div class="filter" style="min-width:280px"><span>Client</span><select><option>HDFC Bank</option><option>ICICI Bank</option></select></div></div>
+</div>
+
+<div class="panel">
+<div class="panel-head"><div><h2>Sandbox</h2><p>Testing environment for client integration.</p></div><div class="env-actions"><span class="status good">Active</span><button class="btn small">Edit Sandbox</button></div></div>
+<div class="formgrid">
+<div class="formrow"><label>API Access</label><select><option>Enabled</option><option>Disabled</option></select></div>
+<div class="formrow"><label>API Key Status</label><div class="value">Active</div></div>
+<div class="formrow"><label>Sandbox API Key</label><div class="secretbox"><span class="secret">mbo_test_••••••••••••7A2M</span><button class="btn small">Rotate</button></div></div>
+<div class="formrow"><label>Campaign Endpoint</label><select><option>Enabled</option></select></div>
+<div class="formrow"><label>Product Endpoint</label><select><option>Enabled</option></select></div>
+<div class="formrow"><label>Reporting Endpoint</label><select><option>Enabled</option></select></div>
+<div class="formrow"><label>Data Mode</label><div class="value">Test / Sample Data</div><div class="env-editor"><select><option>Test / Sample Data</option><option>Controlled Production-like Data</option></select></div></div>
+<div class="formrow"><label>Tracking Mode</label><div class="value">Test MBO Links</div></div>
+</div>
+<div class="footer-actions"><span style="color:#667085">Sandbox credentials are never reused in Production.</span><button class="btn dark">Save Sandbox</button></div>
+</div>
+
+<div class="panel">
+<div class="panel-head"><div><h2>Production</h2><p>Live environment for published client campaigns.</p></div><div class="env-actions"><span class="status good">Active</span><button class="btn small">Edit Production</button></div></div>
+<div class="formgrid">
+<div class="formrow"><label>API Access</label><select><option>Enabled</option><option>Disabled</option></select></div>
+<div class="formrow"><label>API Key Status</label><div class="value">Active</div></div>
+<div class="formrow"><label>Production API Key</label><div class="secretbox"><span class="secret">mbo_live_••••••••••••4X9K</span><button class="btn small">Rotate</button></div></div>
+<div class="formrow"><label>Campaign Endpoint</label><select><option>Enabled</option></select></div>
+<div class="formrow"><label>Product Endpoint</label><select><option>Enabled</option></select></div>
+<div class="formrow"><label>Reporting Endpoint</label><select><option>Enabled</option></select></div>
+<div class="formrow"><label>Only Published Campaigns</label><select><option>Yes</option></select></div>
+<div class="formrow"><label>Include Client Commission</label><select><option>Yes</option></select></div>
+<div class="formrow"><label>Data Mode</label><div class="value">Live Published Assignments</div><div class="env-editor"><select><option>Live Published Assignments</option></select></div></div>
+<div class="formrow"><label>Tracking Mode</label><div class="value">Live MBO Links</div></div>
+</div>
+<div class="footer-actions"><span style="color:#667085">Production activation can be blocked until required checks pass.</span><button class="btn dark">Save Production</button></div>
+</div>
+</section>
+
+<section id="users" class="page">
+<div class="pagehead"><div><h1>Portal Users / Access</h1><p>Manage who can access the client portal.</p></div><div class="actions"><button class="btn dark">Invite User</button></div></div>
+<div class="panel"><div class="filters"><div class="filter"><span>Client</span><select><option>HDFC Bank</option></select></div><div class="filter"><span>Status</span><select><option>All</option></select></div></div><div class="table-wrap"><table class="data" style="min-width:900px"><thead><tr><th>Client</th><th>Name</th><th>Email</th><th>Role</th><th>Invite Status</th><th>User Status</th><th>Last Login</th><th>Campaign Access</th><th>Reports</th><th>User Management</th><th>Action</th></tr></thead><tbody><tr><td>HDFC Bank</td><td>Rewards Admin</td><td>rewards.admin@example.com</td><td>Client Admin</td><td>Accepted</td><td><span class="status good">Active</span></td><td>15 Aug 2026</td><td>Yes</td><td>Yes</td><td>Yes</td><td><button class="btn small">Manage</button></td></tr></tbody></table></div></div>
+</section>
+
+<section id="activation" class="page">
+<div class="pagehead"><div><h1>Activation Review</h1><p>Final admin checkpoint before a client is live.</p></div></div>
+<div class="panel"><div class="filters"><div class="filter" style="min-width:280px"><span>Client</span><select><option>ICICI Bank</option><option>HDFC Bank</option></select></div></div><div class="checks">
+<div class="check"><strong>Profile <span class="status good">Passed</span></strong><small>All required profile fields complete.</small></div>
+<div class="check"><strong>Agreement <span class="status good">Passed</span></strong><small>Signed agreement on file.</small></div>
+<div class="check"><strong>Commercials <span class="status good">Passed</span></strong><small>Client commercial rule configured.</small></div>
+<div class="check"><strong>Campaigns <span class="status good">Passed</span></strong><small>82 active campaigns ready.</small></div>
+<div class="check"><strong>Sandbox Testing <span class="status good">Passed</span></strong><small>Sandbox API integration tested.</small></div>
+<div class="check"><strong>Production API <span class="status warn">Pending</span></strong><small>Production key not generated.</small></div>
+<div class="check"><strong>Portal <span class="status good">Passed</span></strong><small>Portal admin configured.</small></div>
+</div><div class="notice" style="margin:0 16px 14px"><b>Activation blocked:</b> Sandbox testing is complete, but Production API is not ready. Generate/activate the Production key before going live.</div><div class="footer-actions"><span style="color:#667085">Resolve the failed check before activation.</span><button class="btn dark">Open API Configuration</button></div></div>
+</section>
+
+<section id="guide" class="page">
+<div class="pagehead"><div><h1>Guide / Tech Notes</h1><p>Implementation notes remain separate from operational screens.</p></div></div>
+<div class="panel"><div style="padding:16px;line-height:1.7"><b>Client Operations boundary:</b><br>Master Catalog creates and publishes client campaign assignments. Client Operations manages the client account, those published assignments, API access, portal access and activation. Raw network IDs, raw network links, network commission and MBO margin are never exposed here as client-facing data.</div></div>
+</section>
+
+</div></main></div>
+<script>
+function showPage(id,nav){document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.getElementById(id).classList.add('active');if(nav){document.querySelectorAll('.nav a').forEach(a=>a.classList.remove('active'));nav.classList.add('active')}document.getElementById('crumb').textContent=id==='clientWorkspace'?'Client Workspace':nav?nav.childNodes[0].textContent.trim():'Client Operations';window.scrollTo(0,0)}
+function openClient(){showPage('clientWorkspace',null)}
+function tab(name,b){document.querySelectorAll('#clientWorkspace .tabview').forEach(v=>v.classList.remove('active'));document.getElementById('cw-'+name).classList.add('active');document.querySelectorAll('#clientWorkspace .tabs button').forEach(x=>x.classList.remove('active'));b.classList.add('active')} function toggleEnvEdit(id,on){const el=document.getElementById(id);if(!el)return;el.classList.toggle('env-editing',on)}
+</script>
+</body></html>

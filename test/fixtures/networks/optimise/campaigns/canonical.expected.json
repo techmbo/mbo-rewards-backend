@@ -1,0 +1,11 @@
+{
+  "supplierCampaignId": 502,
+  "campaignName": "Travel Deals Q1",
+  "merchantNameRaw": "Acme Travel",
+  "categoryName": "Travel",
+  "countryCodes": ["AE", "SA"],
+  "campaignStatus": "live",
+  "participationStatus": "approved",
+  "defaultCommissionValue": "8.5",
+  "trackingUrl": "https://track.optimise.example/c/502"
+}

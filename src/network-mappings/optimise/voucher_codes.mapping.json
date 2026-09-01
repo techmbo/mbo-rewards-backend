@@ -1,0 +1,107 @@
+{
+  "supplier": "OPTIMISE",
+  "resourceKey": "voucher_codes",
+  "mappingVersion": "1",
+  "endpoint": "GET /vouchercodes",
+  "fields": [
+    {
+      "transform": "COALESCE",
+      "sources": ["voucherCodeId", "id", "voucher_code_id"],
+      "targetField": "supplierCouponId",
+      "required": false,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["voucherCode", "code", "voucher_code"],
+      "targetField": "couponCode",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["title", "name", "description"],
+      "targetField": "title",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["promotionDescription", "promotion_description", "description"],
+      "targetField": "promotionDescription",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["discount", "discount_value", "discountValue"],
+      "targetField": "discountValue",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["discountType", "discount_type"],
+      "targetField": "discountType",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["activationDate", "start_date", "valid_from", "startDate"],
+      "targetField": "couponStartDate",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["expiryDate", "end_date", "valid_to", "endDate"],
+      "targetField": "couponEndDate",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["status", "coupon_status"],
+      "targetField": "couponStatus",
+      "required": false,
+      "quality": "IMPORTANT"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["isExclusive", "exclusive", "is_exclusive"],
+      "targetField": "couponIsExclusive",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["customerType", "customer_type", "audience"],
+      "targetField": "customerType",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["country", "countryCode", "country_code"],
+      "targetField": "country",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["deepLinkURL", "deepLinkTrackingURL", "deeplink", "link"],
+      "targetField": "couponLink",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["campaignId", "productId", "campaign_id"],
+      "targetField": "supplierCampaignId",
+      "required": false,
+      "quality": "OPTIONAL",
+      "notes": "Parent campaign lineage — required for promotion"
+    }
+  ]
+}

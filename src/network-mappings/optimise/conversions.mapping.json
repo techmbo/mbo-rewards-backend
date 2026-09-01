@@ -1,0 +1,112 @@
+{
+  "supplier": "OPTIMISE",
+  "resourceKey": "conversions",
+  "mappingVersion": "1",
+  "endpoint": "GET /conversions",
+  "fields": [
+    {
+      "transform": "COALESCE",
+      "sources": ["conversionId", "id"],
+      "targetField": "supplierConversionId",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["orderId", "originalOrderId", "merchantOrderId"],
+      "targetField": "supplierOrderId",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["campaignId", "campaign_id"],
+      "targetField": "supplierCampaignId",
+      "required": false,
+      "quality": "OPTIONAL",
+      "notes": "Lineage only — never sole attribution evidence"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["UID2", "uid2"],
+      "targetField": "attribution.assignmentId",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["UID", "uid"],
+      "targetField": "attribution.clientIdHint",
+      "required": false,
+      "quality": "OPTIONAL",
+      "notes": "Wrong-client guard only — never attributes by client alone"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["validatedCommission", "pendingCommission", "commissionValue", "cost.amount"],
+      "targetField": "supplierCommission",
+      "required": true,
+      "quality": "REQUIRED",
+      "notes": "Never use campaign headline / defaultCommissionValue"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["validatedCommission"],
+      "targetField": "approvedCommission",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["originalOrderValue", "conversionValue.amount", "validatedItemValue"],
+      "targetField": "orderValue",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["currency", "cost.currency", "conversionValue.currency"],
+      "targetField": "currency",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["conversionDate", "date"],
+      "targetField": "conversionDate",
+      "required": true,
+      "quality": "REQUIRED"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["status"],
+      "targetField": "status",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["voucher", "coupon", "couponCode"],
+      "targetField": "couponCode",
+      "required": false,
+      "quality": "OPTIONAL"
+    },
+    {
+      "transform": "COALESCE",
+      "sources": ["custType", "customerType", "customer_type"],
+      "targetField": "customerType",
+      "required": false,
+      "quality": "OPTIONAL",
+      "notes": "v15 sheet02 CONFIRMED custType on /conversions; keep null when absent — never invent"
+    }
+  ],
+  "notes": [
+    "Primary truth is GET /conversions (conversionType=conversions).",
+    "conversionsByPayment is staged for payment grain but not promoted as Conversion rows.",
+    "Click-reference parameter remains UNVERIFIED — do not invent a click param.",
+    "Attribution: UID2 → ClientCampaignAssignment; UID is client isolation guard only."
+  ],
+  "criticalUnmapped": [
+    "Optimise click-reference field name (UNVERIFIED)"
+  ]
+}
