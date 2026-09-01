@@ -9,17 +9,18 @@ import {
 } from "../src/modules/commercial/supplierCommissionMatcher.js";
 
 function rule(overrides = {}) {
+  const has = (key) => Object.prototype.hasOwnProperty.call(overrides, key);
   return {
     id: overrides.id ?? "rule-1",
     commissionSequence: overrides.commissionSequence ?? 1,
     basis: overrides.basis ?? "PERCENT_OF_SALE",
-    ratePercent: overrides.ratePercent ?? 10,
-    fixedAmount: overrides.fixedAmount ?? null,
-    currency: overrides.currency ?? "USD",
-    priority: overrides.priority ?? null,
-    rank: overrides.rank ?? null,
-    metadata: overrides.metadata ?? null,
-    conditions: overrides.conditions ?? [],
+    ratePercent: has("ratePercent") ? overrides.ratePercent : 10,
+    fixedAmount: has("fixedAmount") ? overrides.fixedAmount : null,
+    currency: has("currency") ? overrides.currency : "USD",
+    priority: has("priority") ? overrides.priority : null,
+    rank: has("rank") ? overrides.rank : null,
+    metadata: has("metadata") ? overrides.metadata : null,
+    conditions: has("conditions") ? overrides.conditions : [],
   };
 }
 
