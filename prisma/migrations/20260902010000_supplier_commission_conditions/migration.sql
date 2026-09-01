@@ -20,9 +20,10 @@ WHERE "outcomeKey" IS NULL OR BTRIM("outcomeKey") = '';
 
 -- Keep outcomeKey nullable at the database level until prisma/schema.prisma is aligned.
 -- The corrected SupplierCommissionRuleService always writes it for normalized rows.
--- A partial unique index protects normalized identities without breaking any legacy Prisma create path.
+-- History is part of identity: the same logical outcome may legitimately have multiple effective versions.
+DROP INDEX IF EXISTS "supplier_commission_rules_outcome_identity_key";
 CREATE UNIQUE INDEX IF NOT EXISTS "supplier_commission_rules_outcome_identity_key"
-  ON "supplier_commission_rules"("supplier", "sourceAccountLabel", "outcomeKey")
+  ON "supplier_commission_rules"("supplier", "sourceAccountLabel", "outcomeKey", "effectiveFrom")
   WHERE "outcomeKey" IS NOT NULL;
 CREATE INDEX IF NOT EXISTS "supplier_commission_rules_sourceGroupId_idx"
   ON "supplier_commission_rules"("sourceGroupId");
