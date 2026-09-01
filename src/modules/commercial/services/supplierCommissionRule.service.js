@@ -9,6 +9,7 @@
  * - new DB columns are written with parameterized raw SQL until Prisma schema regeneration is completed.
  */
 
+import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../../database/prisma.js";
 
@@ -21,6 +22,10 @@ function asDate(value, fallback = null) {
 function normalizeCurrency(value) {
   if (!value) return null;
   return String(value).slice(0, 3).toUpperCase();
+}
+
+function jsonParam(value) {
+  return value == null ? null : JSON.stringify(value);
 }
 
 function normalizeConditions(input = []) {
@@ -83,7 +88,6 @@ export class SupplierCommissionRuleService {
     const conditions = normalizeConditions(input.conditions);
 
     return db.$transaction(async (tx) => {
-      // New normalized fields are read with raw SQL until schema.prisma is regenerated.
       const versions = await tx.$queryRaw(Prisma.sql`
         SELECT
           id,
@@ -139,7 +143,6 @@ export class SupplierCommissionRuleService {
           },
         });
       } else {
-        // Close a prior open version of the same outcome only when the new version begins later.
         const priorOpen = versions.find(
           (row) => !row.effectiveUntil && new Date(row.effectiveFrom).getTime() < effectiveFrom.getTime(),
         );
@@ -180,6 +183,7 @@ export class SupplierCommissionRuleService {
         });
       }
 
+      const rawRuleReferenceJson = jsonParam(input.rawRuleReference);
       await tx.$executeRaw(Prisma.sql`
         UPDATE "supplier_commission_rules"
         SET
@@ -193,7 +197,10 @@ export class SupplierCommissionRuleService {
           "actionType" = ${input.actionType ?? null},
           priority = ${input.priority ?? null},
           rank = ${input.rank ?? null},
-          "rawRuleReference" = ${input.rawRuleReference == null ? Prisma.DbNull : input.rawRuleReference}
+          "rawRuleReference" = CASE
+            WHEN ${rawRuleReferenceJson}::text IS NULL THEN NULL
+            ELSE ${rawRuleReferenceJson}::jsonb
+          END
         WHERE id = ${rule.id}
       `);
 
@@ -203,6 +210,8 @@ export class SupplierCommissionRuleService {
       `);
 
       for (const condition of conditions) {
+        const sourceConditionJson = jsonParam(condition.sourceConditionValue);
+        const metadataJson = jsonParam(condition.metadata);
         await tx.$executeRaw(Prisma.sql`
           INSERT INTO "supplier_commission_conditions" (
             id,
@@ -216,14 +225,20 @@ export class SupplierCommissionRuleService {
             "createdAt",
             "updatedAt"
           ) VALUES (
-            gen_random_uuid()::text,
+            ${randomUUID()},
             ${rule.id},
             ${condition.conditionType},
             ${condition.operator},
             ${condition.value},
             ${condition.sourceConditionType},
-            ${condition.sourceConditionValue == null ? Prisma.DbNull : condition.sourceConditionValue},
-            ${condition.metadata == null ? Prisma.DbNull : condition.metadata},
+            CASE
+              WHEN ${sourceConditionJson}::text IS NULL THEN NULL
+              ELSE ${sourceConditionJson}::jsonb
+            END,
+            CASE
+              WHEN ${metadataJson}::text IS NULL THEN NULL
+              ELSE ${metadataJson}::jsonb
+            END,
             NOW(),
             NOW()
           )
@@ -239,11 +254,6 @@ export class SupplierCommissionRuleService {
     });
   }
 
-  /**
-   * Returns all currently effective rules for later matching.
-   * PR3 will evaluate these rules against order facts; this method must not silently
-   * choose "the latest" rule as the payable rule.
-   */
   async listEffectiveForCampaignSource(campaignSourceId, at = new Date(), client = null) {
     const db = client ?? this.db;
     if (!campaignSourceId) return [];
@@ -258,10 +268,7 @@ export class SupplierCommissionRuleService {
     });
   }
 
-  /**
-   * Backward-compatible method. It is intentionally non-authoritative for payout matching.
-   * Callers that need a payable rule must use the PR3 matcher, not this convenience method.
-   */
+  /** Backward-compatible convenience only. PR3 matcher must select payable rules. */
   async findEffectiveForCampaignSource(campaignSourceId, at = new Date(), client = null) {
     const rows = await this.listEffectiveForCampaignSource(campaignSourceId, at, client);
     return rows[0] || null;
