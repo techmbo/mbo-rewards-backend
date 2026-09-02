@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import {
   buildSupplierCommissionMatchFacts,
   calculateExpectedSupplierCommission,
+  evaluateSupplierCommissionCondition,
   evaluateSupplierCommissionRule,
   matchSupplierCommissionRule,
 } from "../src/modules/commercial/supplierCommissionMatcher.js";
@@ -78,6 +79,34 @@ describe("Supplier Commission Matcher", () => {
 
     assert.equal(evaluated.state, "NO_MATCH");
     assert.equal(evaluated.specificity, 3);
+  });
+
+  it("matches DATE ranges chronologically", () => {
+    const afterStart = evaluateSupplierCommissionCondition(
+      { conditionType: "DATE", operator: "GTE", value: "2026-09-01T00:00:00Z" },
+      { date: "2026-09-02T12:00:00Z" },
+    );
+    const inWindow = evaluateSupplierCommissionCondition(
+      {
+        conditionType: "DATE",
+        operator: "BETWEEN",
+        value: "unused",
+        sourceConditionValue: ["2026-09-01T00:00:00Z", "2026-09-30T23:59:59Z"],
+      },
+      { date: "2026-09-15T10:00:00Z" },
+    );
+
+    assert.equal(afterStart.state, "MATCH");
+    assert.equal(inWindow.state, "MATCH");
+  });
+
+  it("returns UNKNOWN for invalid DATE comparison instead of numeric guessing", () => {
+    const evaluated = evaluateSupplierCommissionCondition(
+      { conditionType: "DATE", operator: "GTE", value: "not-a-date" },
+      { date: "2026-09-02T12:00:00Z" },
+    );
+    assert.equal(evaluated.state, "UNKNOWN");
+    assert.equal(evaluated.reason, "invalid_date_comparison:DATE");
   });
 
   it("fails closed instead of using default when a specific rule lacks transaction facts", () => {
@@ -189,6 +218,43 @@ describe("Supplier Commission Matcher", () => {
     assert.equal(expected.amount, 7.5);
   });
 
+  it("uses order value for percentage when no competing item financial value exists", () => {
+    const expected = calculateExpectedSupplierCommission(
+      rule({ ratePercent: 10 }),
+      { orderValue: 200, currency: "USD" },
+    );
+    assert.equal(expected.status, "CALCULATED");
+    assert.equal(expected.amount, 20);
+    assert.equal(expected.calculationGrain, "ORDER");
+  });
+
+  it("requires verified calculation grain when order and item values compete", () => {
+    const result = matchSupplierCommissionRule({
+      rules: [rule({ id: "percent", ratePercent: 10 })],
+      facts: { orderValue: 200, itemValue: 80, currency: "USD" },
+      actualCommission: 8,
+      actualCurrency: "USD",
+    });
+
+    assert.equal(result.status, "REVIEW_REQUIRED");
+    assert.equal(result.expectedCalculationStatus, "SOURCE_DATA_MISSING");
+    assert.equal(result.expectedCalculationReason, "ambiguous_commission_grain");
+  });
+
+  it("uses item value when supplier calculation grain is explicitly verified", () => {
+    const expected = calculateExpectedSupplierCommission(
+      rule({
+        ratePercent: 10,
+        metadata: { calculationGrain: "ITEM" },
+      }),
+      { orderValue: 200, itemValue: 80, currency: "USD" },
+    );
+
+    assert.equal(expected.status, "CALCULATED");
+    assert.equal(expected.amount, 8);
+    assert.equal(expected.calculationGrain, "ITEM");
+  });
+
   it("flags expected-vs-actual variance without replacing the network actual", () => {
     const result = matchSupplierCommissionRule({
       rules: [rule({ id: "percent", ratePercent: 10 })],
@@ -203,7 +269,7 @@ describe("Supplier Commission Matcher", () => {
     assert.equal(result.comparisonStatus, "VARIANCE");
   });
 
-  it("builds matcher facts from order/item/click evidence without inventing missing fields", () => {
+  it("builds matcher facts without automatically promoting item value to commissionable value", () => {
     const facts = buildSupplierCommissionMatchFacts({
       order: { orderValue: "250", currency: "AED", orderDate: "2026-09-01T10:00:00Z" },
       item: { sku: "SKU-9", category: "Shoes", quantity: "2", itemValue: "100" },
@@ -214,7 +280,8 @@ describe("Supplier Commission Matcher", () => {
     assert.equal(facts.category, "Shoes");
     assert.equal(facts.sku, "SKU-9");
     assert.equal(facts.orderValue, "250");
-    assert.equal(facts.commissionableValue, "100");
+    assert.equal(facts.itemValue, "100");
+    assert.equal(facts.commissionableValue, undefined);
     assert.equal(facts.customerType, undefined);
   });
 });
