@@ -1,12 +1,27 @@
 name: Commission Contract
 
 on:
+  push:
+    branches:
+      - fix/mbo-rewards-backend-final-corrections
+    paths:
+      - 'src/modules/commercial/**'
+      - 'src/modules/ops/campaignCommissions.js'
+      - 'test/supplierCommissionArchitecture.contract.test.js'
+      - 'test/supplierCommissionMatcher.test.js'
+      - 'test/supplierCommissionRule.test.js'
+      - 'prisma/schema.prisma'
+      - 'prisma/migrations/20260902010000_supplier_commission_conditions/**'
+      - '.github/workflows/commission-contract.yml'
   pull_request:
     branches: [backend1]
     paths:
       - 'src/modules/commercial/**'
       - 'src/modules/ops/campaignCommissions.js'
       - 'test/supplierCommissionArchitecture.contract.test.js'
+      - 'test/supplierCommissionMatcher.test.js'
+      - 'test/supplierCommissionRule.test.js'
+      - 'prisma/schema.prisma'
       - 'prisma/migrations/20260902010000_supplier_commission_conditions/**'
       - '.github/workflows/commission-contract.yml'
   workflow_dispatch:
@@ -24,5 +39,13 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Run supplier commission contract tests
+      - name: Generate Prisma client
+        run: npx prisma generate
+      - name: Validate Prisma schema
+        run: npx prisma validate
+      - name: Run supplier commission architecture tests
         run: node --test test/supplierCommissionArchitecture.contract.test.js
+      - name: Run supplier commission matcher tests
+        run: node --test test/supplierCommissionMatcher.test.js
+      - name: Run supplier commission rule tests
+        run: node --test test/supplierCommissionRule.test.js
