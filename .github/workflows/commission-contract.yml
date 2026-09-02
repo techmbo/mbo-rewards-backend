@@ -6,6 +6,8 @@ on:
       - fix/mbo-rewards-backend-final-corrections
     paths:
       - 'src/modules/commercial/**'
+      - 'src/modules/finance/**'
+      - 'src/modules/order/paymentState.service.js'
       - 'src/modules/ops/campaignCommissions.js'
       - 'src/modules/networkOps/campaignCommissionSummary.contract.js'
       - 'test/campaignCommissions.test.js'
@@ -13,6 +15,10 @@ on:
       - 'test/clientCommercialCalculation.test.js'
       - 'test/clientCommercialRuntime.service.test.js'
       - 'test/clientCommercialSchemas.test.js'
+      - 'test/financeSeparation.test.js'
+      - 'test/paymentStateFinanceSafety.test.js'
+      - 'test/reconciliationEvidenceSafety.test.js'
+      - 'test/reconciliationLogic.test.js'
       - 'test/p40.campaignCommissionSummary.test.js'
       - 'test/supplierCommissionArchitecture.contract.test.js'
       - 'test/supplierCommissionMatcher.test.js'
@@ -26,6 +32,8 @@ on:
     branches: [backend1]
     paths:
       - 'src/modules/commercial/**'
+      - 'src/modules/finance/**'
+      - 'src/modules/order/paymentState.service.js'
       - 'src/modules/ops/campaignCommissions.js'
       - 'src/modules/networkOps/campaignCommissionSummary.contract.js'
       - 'test/campaignCommissions.test.js'
@@ -33,6 +41,10 @@ on:
       - 'test/clientCommercialCalculation.test.js'
       - 'test/clientCommercialRuntime.service.test.js'
       - 'test/clientCommercialSchemas.test.js'
+      - 'test/financeSeparation.test.js'
+      - 'test/paymentStateFinanceSafety.test.js'
+      - 'test/reconciliationEvidenceSafety.test.js'
+      - 'test/reconciliationLogic.test.js'
       - 'test/p40.campaignCommissionSummary.test.js'
       - 'test/supplierCommissionArchitecture.contract.test.js'
       - 'test/supplierCommissionMatcher.test.js'
@@ -86,3 +98,11 @@ jobs:
         run: node --test test/clientCommercialRuntime.service.test.js
       - name: Run client commercial API schema tests
         run: node --test test/clientCommercialSchemas.test.js
+      - name: Run finance separation tests
+        run: node --test test/financeSeparation.test.js
+      - name: Run reconciliation contract tests
+        run: node --test test/reconciliationLogic.test.js
+      - name: Run reconciliation evidence safety tests
+        run: node --test test/reconciliationEvidenceSafety.test.js
+      - name: Run client payable finance chain tests
+        run: node --test test/paymentStateFinanceSafety.test.js
