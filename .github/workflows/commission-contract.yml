@@ -41,6 +41,10 @@ jobs:
       # Prisma generate/validate require syntactically valid URLs but do not connect.
       DATABASE_URL: postgresql://ci:ci@localhost:5432/mbo_ci
       DIRECT_URL: postgresql://ci:ci@localhost:5432/mbo_ci
+      # HTTP-oriented contract imports require configured app/backend URLs even though
+      # the commission tests do not call external services.
+      BACKEND_URL: http://127.0.0.1:3001
+      FRONTEND_URL: http://127.0.0.1:3000
     steps:
       - name: Checkout
         uses: actions/checkout@v4
