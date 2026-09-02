@@ -1,0 +1,38 @@
+name: Apply Client Commercial Schema Patch
+
+on:
+  push:
+    branches:
+      - fix/mbo-rewards-backend-final-corrections
+    paths:
+      - 'scripts/apply-client-commercial-schema-patch.mjs'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-schema:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout correction branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/mbo-rewards-backend-final-corrections
+          fetch-depth: 0
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Apply deterministic Prisma schema patch
+        run: node scripts/apply-client-commercial-schema-patch.mjs
+      - name: Commit schema update
+        run: |
+          if git diff --quiet -- prisma/schema.prisma; then
+            echo "Schema already patched; nothing to commit."
+            exit 0
+          fi
+          git config user.name "MBO Group"
+          git config user.email "tech@marketingblueocean.com"
+          git add prisma/schema.prisma
+          git commit -m "Persist client commercial conditions tiers and lineage"
+          git push origin HEAD:fix/mbo-rewards-backend-final-corrections
