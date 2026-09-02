@@ -13,14 +13,30 @@ function asObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
+/**
+ * Sum only financial facts that are actually present on transaction rows.
+ *
+ * Missing rows / a missing field are not zero-value evidence. They remain null so
+ * pairwise reconciliation can report SOURCE_DATA_MISSING instead of fabricating a match.
+ * Invalid numeric evidence also fails closed to null.
+ */
 function netFinancialAmount(rows = [], field) {
   let total = 0;
-  for (const row of rows) {
-    const value = Number(row[field] || 0);
-    if (row.transactionType === "REVERSAL") total -= value;
+  let hasEvidence = false;
+
+  for (const row of rows || []) {
+    const raw = row?.[field];
+    if (raw == null || raw === "") continue;
+
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return null;
+
+    hasEvidence = true;
+    if (row?.transactionType === "REVERSAL") total -= value;
     else total += value;
   }
-  return total;
+
+  return hasEvidence ? total : null;
 }
 
 function sourceAmount(...candidates) {
@@ -61,14 +77,16 @@ export function buildOrderReconciliationInputs({ order = null, financialTransact
   );
 
   return {
-    networkOrderCount: order?.supplierOrderId || order?.id ? 1 : null,
+    // Internal MBO order identity is not network evidence. Only source/supplier identity
+    // may prove that a network-side order exists at this grain.
+    networkOrderCount: order?.supplierOrderId ? 1 : null,
     mboOrderCount: order?.id ? 1 : null,
     networkCommission,
-    mboGrossNetworkCommission: mboGross > 0 ? mboGross : mboGross === 0 ? 0 : null,
+    mboGrossNetworkCommission: mboGross,
     networkInvoiceAmount,
     networkPaymentAmount,
     mboActualReceiptAmount: receiptAmount,
-    clientPayableAmount: clientPayable > 0 ? clientPayable : clientPayable === 0 ? 0 : null,
+    clientPayableAmount: clientPayable,
   };
 }
 
