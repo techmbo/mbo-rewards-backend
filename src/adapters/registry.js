@@ -7,11 +7,32 @@ import { createAwinAdapter } from "./awin.adapter.js";
 import { assertAdapterContract, SUPPLIER_CAPABILITIES } from "./contract.js";
 
 /**
+ * MBO's canonical network set. A network may be known here before a production
+ * adapter is implemented. This distinction prevents us from treating a planned
+ * integration as either an unknown supplier or a working adapter.
+ */
+export const KNOWN_SUPPLIER_KEYS = Object.freeze([
+  "IMPACT",
+  "PARTNERIZE",
+  "OPTIMISE",
+  "TRACKIER",
+  "BOOSTINY",
+  "AWIN",
+  "ADMITAD",
+  "CJ",
+  "RAKUTEN",
+]);
+
+/**
  * Static capability catalog (authoritative for ops / docs).
  * Live adapters may expose a subset based on credentials/config.
+ *
+ * For networks without an implemented factory, capabilities below describe the
+ * verified integration surface only; they do not make the network runnable.
  */
 export const SUPPLIER_CAPABILITY_CATALOG = Object.freeze({
   BOOSTINY: {
+    implementationStatus: "IMPLEMENTED",
     capabilities: [
       SUPPLIER_CAPABILITIES.CAMPAIGNS,
       SUPPLIER_CAPABILITIES.COUPONS,
@@ -26,6 +47,7 @@ export const SUPPLIER_CAPABILITY_CATALOG = Object.freeze({
     ],
   },
   OPTIMISE: {
+    implementationStatus: "IMPLEMENTED",
     capabilities: [
       SUPPLIER_CAPABILITIES.CAMPAIGNS,
       SUPPLIER_CAPABILITIES.COUPONS,
@@ -40,6 +62,7 @@ export const SUPPLIER_CAPABILITY_CATALOG = Object.freeze({
     notes: ["UID/UID2 confirmed; click-ref param UNCONFIRMED."],
   },
   TRACKIER: {
+    implementationStatus: "IMPLEMENTED",
     capabilities: [
       SUPPLIER_CAPABILITIES.CAMPAIGNS,
       SUPPLIER_CAPABILITIES.COUPONS,
@@ -51,6 +74,7 @@ export const SUPPLIER_CAPABILITY_CATALOG = Object.freeze({
     notes: ["vCommission aliases to TRACKIER. No payments API."],
   },
   PARTNERIZE: {
+    implementationStatus: "IMPLEMENTED",
     capabilities: [
       SUPPLIER_CAPABILITIES.CAMPAIGNS,
       SUPPLIER_CAPABILITIES.COUPONS,
@@ -70,6 +94,7 @@ export const SUPPLIER_CAPABILITY_CATALOG = Object.freeze({
     ],
   },
   IMPACT: {
+    implementationStatus: "IMPLEMENTED",
     capabilities: [
       SUPPLIER_CAPABILITIES.CAMPAIGNS,
       SUPPLIER_CAPABILITIES.CONVERSIONS,
@@ -91,6 +116,7 @@ export const SUPPLIER_CAPABILITY_CATALOG = Object.freeze({
     ],
   },
   AWIN: {
+    implementationStatus: "IMPLEMENTED",
     capabilities: [
       SUPPLIER_CAPABILITIES.CAMPAIGNS,
       SUPPLIER_CAPABILITIES.COUPONS,
@@ -109,6 +135,62 @@ export const SUPPLIER_CAPABILITY_CATALOG = Object.freeze({
       "ClickRef1–6 used for attribution injection.",
     ],
   },
+  ADMITAD: {
+    implementationStatus: "PLANNED",
+    capabilities: [
+      SUPPLIER_CAPABILITIES.CAMPAIGNS,
+      SUPPLIER_CAPABILITIES.COUPONS,
+      SUPPLIER_CAPABILITIES.CONVERSIONS,
+      SUPPLIER_CAPABILITIES.PRODUCTS,
+      SUPPLIER_CAPABILITIES.DEEP_LINK,
+      SUPPLIER_CAPABILITIES.TRACKING_SUBID,
+      SUPPLIER_CAPABILITIES.REPORTING,
+    ],
+    pagination: "offset",
+    notes: [
+      "Official publisher API surface is verified for programmes, coupons and /statistics/actions/.",
+      "Action status plus processed/paid are separate source facts; do not collapse payment evidence into order approval.",
+      "Capture a live publisher response before freezing account-specific field paths or status mappings.",
+      "No runnable adapter is registered yet.",
+    ],
+  },
+  CJ: {
+    implementationStatus: "VERIFY_LIVE",
+    capabilities: [
+      SUPPLIER_CAPABILITIES.CAMPAIGNS,
+      SUPPLIER_CAPABILITIES.COUPONS,
+      SUPPLIER_CAPABILITIES.PRODUCTS,
+      SUPPLIER_CAPABILITIES.DEEP_LINK,
+    ],
+    pagination: "page",
+    notes: [
+      "Link Search / advertiser discovery are documented.",
+      "Commission Detail and Product Feed GraphQL are account/role/schema dependent.",
+      "Do not declare conversion/payment source fields until the live publisher GraphQL schema and fixture are captured.",
+      "No runnable adapter is registered yet.",
+    ],
+  },
+  RAKUTEN: {
+    implementationStatus: "PLANNED",
+    capabilities: [
+      SUPPLIER_CAPABILITIES.CAMPAIGNS,
+      SUPPLIER_CAPABILITIES.COUPONS,
+      SUPPLIER_CAPABILITIES.CONVERSIONS,
+      SUPPLIER_CAPABILITIES.PRODUCTS,
+      SUPPLIER_CAPABILITIES.DEEP_LINK,
+      SUPPLIER_CAPABILITIES.TRACKING_SUBID,
+      SUPPLIER_CAPABILITIES.ORDER_ITEMS,
+      SUPPLIER_CAPABILITIES.PAYMENTS,
+      SUPPLIER_CAPABILITIES.REPORTING,
+    ],
+    pagination: "source_specific",
+    notes: [
+      "Recent Events and Advanced Reports are separate sources with different purposes.",
+      "Events are directional recent transaction evidence, not the sole historical/payment ledger.",
+      "Advanced Reports supply finance/payment reconciliation evidence.",
+      "No runnable adapter is registered yet.",
+    ],
+  },
 });
 
 const FACTORIES = {
@@ -121,7 +203,8 @@ const FACTORIES = {
 };
 
 /**
- * Resolve supplier key (aliases).
+ * Resolve canonical MBO supplier key (including platform/profile aliases).
+ * Recognition does not imply that a runnable adapter exists.
  * @param {string} value
  */
 export function normalizeSupplierKey(value) {
@@ -129,12 +212,13 @@ export function normalizeSupplierKey(value) {
   const key = String(value).trim().toUpperCase();
   if (key === "VCOMMISSION") return "TRACKIER";
   if (key === "MEDIAPARTNER" || key === "IMPACT_COM") return "IMPACT";
-  if (FACTORIES[key]) return key;
+  if (KNOWN_SUPPLIER_KEYS.includes(key)) return key;
   return null;
 }
 
 /**
- * Create adapter for supplier. Throws on unknown supplier.
+ * Create adapter for supplier. Distinguishes unknown networks from known-but-not-yet-
+ * implemented networks so operations cannot accidentally treat scaffolding as live.
  * @param {string} supplierKey
  * @param {object} [config]
  */
@@ -145,7 +229,16 @@ export function createSupplierAdapter(supplierKey, config = {}) {
     err.code = "UNKNOWN_SUPPLIER";
     throw err;
   }
+
   const factory = FACTORIES[key];
+  if (!factory) {
+    const err = new Error(`${key} adapter is not implemented yet`);
+    err.code = "ADAPTER_NOT_IMPLEMENTED";
+    err.supplierKey = key;
+    err.implementationStatus = SUPPLIER_CAPABILITY_CATALOG[key]?.implementationStatus ?? "PLANNED";
+    throw err;
+  }
+
   const adapter = factory(config);
   if (!adapter.supplierKey) adapter.supplierKey = key;
   if (typeof adapter.getCapabilities !== "function") {
@@ -160,12 +253,21 @@ export function listRegisteredSuppliers() {
   return Object.keys(FACTORIES);
 }
 
+export function listKnownSuppliers() {
+  return [...KNOWN_SUPPLIER_KEYS];
+}
+
 export function getSupplierCapabilities(supplierKey) {
   const key = normalizeSupplierKey(supplierKey);
   if (!key) return null;
   return SUPPLIER_CAPABILITY_CATALOG[key] ?? null;
 }
 
-export function isSupplierRegistered(supplierKey) {
+export function isSupplierKnown(supplierKey) {
   return Boolean(normalizeSupplierKey(supplierKey));
+}
+
+export function isSupplierRegistered(supplierKey) {
+  const key = normalizeSupplierKey(supplierKey);
+  return Boolean(key && FACTORIES[key]);
 }
