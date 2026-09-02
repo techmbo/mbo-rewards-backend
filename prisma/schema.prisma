@@ -1167,12 +1167,35 @@ model ClientCommissionRule {
   displayRangeMin   Decimal?                 @db.Decimal(18, 4)
   displayRangeMax   Decimal?                 @db.Decimal(18, 4)
   displayLabel      String?
+
+  /// Deterministic client commercial precedence. Only honored when priorityVerified=true.
+  priority          Int?
+  priorityVerified  Boolean                  @default(false)
+
+  /// Agreement / IO / SOW / approved commercial lineage.
+  agreementRef      String?
+  agreementApprovedAt DateTime?
+  agreementApprovedBy String?
+
+  /// Optional explicit subsidy/negative-margin approval attached to the rule.
+  subsidyApproved   Boolean                  @default(false)
+  subsidyApprovalRef String?
+  subsidyApprovedAt DateTime?
+  subsidyApprovedBy String?
+
+  /// Tier configuration is normalized into ClientCommercialTier rows.
+  tierMetric        String?
+  tierPeriod        String?
+  metadata          Json?
+
   effectiveFrom     DateTime
   effectiveUntil    DateTime?
   status            CommissionRuleStatus     @default(DRAFT)
   createdAt         DateTime                 @default(now())
   updatedAt         DateTime                 @updatedAt
 
+  conditions             ClientCommercialCondition[]
+  tiers                  ClientCommercialTier[]
   conversions           Conversion[]
   financialTransactions FinancialTransaction[]
 
@@ -1180,6 +1203,50 @@ model ClientCommissionRule {
   @@index([assignmentId, status])
   @@index([assignmentId, effectiveFrom])
   @@map("client_commission_rules")
+}
+
+
+model ClientCommercialCondition {
+  id             String                   @id @default(uuid())
+  commissionRuleId String
+  commissionRule  ClientCommissionRule     @relation(fields: [commissionRuleId], references: [id], onDelete: Cascade)
+  assignmentId    String
+  assignment      ClientCampaignAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  conditionType   String
+  operator        String                   @default("EQ")
+  value           Json?
+  field           String?
+  metadata        Json?
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
+
+  @@index([commissionRuleId])
+  @@index([assignmentId])
+  @@index([conditionType])
+  @@map("client_commercial_conditions")
+}
+
+model ClientCommercialTier {
+  id                String                   @id @default(uuid())
+  commissionRuleId  String
+  commissionRule    ClientCommissionRule     @relation(fields: [commissionRuleId], references: [id], onDelete: Cascade)
+  assignmentId      String
+  assignment        ClientCampaignAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  sequence          Int
+  minInclusive      Decimal                  @db.Decimal(18, 4)
+  maxExclusive      Decimal?                 @db.Decimal(18, 4)
+  payoutType        String
+  sharePercent      Decimal?                 @db.Decimal(8, 4)
+  orderValuePercent Decimal?                 @db.Decimal(8, 4)
+  fixedAmount       Decimal?                 @db.Decimal(18, 4)
+  metadata          Json?
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+
+  @@unique([commissionRuleId, sequence])
+  @@index([assignmentId])
+  @@index([commissionRuleId])
+  @@map("client_commercial_tiers")
 }
 
 /// Normalized supplier-side commission facts (MBO SupplierCommissionRule).
@@ -1547,6 +1614,8 @@ model ClientCampaignAssignment {
   trackingLinks            TrackingLink[]
   couponAssignments        ClientCouponAssignment[]
   commissionRules          ClientCommissionRule[]
+  commercialConditions     ClientCommercialCondition[]
+  commercialTiers          ClientCommercialTier[]
   clicks                   Click[]
   conversions              Conversion[]
   orders                   Order[]
