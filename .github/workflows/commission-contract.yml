@@ -7,6 +7,8 @@ on:
     paths:
       - 'src/modules/commercial/**'
       - 'src/modules/finance/**'
+      - 'src/modules/order/orderMerge.js'
+      - 'src/modules/order/orderStatusNormalization.contract.js'
       - 'src/modules/order/paymentState.service.js'
       - 'src/modules/ops/campaignCommissions.js'
       - 'src/modules/networkOps/campaignCommissionSummary.contract.js'
@@ -16,6 +18,7 @@ on:
       - 'test/clientCommercialRuntime.service.test.js'
       - 'test/clientCommercialSchemas.test.js'
       - 'test/financeSeparation.test.js'
+      - 'test/orderStatusApprovalSafety.test.js'
       - 'test/paymentStateFinanceSafety.test.js'
       - 'test/reconciliationEvidenceSafety.test.js'
       - 'test/reconciliationLogic.test.js'
@@ -33,6 +36,8 @@ on:
     paths:
       - 'src/modules/commercial/**'
       - 'src/modules/finance/**'
+      - 'src/modules/order/orderMerge.js'
+      - 'src/modules/order/orderStatusNormalization.contract.js'
       - 'src/modules/order/paymentState.service.js'
       - 'src/modules/ops/campaignCommissions.js'
       - 'src/modules/networkOps/campaignCommissionSummary.contract.js'
@@ -42,6 +47,7 @@ on:
       - 'test/clientCommercialRuntime.service.test.js'
       - 'test/clientCommercialSchemas.test.js'
       - 'test/financeSeparation.test.js'
+      - 'test/orderStatusApprovalSafety.test.js'
       - 'test/paymentStateFinanceSafety.test.js'
       - 'test/reconciliationEvidenceSafety.test.js'
       - 'test/reconciliationLogic.test.js'
@@ -106,3 +112,5 @@ jobs:
         run: node --test test/reconciliationEvidenceSafety.test.js
       - name: Run client payable finance chain tests
         run: node --test test/paymentStateFinanceSafety.test.js
+      - name: Run order status approval safety tests
+        run: node --test test/orderStatusApprovalSafety.test.js
