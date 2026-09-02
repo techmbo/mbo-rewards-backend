@@ -10,6 +10,7 @@ on:
       - 'src/modules/networkOps/campaignCommissionSummary.contract.js'
       - 'test/campaignCommissions.test.js'
       - 'test/clientCommercialMatcher.test.js'
+      - 'test/clientCommercialCalculation.test.js'
       - 'test/p40.campaignCommissionSummary.test.js'
       - 'test/supplierCommissionArchitecture.contract.test.js'
       - 'test/supplierCommissionMatcher.test.js'
@@ -26,6 +27,7 @@ on:
       - 'src/modules/networkOps/campaignCommissionSummary.contract.js'
       - 'test/campaignCommissions.test.js'
       - 'test/clientCommercialMatcher.test.js'
+      - 'test/clientCommercialCalculation.test.js'
       - 'test/p40.campaignCommissionSummary.test.js'
       - 'test/supplierCommissionArchitecture.contract.test.js'
       - 'test/supplierCommissionMatcher.test.js'
@@ -75,3 +77,5 @@ jobs:
         run: node --test test/p40.campaignCommissionSummary.test.js
       - name: Run client commercial matcher tests
         run: node --test test/clientCommercialMatcher.test.js
+      - name: Run client commercial calculation tests
+        run: node --test test/clientCommercialCalculation.test.js
