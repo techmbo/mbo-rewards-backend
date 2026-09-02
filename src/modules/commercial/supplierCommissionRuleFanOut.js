@@ -11,7 +11,7 @@ import {
 } from "../ops/campaignCommissions.js";
 
 function campaignIdFromRaw(raw = {}) {
-  return raw.id ?? raw.campaignId ?? raw.campaign_id ?? raw.productId ?? null;
+  return raw.id ?? raw.campaignId ?? raw.campaign_id ?? raw.CampaignId ?? raw.campaignID ?? raw.productId ?? raw.product_id ?? null;
 }
 
 function asString(value) {
@@ -241,10 +241,28 @@ function conditionSignature(conditions = []) {
     .join("|");
 }
 
-function stableOutcomeKey({ campaignId, sourceObject, sourcePath, sourceRuleId, sourceGroupId, fact, conditions }) {
+/**
+ * Stable logical payout identity.
+ *
+ * IMPORTANT: payout amount/rate is deliberately excluded. A supplier rate change
+ * (for example 10% -> 12%) must create a new effective version of the same logical
+ * outcome, not a brand-new lineage. `outcomeSlot` separates multiple otherwise
+ * identical payout outcomes inside one source rule without making the value part
+ * of identity.
+ */
+function stableOutcomeKey({
+  campaignId,
+  sourceObject,
+  sourcePath,
+  sourceRuleId,
+  sourceGroupId,
+  fact,
+  conditions,
+  outcomeSlot,
+}) {
   const sourceIdentity = sourceRuleId ?? sourceGroupId ?? "NO_SOURCE_RULE_ID";
   const currency = fact?.currency ?? "";
-  const value = Number.isFinite(Number(fact?.value)) ? Number(fact.value) : String(fact?.value ?? "");
+  const basis = fact?.basis ?? (fact?.kind === "PERCENT" ? "PERCENT_OF_SALE" : fact?.kind === "FIXED" ? "FIXED_AMOUNT" : "UNKNOWN");
   const conditionPart = conditionSignature(conditions);
   return [
     campaignId ?? "NO_CAMPAIGN_ID",
@@ -252,8 +270,9 @@ function stableOutcomeKey({ campaignId, sourceObject, sourcePath, sourceRuleId, 
     sourcePath ?? "commission",
     sourceIdentity,
     fact?.kind ?? "OTHER",
-    value,
+    basis,
     currency,
+    `slot:${outcomeSlot ?? 1}`,
     conditionPart,
   ].join("::");
 }
@@ -264,6 +283,7 @@ function normalizeRuleEntry(entry, {
   campaignId,
   fact,
   commissionSequence,
+  outcomeSlot,
 }) {
   if (!fact?.display) return null;
 
@@ -280,8 +300,10 @@ function normalizeRuleEntry(entry, {
   const commissionType =
     asString(entry.commission_type ?? entry.commissionType ?? entry.type) ??
     (fact.kind === "PERCENT" ? "PERCENTAGE" : fact.kind === "FIXED" ? "FIXED" : "OTHER");
+  const basis = fact.basis ?? (fact.kind === "PERCENT" ? "PERCENT_OF_SALE" : fact.kind === "FIXED" ? "FIXED_AMOUNT" : "UNKNOWN");
 
   return {
+    sourceCampaignId: campaignId != null ? String(campaignId) : null,
     sourceGroupId,
     sourceGroupName: asString(
       entry.group_name ?? entry.groupName ?? entry.commission_group_name ?? entry.commissionGroupName,
@@ -296,12 +318,14 @@ function normalizeRuleEntry(entry, {
       sourceGroupId,
       fact,
       conditions,
+      outcomeSlot,
     }),
+    outcomeSlot,
     commissionSequence,
     commissionModel,
     commissionType,
     supplierRuleType: fact.kind === "PERCENT" ? "PERCENT" : fact.kind === "FIXED" ? "FIXED" : "OTHER",
-    basis: fact.kind === "PERCENT" ? "PERCENT_OF_SALE" : fact.kind === "FIXED" ? "FIXED_AMOUNT" : "UNKNOWN",
+    basis,
     ratePercent: fact.kind === "PERCENT" ? fact.value : null,
     fixedAmount: fact.kind === "FIXED" ? fact.value : null,
     currency: fact.currency ?? null,
@@ -353,6 +377,7 @@ export function extractCommissionRulesFromCampaignRaw(
       raw: {},
     });
 
+    let outcomeSlot = 1;
     for (const fact of facts) {
       const normalized = normalizeRuleEntry(entry, {
         sourcePath: "commission",
@@ -360,7 +385,9 @@ export function extractCommissionRulesFromCampaignRaw(
         campaignId,
         fact,
         commissionSequence,
+        outcomeSlot,
       });
+      outcomeSlot += 1;
       if (!normalized) continue;
       if (dedupe.has(normalized.outcomeKey)) continue;
       dedupe.set(normalized.outcomeKey, normalized);
