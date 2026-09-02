@@ -1199,7 +1199,6 @@ model ClientCommissionRule {
   conversions           Conversion[]
   financialTransactions FinancialTransaction[]
 
-  @@unique([assignmentId, effectiveFrom])
   @@index([assignmentId, status])
   @@index([assignmentId, effectiveFrom])
   @@map("client_commission_rules")
