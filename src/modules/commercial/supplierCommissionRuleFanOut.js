@@ -247,8 +247,9 @@ function conditionSignature(conditions = []) {
  * IMPORTANT: payout amount/rate is deliberately excluded. A supplier rate change
  * (for example 10% -> 12%) must create a new effective version of the same logical
  * outcome, not a brand-new lineage. `outcomeSlot` separates multiple otherwise
- * identical payout outcomes inside one source rule without making the value part
- * of identity.
+ * identical payout outcomes inside one source entry without making the value part
+ * of identity. `sourceEntryIndex` is used only when the supplier provides no rule or
+ * group ID, preventing anonymous commission groups from collapsing together.
  */
 function stableOutcomeKey({
   campaignId,
@@ -256,11 +257,12 @@ function stableOutcomeKey({
   sourcePath,
   sourceRuleId,
   sourceGroupId,
+  sourceEntryIndex,
   fact,
   conditions,
   outcomeSlot,
 }) {
-  const sourceIdentity = sourceRuleId ?? sourceGroupId ?? "NO_SOURCE_RULE_ID";
+  const sourceIdentity = sourceRuleId ?? sourceGroupId ?? `ANON_SOURCE_ENTRY_${sourceEntryIndex ?? 1}`;
   const currency = fact?.currency ?? "";
   const basis = fact?.basis ?? (fact?.kind === "PERCENT" ? "PERCENT_OF_SALE" : fact?.kind === "FIXED" ? "FIXED_AMOUNT" : "UNKNOWN");
   const conditionPart = conditionSignature(conditions);
@@ -284,6 +286,7 @@ function normalizeRuleEntry(entry, {
   fact,
   commissionSequence,
   outcomeSlot,
+  sourceEntryIndex,
 }) {
   if (!fact?.display) return null;
 
@@ -316,6 +319,7 @@ function normalizeRuleEntry(entry, {
       sourcePath,
       sourceRuleId,
       sourceGroupId,
+      sourceEntryIndex,
       fact,
       conditions,
       outcomeSlot,
@@ -368,8 +372,10 @@ export function extractCommissionRulesFromCampaignRaw(
   const campaignId = campaignIdFromRaw(raw);
   const dedupe = new Map();
   let commissionSequence = 1;
+  const sourceEntries = collectSourceEntries({ groups: commissionGroups, raw });
 
-  for (const entry of collectSourceEntries({ groups: commissionGroups, raw })) {
+  for (let sourceEntryIndex = 0; sourceEntryIndex < sourceEntries.length; sourceEntryIndex += 1) {
+    const entry = sourceEntries[sourceEntryIndex];
     const { facts } = listCampaignCommissionFacts({
       groups: [entry],
       commissionUnit,
@@ -386,6 +392,7 @@ export function extractCommissionRulesFromCampaignRaw(
         fact,
         commissionSequence,
         outcomeSlot,
+        sourceEntryIndex: sourceEntryIndex + 1,
       });
       outcomeSlot += 1;
       if (!normalized) continue;
