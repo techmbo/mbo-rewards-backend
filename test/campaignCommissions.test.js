@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  classifyCommissionFactWindow,
   listCampaignCommissionFacts,
   parseCommissionText,
   averageCommissionFacts,
 } from "../src/modules/ops/campaignCommissions.js";
 import { buildNetworkCampaignFields } from "../src/modules/ops/importedRecords.service.js";
+
+const NOW = new Date("2026-09-02T12:00:00.000Z");
 
 describe("network ops campaign commissions", () => {
   it("splits Optimise percent-or-currency strings into both commissions", () => {
@@ -35,6 +38,7 @@ describe("network ops campaign commissions", () => {
           value: "8.20% Or $17.50",
         },
       },
+      at: NOW,
     });
     assert.equal(display, "8.2% · USD 17.5");
     assert.equal(facts.length, 2);
@@ -54,6 +58,7 @@ describe("network ops campaign commissions", () => {
           ],
         },
       ],
+      at: NOW,
     });
     assert.ok(display.includes("2.5%"));
     assert.ok(display.includes("5%"));
@@ -68,6 +73,7 @@ describe("network ops campaign commissions", () => {
           1: { commission: "2.50% Or $1.20" },
         },
       },
+      at: NOW,
     });
     assert.ok(display.includes("8.2%"));
     assert.ok(display.includes("USD 17.5"));
@@ -86,6 +92,7 @@ describe("network ops campaign commissions", () => {
           },
         },
       ],
+      at: NOW,
     });
     assert.equal(display, "Up to 5.4% · IDR 80000");
     assert.equal(facts.length, 2);
@@ -97,9 +104,74 @@ describe("network ops campaign commissions", () => {
       raw: {
         payouts: [{ model: "cpa", value: 10, currency: "AED" }],
       },
+      at: NOW,
     });
     assert.equal(facts.some((f) => f.kind === "PERCENT" && f.value === 6.75), true);
     assert.equal(facts.some((f) => f.kind === "FIXED" && f.value === 10), true);
+  });
+
+  it("excludes expired and future commissions from current display and average", () => {
+    const result = listCampaignCommissionFacts({
+      groups: [
+        { value: 10, model: "percentage", effectiveFrom: "2026-01-01", effectiveUntil: "2026-08-01" },
+        { value: 20, model: "percentage", effectiveFrom: "2026-08-01" },
+        { value: 30, model: "percentage", effectiveFrom: "2026-10-01" },
+      ],
+      defaultValue: 99,
+      commissionUnit: "PERCENT",
+      at: NOW,
+    });
+
+    assert.deepEqual(result.facts.map((fact) => fact.value), [20]);
+    assert.equal(result.display, "20%");
+    assert.equal(result.averageDisplay, "20%");
+    assert.equal(result.allFacts.length, 3);
+    assert.deepEqual(result.excludedFacts.map((fact) => fact.windowStatus).sort(), ["EXPIRED", "FUTURE"]);
+  });
+
+  it("does not revive campaign default when every supplier rule is outside the current window", () => {
+    const result = listCampaignCommissionFacts({
+      groups: [
+        { value: 10, model: "percentage", effectiveUntil: "2026-08-01" },
+        { value: 30, model: "percentage", effectiveFrom: "2026-10-01" },
+      ],
+      defaultValue: 99,
+      commissionUnit: "PERCENT",
+      at: NOW,
+    });
+
+    assert.equal(result.facts.length, 0);
+    assert.equal(result.display, null);
+    assert.equal(result.averageDisplay, null);
+    assert.equal(result.allFacts.length, 2);
+  });
+
+  it("fails closed on invalid commission windows", () => {
+    const result = listCampaignCommissionFacts({
+      groups: [{ value: 15, model: "percentage", effectiveFrom: "not-a-date" }],
+      at: NOW,
+    });
+
+    assert.equal(result.facts.length, 0);
+    assert.equal(result.windowReviewRequired, true);
+    assert.equal(result.excludedFacts[0].windowStatus, "REVIEW_REQUIRED");
+    assert.equal(
+      classifyCommissionFactWindow(
+        { effectiveFrom: "2026-09-10", effectiveUntil: "2026-09-01" },
+        { at: NOW },
+      ),
+      "REVIEW_REQUIRED",
+    );
+  });
+
+  it("treats effectiveUntil as an exclusive boundary", () => {
+    assert.equal(
+      classifyCommissionFactWindow(
+        { effectiveFrom: "2026-08-01T00:00:00Z", effectiveUntil: NOW.toISOString() },
+        { at: NOW },
+      ),
+      "EXPIRED",
+    );
   });
 
   it("projects both commissions onto an imported Optimise campaign row", () => {
@@ -128,12 +200,12 @@ describe("network ops campaign commissions", () => {
     });
     assert.equal(fields.commissionFactsDisplay, "8.2% · USD 17.5");
     assert.equal(fields.commissionDisplay, "Up to 8.2% · 2 rules");
-    assert.equal(fields.commissionAverageDisplay, "8.2% · USD 17.5");
+    assert.equal(fields.commissionAverageDisplay, "MIXED");
     assert.equal(fields.commissions.length, 2);
     assert.equal(typeof fields.commissionDisplay, "string");
   });
 
-  it("averages percent commissions without mixing in currency amounts", () => {
+  it("averages only comparable commission facts", () => {
     assert.equal(
       averageCommissionFacts([
         { kind: "PERCENT", value: 0.85, display: "0.85%" },
@@ -146,7 +218,7 @@ describe("network ops campaign commissions", () => {
         { kind: "PERCENT", value: 0.49, display: "0.49%" },
         { kind: "FIXED", value: 4.95, currency: "SGD", display: "SGD 4.95" },
       ]),
-      "0.49% · SGD 4.95",
+      "MIXED",
     );
     assert.equal(
       averageCommissionFacts([
