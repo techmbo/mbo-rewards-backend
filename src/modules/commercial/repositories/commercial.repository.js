@@ -308,10 +308,43 @@ function buildCommissionWhere(filters = {}) {
   return where;
 }
 
+const COMMISSION_GRAPH_INCLUDE = {
+  conditions: { orderBy: [{ conditionType: "asc" }, { createdAt: "asc" }, { id: "asc" }] },
+  tiers: { orderBy: [{ sequence: "asc" }, { id: "asc" }] },
+};
+
+function normalizeConditionCreate(condition, assignmentId) {
+  return {
+    assignmentId,
+    conditionType: condition.conditionType,
+    operator: condition.operator ?? "EQ",
+    value: condition.value ?? null,
+    field: condition.field ?? null,
+    metadata: condition.metadata ?? null,
+  };
+}
+
+function normalizeTierCreate(tier, assignmentId, index) {
+  return {
+    assignmentId,
+    sequence: tier.sequence ?? index + 1,
+    minInclusive: tier.minInclusive,
+    maxExclusive: tier.maxExclusive ?? null,
+    payoutType: tier.payoutType,
+    sharePercent: tier.sharePercent ?? null,
+    orderValuePercent: tier.orderValuePercent ?? null,
+    fixedAmount: tier.fixedAmount ?? null,
+    metadata: tier.metadata ?? null,
+  };
+}
+
 export class CommissionRuleRepository {
   async findById(id, client = null) {
     const db = resolveClient(client);
-    return db.clientCommissionRule.findUnique({ where: { id } });
+    return db.clientCommissionRule.findUnique({
+      where: { id },
+      include: COMMISSION_GRAPH_INCLUDE,
+    });
   }
 
   async findMany(filters = {}, { skip = 0, take = 20 } = {}, client = null) {
@@ -323,6 +356,7 @@ export class CommissionRuleRepository {
         skip,
         take,
         orderBy: [{ effectiveFrom: "desc" }, { id: "desc" }],
+        include: COMMISSION_GRAPH_INCLUDE,
       }),
       db.clientCommissionRule.count({ where }),
     ]);
@@ -339,24 +373,38 @@ export class CommissionRuleRepository {
       where,
       take: take + 1,
       orderBy: [{ effectiveFrom: "desc" }, { id: "desc" }],
+      include: COMMISSION_GRAPH_INCLUDE,
     });
     return slicePage(rows, take);
   }
 
-  async findEffectiveForAssignment(assignmentId, at = new Date(), client = null) {
+  async findEffectiveRulesForAssignment(assignmentId, at = new Date(), client = null) {
     const db = resolveClient(client);
-    return db.clientCommissionRule.findFirst({
+    return db.clientCommissionRule.findMany({
       where: {
         assignmentId,
         status: "EFFECTIVE",
         effectiveFrom: { lte: at },
         OR: [{ effectiveUntil: null }, { effectiveUntil: { gt: at } }],
       },
-      orderBy: { effectiveFrom: "desc" },
+      orderBy: [{ effectiveFrom: "desc" }, { id: "asc" }],
+      include: COMMISSION_GRAPH_INCLUDE,
     });
   }
 
-  async findOverlappingEffective(assignmentId, effectiveFrom, effectiveUntil, excludeId = null, client = null) {
+  /** Backward-compatible convenience only. Financial matching must use all effective rules. */
+  async findEffectiveForAssignment(assignmentId, at = new Date(), client = null) {
+    const rules = await this.findEffectiveRulesForAssignment(assignmentId, at, client);
+    return rules[0] ?? null;
+  }
+
+  async findOverlappingEffective(
+    assignmentId,
+    effectiveFrom,
+    effectiveUntil,
+    excludeId = null,
+    client = null,
+  ) {
     const db = resolveClient(client);
     const rules = await db.clientCommissionRule.findMany({
       where: {
@@ -364,6 +412,7 @@ export class CommissionRuleRepository {
         status: "EFFECTIVE",
         ...(excludeId ? { id: { not: excludeId } } : {}),
       },
+      include: COMMISSION_GRAPH_INCLUDE,
     });
 
     return rules.filter((rule) =>
@@ -373,14 +422,57 @@ export class CommissionRuleRepository {
 
   async create(data, client = null) {
     const db = resolveClient(client);
-    return db.clientCommissionRule.create({ data });
+    const { conditions = [], tiers = [], ...ruleData } = data;
+    const assignmentId = ruleData.assignmentId;
+    return db.clientCommissionRule.create({
+      data: {
+        ...ruleData,
+        ...(conditions.length
+          ? { conditions: { create: conditions.map((row) => normalizeConditionCreate(row, assignmentId)) } }
+          : {}),
+        ...(tiers.length
+          ? { tiers: { create: tiers.map((row, index) => normalizeTierCreate(row, assignmentId, index)) } }
+          : {}),
+      },
+      include: COMMISSION_GRAPH_INCLUDE,
+    });
   }
 
   async update(id, data, client = null) {
     const db = resolveClient(client);
-    return db.clientCommissionRule.update({ where: { id }, data });
+    const existing = await db.clientCommissionRule.findUnique({ where: { id }, select: { assignmentId: true } });
+    if (!existing) return null;
+
+    const { conditions, tiers, ...ruleData } = data;
+    return db.clientCommissionRule.update({
+      where: { id },
+      data: {
+        ...ruleData,
+        ...(conditions !== undefined
+          ? {
+              conditions: {
+                deleteMany: {},
+                create: conditions.map((row) => normalizeConditionCreate(row, existing.assignmentId)),
+              },
+            }
+          : {}),
+        ...(tiers !== undefined
+          ? {
+              tiers: {
+                deleteMany: {},
+                create: tiers.map((row, index) => normalizeTierCreate(row, existing.assignmentId, index)),
+              },
+            }
+          : {}),
+      },
+      include: COMMISSION_GRAPH_INCLUDE,
+    });
   }
 
+  /**
+   * Legacy broad supersede helper. Do not use it for conditional client rules because
+   * multiple effective rules may legitimately coexist and the matcher resolves them.
+   */
   async supersedeActiveRules(assignmentId, beforeDate, client = null) {
     const db = resolveClient(client);
     return db.clientCommissionRule.updateMany({
