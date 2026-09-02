@@ -117,8 +117,74 @@ function payoutBasisFrom(entry = {}, fallbackUnit = null, kind = null) {
   return "UNKNOWN";
 }
 
+function firstDefined(...values) {
+  return values.find((value) => value != null && value !== "");
+}
+
+function effectiveWindowFrom(entry = {}) {
+  if (!entry || typeof entry !== "object") {
+    return { effectiveFrom: null, effectiveUntil: null };
+  }
+  return {
+    effectiveFrom:
+      firstDefined(
+        entry.effectiveFrom,
+        entry.effective_from,
+        entry.startDate,
+        entry.start_date,
+        entry.validFrom,
+        entry.valid_from,
+      ) ?? null,
+    effectiveUntil:
+      firstDefined(
+        entry.effectiveUntil,
+        entry.effective_until,
+        entry.endDate,
+        entry.end_date,
+        entry.validUntil,
+        entry.valid_until,
+      ) ?? null,
+  };
+}
+
+function withEffectiveWindow(facts = [], entry = {}) {
+  const window = effectiveWindowFrom(entry);
+  return (facts || []).map((fact) => ({
+    ...fact,
+    effectiveFrom: fact?.effectiveFrom ?? window.effectiveFrom,
+    effectiveUntil: fact?.effectiveUntil ?? window.effectiveUntil,
+  }));
+}
+
+function parseDate(value) {
+  if (value == null || value === "") return { present: false, date: null };
+  const date = value instanceof Date ? value : new Date(value);
+  return {
+    present: true,
+    date: Number.isNaN(date.getTime()) ? null : date,
+  };
+}
+
+/**
+ * Current-summary window semantics mirror persisted SupplierCommissionRule matching:
+ * effectiveFrom is inclusive and effectiveUntil is exclusive.
+ * Invalid source dates are never guessed as active.
+ */
+export function classifyCommissionFactWindow(fact = {}, { at = new Date() } = {}) {
+  const current = at instanceof Date ? at : new Date(at);
+  if (Number.isNaN(current.getTime())) return "REVIEW_REQUIRED";
+
+  const from = parseDate(fact.effectiveFrom);
+  const until = parseDate(fact.effectiveUntil);
+  if ((from.present && !from.date) || (until.present && !until.date)) return "REVIEW_REQUIRED";
+  if (from.date && until.date && until.date.getTime() <= from.date.getTime()) return "REVIEW_REQUIRED";
+  if (from.date && from.date.getTime() > current.getTime()) return "FUTURE";
+  if (until.date && until.date.getTime() <= current.getTime()) return "EXPIRED";
+  return "ACTIVE";
+}
+
 function factKey(fact) {
-  return `${fact.kind}|${fact.value}|${fact.currency || ""}|${fact.basis || ""}|${fact.display}`;
+  return `${fact.kind}|${fact.value}|${fact.currency || ""}|${fact.basis || ""}|${fact.effectiveFrom || ""}|${fact.effectiveUntil || ""}|${fact.display}`;
 }
 
 function makePercentFact(value, { upTo = false, basis = "PERCENT_OF_SALE" } = {}) {
@@ -217,28 +283,37 @@ function structuredFacts(entry, { fallbackUnit, fallbackCurrency } = {}) {
     null;
 
   if (valueField && typeof valueField === "object") {
-    return structuredFacts(valueField, {
-      fallbackUnit,
-      fallbackCurrency: currencyFrom(entry, fallbackCurrency),
-    });
+    return withEffectiveWindow(
+      structuredFacts(valueField, {
+        fallbackUnit,
+        fallbackCurrency: currencyFrom(entry, fallbackCurrency),
+      }),
+      entry,
+    );
   }
 
   if (typeof valueField === "string" && /%|or\b|\$|rp|£|€/i.test(valueField)) {
     const parsed = parseCommissionText(valueField);
     if (parsed.length) {
-      return parsed.map((fact) => ({
-        ...fact,
-        basis: payoutBasisFrom(entry, fallbackUnit, fact.kind),
-      }));
+      return withEffectiveWindow(
+        parsed.map((fact) => ({
+          ...fact,
+          basis: payoutBasisFrom(entry, fallbackUnit, fact.kind),
+        })),
+        entry,
+      );
     }
   }
   if (typeof entry.type === "string" && typeof valueField === "string") {
     const parsed = parseCommissionText(valueField);
     if (parsed.length) {
-      return parsed.map((fact) => ({
-        ...fact,
-        basis: payoutBasisFrom(entry, fallbackUnit, fact.kind),
-      }));
+      return withEffectiveWindow(
+        parsed.map((fact) => ({
+          ...fact,
+          basis: payoutBasisFrom(entry, fallbackUnit, fact.kind),
+        })),
+        entry,
+      );
     }
   }
 
@@ -251,12 +326,12 @@ function structuredFacts(entry, { fallbackUnit, fallbackCurrency } = {}) {
     const fact = makeFixedFact(amount, currency, {
       basis: payoutBasisFrom(entry, fallbackUnit, "FIXED"),
     });
-    return fact ? [fact] : [];
+    return withEffectiveWindow(fact ? [fact] : [], entry);
   }
   const fact = makePercentFact(amount, {
     basis: payoutBasisFrom(entry, fallbackUnit, "PERCENT"),
   });
-  return fact ? [fact] : [];
+  return withEffectiveWindow(fact ? [fact] : [], entry);
 }
 
 function keyedCommissionBag(input) {
@@ -349,7 +424,11 @@ function collectSourceEntries({ groups, raw } = {}) {
 export { collectSourceEntries };
 
 /**
- * @returns {{ facts: object[], display: string|null, averageDisplay: string|null }}
+ * Current campaign display/reporting facts only.
+ * Historical/future commission facts remain available in allFacts but do not enter
+ * the current display or Avg Commission. Invalid source windows fail closed.
+ *
+ * @returns {{ facts: object[], display: string|null, averageDisplay: string|null, allFacts: object[], excludedFacts: object[], windowReviewRequired: boolean }}
  */
 export function listCampaignCommissionFacts({
   groups = null,
@@ -357,8 +436,9 @@ export function listCampaignCommissionFacts({
   currency = null,
   defaultValue = null,
   raw = {},
+  at = new Date(),
 } = {}) {
-  const facts = [];
+  const collected = [];
   const seen = new Set();
   const pushAll = (list) => {
     for (const fact of list || []) {
@@ -366,7 +446,7 @@ export function listCampaignCommissionFacts({
       const key = factKey(fact);
       if (seen.has(key)) continue;
       seen.add(key);
-      facts.push(fact);
+      collected.push(fact);
     }
   };
 
@@ -374,7 +454,9 @@ export function listCampaignCommissionFacts({
     pushAll(structuredFacts(entry, { fallbackUnit: commissionUnit, fallbackCurrency: currency }));
   }
 
-  if (!facts.length) {
+  // Fall back only when there are no supplier commission facts at all. If supplier
+  // facts exist but are expired/future, do not revive the campaign default as current.
+  if (!collected.length) {
     pushAll(
       structuredFacts(
         { value: defaultValue, currency, model: commissionUnit },
@@ -383,10 +465,20 @@ export function listCampaignCommissionFacts({
     );
   }
 
+  const allFacts = collected.map((fact) => ({
+    ...fact,
+    windowStatus: classifyCommissionFactWindow(fact, { at }),
+  }));
+  const facts = allFacts.filter((fact) => fact.windowStatus === "ACTIVE");
+  const excludedFacts = allFacts.filter((fact) => fact.windowStatus !== "ACTIVE");
+
   return {
     facts,
     display: facts.length ? facts.map((f) => f.display).join(" · ") : null,
     averageDisplay: averageCommissionFacts(facts),
+    allFacts,
+    excludedFacts,
+    windowReviewRequired: excludedFacts.some((fact) => fact.windowStatus === "REVIEW_REQUIRED"),
   };
 }
 
