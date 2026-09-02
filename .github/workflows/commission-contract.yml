@@ -7,6 +7,9 @@ on:
     paths:
       - 'src/modules/commercial/**'
       - 'src/modules/ops/campaignCommissions.js'
+      - 'src/modules/networkOps/campaignCommissionSummary.contract.js'
+      - 'test/campaignCommissions.test.js'
+      - 'test/p40.campaignCommissionSummary.test.js'
       - 'test/supplierCommissionArchitecture.contract.test.js'
       - 'test/supplierCommissionMatcher.test.js'
       - 'test/supplierCommissionRule.test.js'
@@ -19,6 +22,9 @@ on:
     paths:
       - 'src/modules/commercial/**'
       - 'src/modules/ops/campaignCommissions.js'
+      - 'src/modules/networkOps/campaignCommissionSummary.contract.js'
+      - 'test/campaignCommissions.test.js'
+      - 'test/p40.campaignCommissionSummary.test.js'
       - 'test/supplierCommissionArchitecture.contract.test.js'
       - 'test/supplierCommissionMatcher.test.js'
       - 'test/supplierCommissionRule.test.js'
@@ -57,3 +63,7 @@ jobs:
         run: node --test test/supplierCommissionRule.test.js
       - name: Run supplier commission history service tests
         run: node --test test/supplierCommissionRuleService.test.js
+      - name: Run campaign commission current-window tests
+        run: node --test test/campaignCommissions.test.js
+      - name: Run campaign commission summary contract tests
+        run: node --test test/p40.campaignCommissionSummary.test.js
