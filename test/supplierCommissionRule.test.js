@@ -26,7 +26,7 @@ describe("supplier commission rules (pointer 12)", () => {
     assert.equal(summary, "Up to 15% · 6 rules");
   });
 
-  it("fans out multiple commission groups into separate rule payloads", () => {
+  it("fans out multiple anonymous commission groups into separate MBO outcomes without inventing source rule IDs", () => {
     const raw = {
       id: "camp-1",
       commissionGroup: {
@@ -35,8 +35,10 @@ describe("supplier commission rules (pointer 12)", () => {
       },
     };
     const rules = extractCommissionRulesFromCampaignRaw(raw);
-    assert.ok(rules.length >= 4);
-    assert.ok(new Set(rules.map((r) => r.sourceRuleId)).size >= 4);
+    assert.equal(rules.length, 4);
+    assert.equal(new Set(rules.map((r) => r.outcomeKey)).size, 4);
+    assert.ok(rules.every((r) => r.sourceRuleId == null));
+    assert.deepEqual(rules.map((r) => r.commissionSequence), [1, 2, 3, 4]);
   });
 
   it("collectEmbeddedCommissionRulesFromCampaigns merges campaigns without concatenating", () => {
