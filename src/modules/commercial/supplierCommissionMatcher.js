@@ -147,6 +147,14 @@ function splitConditionValues(condition) {
   return candidates;
 }
 
+function compareScalar(actual, expected, operator) {
+  if (operator === "GT") return actual > expected;
+  if (operator === "GTE") return actual >= expected;
+  if (operator === "LT") return actual < expected;
+  if (operator === "LTE") return actual <= expected;
+  return false;
+}
+
 /**
  * @returns {{state:"MATCH"|"NO_MATCH"|"UNKNOWN", reason?:string}}
  */
@@ -196,16 +204,40 @@ export function evaluateSupplierCommissionCondition(condition, facts = {}) {
     return match ? { state: "MATCH" } : { state: "NO_MATCH" };
   }
 
+  // DATE comparisons are chronological, never numeric-string comparisons.
+  if (type === "DATE" && ["GT", "GTE", "LT", "LTE"].includes(operator)) {
+    const actualDate = asDate(factValues[0]);
+    const expectedDate = asDate(expectedValues[0]);
+    if (!actualDate || !expectedDate) {
+      return { state: "UNKNOWN", reason: "invalid_date_comparison:DATE" };
+    }
+    return {
+      state: compareScalar(actualDate.getTime(), expectedDate.getTime(), operator)
+        ? "MATCH"
+        : "NO_MATCH",
+    };
+  }
+
+  if (type === "DATE" && operator === "BETWEEN") {
+    const actualDate = asDate(factValues[0]);
+    const range = expectedValues.slice(0, 2).map(asDate);
+    if (!actualDate || range.length < 2 || range.some((value) => !value)) {
+      return { state: "UNKNOWN", reason: "invalid_between:DATE" };
+    }
+    const [min, max] = range.map((value) => value.getTime());
+    const actual = actualDate.getTime();
+    return { state: actual >= min && actual <= max ? "MATCH" : "NO_MATCH" };
+  }
+
   const actualNumber = asNumber(factValues[0]);
   const expectedNumber = asNumber(expectedValues[0]);
   if (["GT", "GTE", "LT", "LTE"].includes(operator)) {
     if (actualNumber == null || expectedNumber == null) {
       return { state: "UNKNOWN", reason: `non_numeric_comparison:${type}` };
     }
-    if (operator === "GT") return { state: actualNumber > expectedNumber ? "MATCH" : "NO_MATCH" };
-    if (operator === "GTE") return { state: actualNumber >= expectedNumber ? "MATCH" : "NO_MATCH" };
-    if (operator === "LT") return { state: actualNumber < expectedNumber ? "MATCH" : "NO_MATCH" };
-    return { state: actualNumber <= expectedNumber ? "MATCH" : "NO_MATCH" };
+    return {
+      state: compareScalar(actualNumber, expectedNumber, operator) ? "MATCH" : "NO_MATCH",
+    };
   }
 
   if (operator === "BETWEEN") {
@@ -361,6 +393,57 @@ function chooseBySpecificity(candidates) {
   return winners.length === 1 ? winners[0] : null;
 }
 
+function verifiedCalculationGrain(rule) {
+  const metadata = rule?.metadata && typeof rule.metadata === "object" ? rule.metadata : {};
+  const raw = normalizeText(
+    metadata.calculationGrain ?? metadata.commissionGrain ?? metadata.sourceCalculationGrain,
+  );
+  if (["ORDER", "ORDER_LEVEL", "PER_ORDER"].includes(raw)) return "ORDER";
+  if (["ITEM", "ITEM_LEVEL", "LINE_ITEM", "PER_ITEM"].includes(raw)) return "ITEM";
+  if (["EXPLICIT", "COMMISSIONABLE_VALUE"].includes(raw)) return "EXPLICIT";
+  return null;
+}
+
+function resolvePercentageCommissionableValue(rule, facts = {}) {
+  const explicit = asNumber(facts.commissionableValue);
+  if (explicit != null) {
+    return { status: "RESOLVED", value: explicit, grain: "EXPLICIT" };
+  }
+
+  const grain = verifiedCalculationGrain(rule);
+  const orderValue = asNumber(facts.orderValue);
+  const itemValue = asNumber(facts.itemValue);
+
+  if (grain === "ORDER") {
+    return orderValue == null
+      ? { status: "SOURCE_DATA_MISSING", reason: "missing_order_value_for_order_grain" }
+      : { status: "RESOLVED", value: orderValue, grain: "ORDER" };
+  }
+
+  if (grain === "ITEM") {
+    return itemValue == null
+      ? { status: "SOURCE_DATA_MISSING", reason: "missing_item_value_for_item_grain" }
+      : { status: "RESOLVED", value: itemValue, grain: "ITEM" };
+  }
+
+  if (grain === "EXPLICIT") {
+    return { status: "SOURCE_DATA_MISSING", reason: "missing_explicit_commissionable_value" };
+  }
+
+  // No verified calculation grain: use order value only when there is no competing
+  // item-level financial value. Never guess between whole-order and line-item value.
+  if (orderValue != null && itemValue == null) {
+    return { status: "RESOLVED", value: orderValue, grain: "ORDER" };
+  }
+  if (orderValue != null && itemValue != null && orderValue === itemValue) {
+    return { status: "RESOLVED", value: orderValue, grain: "ORDER_EQ_ITEM" };
+  }
+  if (orderValue != null || itemValue != null) {
+    return { status: "SOURCE_DATA_MISSING", reason: "ambiguous_commission_grain" };
+  }
+  return { status: "SOURCE_DATA_MISSING", reason: "missing_commissionable_value" };
+}
+
 export function calculateExpectedSupplierCommission(rule, facts = {}) {
   if (!rule) {
     return {
@@ -378,18 +461,6 @@ export function calculateExpectedSupplierCommission(rule, facts = {}) {
 
   const ratePercent = asNumber(rule.ratePercent);
   if (ratePercent != null) {
-    const commissionableValue = asNumber(
-      facts.commissionableValue != null ? facts.commissionableValue : facts.orderValue,
-    );
-    if (commissionableValue == null) {
-      return {
-        status: "SOURCE_DATA_MISSING",
-        amount: null,
-        currency: expectedCurrency,
-        basis,
-        reason: "missing_commissionable_value",
-      };
-    }
     if (basis !== "PERCENT_OF_SALE" && basis !== "CPS") {
       return {
         status: "BASIS_NOT_SUPPORTED",
@@ -399,13 +470,26 @@ export function calculateExpectedSupplierCommission(rule, facts = {}) {
         reason: `percentage_basis_not_supported:${basis}`,
       };
     }
+
+    const resolved = resolvePercentageCommissionableValue(rule, facts);
+    if (resolved.status !== "RESOLVED") {
+      return {
+        status: "SOURCE_DATA_MISSING",
+        amount: null,
+        currency: expectedCurrency,
+        basis,
+        reason: resolved.reason,
+      };
+    }
+
     return {
       status: "CALCULATED",
-      amount: round4((commissionableValue * ratePercent) / 100),
+      amount: round4((resolved.value * ratePercent) / 100),
       currency: expectedCurrency,
       basis,
       ratePercent,
-      commissionableValue,
+      commissionableValue: resolved.value,
+      calculationGrain: resolved.grain,
     };
   }
 
@@ -658,10 +742,15 @@ export function matchSupplierCommissionRule({
   const expected = calculateExpectedSupplierCommission(selected.rule, facts);
   const actual = resolveActual(actualCommission, actualCurrency, facts);
   const comparison = buildComparison(expected, actual);
+  const calculationSafe = expected.status === "CALCULATED";
 
   return {
-    status: "MATCHED",
-    reason: selected.evaluation.isDefault ? "default_rule" : "specific_rule",
+    status: calculationSafe ? "MATCHED" : "REVIEW_REQUIRED",
+    reason: calculationSafe
+      ? selected.evaluation.isDefault
+        ? "default_rule"
+        : "specific_rule"
+      : "supplier_commission_calculation_not_safe",
     matchedRule: selected.rule,
     matchedSupplierCommissionRuleId: selected.rule?.id ?? null,
     matchedCommissionSequence: selected.rule?.commissionSequence ?? null,
@@ -670,9 +759,10 @@ export function matchSupplierCommissionRule({
     expectedCalculationStatus: expected.status,
     expectedCalculationReason: expected.reason ?? null,
     expectedBasis: expected.basis ?? null,
+    expectedCalculationGrain: expected.calculationGrain ?? null,
     ...comparison,
     candidateRuleIds: [selected.rule?.id].filter(Boolean),
-    reviewReasons: [],
+    reviewReasons: calculationSafe ? [] : [expected.reason ?? expected.status].filter(Boolean),
   };
 }
 
@@ -687,6 +777,8 @@ function objectMeta(record) {
 /**
  * Build canonical matcher facts from Order/Conversion/OrderItem/Click records.
  * Callers may override any fact explicitly. No missing fact is manufactured.
+ * Item value is exposed separately and is never automatically promoted to the
+ * percentage commissionable value without verified calculation-grain semantics.
  */
 export function buildSupplierCommissionMatchFacts({
   order = null,
@@ -716,6 +808,14 @@ export function buildSupplierCommissionMatchFacts({
     conversionMeta.saleAmount,
     conversionMeta.sales_amount,
     conversionMeta.revenue,
+  );
+  const itemValue = firstDefined(
+    overrides.itemValue,
+    item?.itemValue,
+    itemMeta.itemValue,
+    itemMeta.item_value,
+    conversionMeta.itemValue,
+    conversionMeta.item_value,
   );
 
   return {
@@ -749,13 +849,12 @@ export function buildSupplierCommissionMatchFacts({
     ),
     voucher: firstDefined(overrides.voucher, orderMeta.voucher, conversionMeta.voucher),
     orderValue,
+    itemValue,
     commissionableValue: firstDefined(
       overrides.commissionableValue,
-      item?.itemValue,
       itemMeta.commissionableValue,
       orderMeta.commissionableValue,
       conversionMeta.commissionableValue,
-      orderValue,
     ),
     quantity,
     actionType: firstDefined(
