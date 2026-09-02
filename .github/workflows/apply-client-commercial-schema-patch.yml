@@ -1,4 +1,4 @@
-name: Apply Client Commercial Schema Patch
+name: Apply Client Commercial Persistence Patch
 
 on:
   push:
@@ -6,12 +6,14 @@ on:
       - fix/mbo-rewards-backend-final-corrections
     paths:
       - 'scripts/apply-client-commercial-schema-patch.mjs'
+      - 'scripts/apply-client-commercial-service-patch.mjs'
+      - '.github/workflows/apply-client-commercial-schema-patch.yml'
 
 permissions:
   contents: write
 
 jobs:
-  patch-schema:
+  patch-runtime:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout correction branch
@@ -25,14 +27,16 @@ jobs:
           node-version: '20'
       - name: Apply deterministic Prisma schema patch
         run: node scripts/apply-client-commercial-schema-patch.mjs
-      - name: Commit schema update
+      - name: Apply deterministic commercial service patch
+        run: node scripts/apply-client-commercial-service-patch.mjs
+      - name: Commit persistence integration updates
         run: |
-          if git diff --quiet -- prisma/schema.prisma; then
-            echo "Schema already patched; nothing to commit."
+          if git diff --quiet -- prisma/schema.prisma src/modules/commercial/services/commercial.service.js; then
+            echo "Client commercial persistence integration already applied; nothing to commit."
             exit 0
           fi
           git config user.name "MBO Group"
           git config user.email "tech@marketingblueocean.com"
-          git add prisma/schema.prisma
-          git commit -m "Persist client commercial conditions tiers and lineage"
+          git add prisma/schema.prisma src/modules/commercial/services/commercial.service.js
+          git commit -m "Integrate client commercial persistence into service runtime"
           git push origin HEAD:fix/mbo-rewards-backend-final-corrections
