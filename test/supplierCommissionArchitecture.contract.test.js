@@ -15,11 +15,40 @@ describe("MBO supplier commission architecture correction contract", () => {
       },
     });
 
-    // PR2 target: this must be 2. The current implementation collapses both facts
-    // under sourceRuleId=rule-abc and therefore fails this contract until corrected.
     assert.equal(rules.length, 2);
     assert.equal(new Set(rules.map((r) => r.outcomeKey)).size, 2);
     assert.deepEqual(rules.map((r) => r.sourceRuleId), ["rule-abc", "rule-abc"]);
+  });
+
+  it("keeps logical outcome identity stable when the supplier rate changes", () => {
+    const before = extractCommissionRulesFromCampaignRaw({
+      id: "campaign-history",
+      commission: { id: "rule-history", type: "percentage", value: "10%" },
+    });
+    const after = extractCommissionRulesFromCampaignRaw({
+      id: "campaign-history",
+      commission: { id: "rule-history", type: "percentage", value: "12%" },
+    });
+
+    assert.equal(before.length, 1);
+    assert.equal(after.length, 1);
+    assert.equal(before[0].outcomeKey, after[0].outcomeKey);
+    assert.equal(before[0].ratePercent, 10);
+    assert.equal(after[0].ratePercent, 12);
+  });
+
+  it("propagates supplier campaign identity on every emitted commission outcome", () => {
+    const rules = extractCommissionRulesFromCampaignRaw({
+      CampaignId: "supplier-campaign-77",
+      commission: {
+        id: "rule-77",
+        type: "Percentage - Individual Transaction Value Or Fixed Cost - Individual Transaction Value",
+        value: "8.20% Or $17.50",
+      },
+    });
+
+    assert.equal(rules.length, 2);
+    assert.deepEqual(rules.map((r) => r.sourceCampaignId), ["supplier-campaign-77", "supplier-campaign-77"]);
   });
 
   it("requires mixed percentage + fixed Avg Commission to be MIXED", () => {
