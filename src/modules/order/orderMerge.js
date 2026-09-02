@@ -60,28 +60,31 @@ export function resolveSupplierOrderId({ supplierOrderId, supplierConversionId }
   return null;
 }
 
-import {
-  mapMboOrderStatusToValidation,
-  preserveNetworkRawStatus,
-  resolveOrderStatusFromNetworkRaw,
-} from "./orderStatusNormalization.contract.js";
+import { resolveOrderStatusFromNetworkRaw } from "./orderStatusNormalization.contract.js";
 
+/**
+ * Bridge only for the platform's legacy/internal conversion state.
+ *
+ * This is deliberately NOT a network-status mapper. Payment lifecycle words such as
+ * PAID / INVOICED / PAYABLE / AVAILABLE / WITHDRAWN must never confirm an order here.
+ * Raw supplier statuses must use the source-scoped status-normalization contract.
+ */
 export function mapConversionStatusToValidation(status) {
-  const resolved = resolveOrderStatusFromNetworkRaw(status);
-  if (resolved.mapped && resolved.mboOrderStatus) {
-    return mapMboOrderStatusToValidation(resolved.mboOrderStatus);
-  }
-  const value = String(status || "").toUpperCase();
+  const value = String(status || "").trim().toUpperCase();
+  if (!value) return null;
+
+  if (value === "APPROVED" || value === "CONFIRMED") return "VALIDATION_APPROVED";
   if (value === "REJECTED") return "VALIDATION_REJECTED";
-  if (value === "APPROVED" || value === "PAID") return "VALIDATION_APPROVED";
-  if (value === "UNKNOWN") return "VALIDATION_NEEDS_REVIEW";
   if (value === "PENDING") return "VALIDATION_PENDING";
-  if (value) return "VALIDATION_NEEDS_REVIEW";
-  return null;
+  if (value === "UNKNOWN") return "VALIDATION_NEEDS_REVIEW";
+
+  // Fail closed for anything outside the explicit internal vocabulary.
+  return "VALIDATION_NEEDS_REVIEW";
 }
 
 export function mapConversionStatusToSupplierPayment(status) {
   // Pointer 17 — network payment evidence must not auto-set supplier RECEIVED.
+  // Contextless supplier/network tokens cannot be trusted for payment transitions.
   const resolved = resolveOrderStatusFromNetworkRaw(status);
   if (resolved.mboOrderStatus === "REJECTED" || resolved.mboOrderStatus === "CANCELLED") {
     return "PAYMENT_ON_HOLD";
