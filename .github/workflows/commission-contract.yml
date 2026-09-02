@@ -10,6 +10,7 @@ on:
       - 'test/supplierCommissionArchitecture.contract.test.js'
       - 'test/supplierCommissionMatcher.test.js'
       - 'test/supplierCommissionRule.test.js'
+      - 'test/supplierCommissionRuleService.test.js'
       - 'prisma/schema.prisma'
       - 'prisma/migrations/20260902010000_supplier_commission_conditions/**'
       - '.github/workflows/commission-contract.yml'
@@ -21,6 +22,7 @@ on:
       - 'test/supplierCommissionArchitecture.contract.test.js'
       - 'test/supplierCommissionMatcher.test.js'
       - 'test/supplierCommissionRule.test.js'
+      - 'test/supplierCommissionRuleService.test.js'
       - 'prisma/schema.prisma'
       - 'prisma/migrations/20260902010000_supplier_commission_conditions/**'
       - '.github/workflows/commission-contract.yml'
@@ -53,3 +55,5 @@ jobs:
         run: node --test test/supplierCommissionMatcher.test.js
       - name: Run supplier commission rule tests
         run: node --test test/supplierCommissionRule.test.js
+      - name: Run supplier commission history service tests
+        run: node --test test/supplierCommissionRuleService.test.js
