@@ -48,14 +48,14 @@ export const CLIENT_PAYMENT_TRANSITIONS = {
 
 /**
  * Wave C payment state machine — transaction truth only (no ledger).
- * v15: supplier funds precede client payment readiness where enforced below.
+ * Supplier/network state and MBO bank receipt remain separate facts.
  */
 export class PaymentStateService {
   constructor(deps = {}) {
     this.db = deps.prisma ?? prisma;
     this.audit = deps.audit ?? auditService;
     this.exceptions = deps.exceptions ?? new ExceptionCaseService({ prisma: this.db, audit: this.audit });
-    /** When true, client cannot become PAYABLE until supplier PAYMENT_RECEIVED. */
+    /** When true, supplier PAYMENT_RECEIVED is an additional prerequisite for client PAYABLE. */
     this.requireSupplierReceivedForClientPayable =
       deps.requireSupplierReceivedForClientPayable !== false;
   }
@@ -165,12 +165,25 @@ export class PaymentStateService {
       }
     }
 
-    if (toStatus === "CLIENT_PAYMENT_PAYABLE" && order.validationStatus === "VALIDATION_APPROVED") {
+    if (toStatus === "CLIENT_PAYMENT_PAYABLE") {
+      if (order.validationStatus !== "VALIDATION_APPROVED") {
+        throw fail("Client payment cannot become PAYABLE before order confirmation.", 409);
+      }
+
+      if (
+        this.requireSupplierReceivedForClientPayable &&
+        String(order.supplierPaymentStatus || "").toUpperCase() !== "PAYMENT_RECEIVED"
+      ) {
+        throw fail("Supplier payment must be PAYMENT_RECEIVED before client payment can become PAYABLE.", 409);
+      }
+
       const fts = await db.financialTransaction?.findMany?.({
         where: { orderId: order.id },
         select: {
           id: true,
           supplierReceivable: true,
+          clientPayable: true,
+          transactionType: true,
           originalCurrency: true,
           metadata: true,
           calculationMetadata: true,
