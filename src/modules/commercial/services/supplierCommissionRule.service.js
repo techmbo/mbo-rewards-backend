@@ -3,7 +3,7 @@
  * Pointer 12 — one row per payable outcome; campaign commission stays summary-only.
  *
  * PR1 correction:
- * - outcomeKey is the normalized identity, not sourceRuleId alone;
+ * - outcomeKey is the normalized logical identity, not sourceRuleId alone;
  * - historical effective versions are retained;
  * - child SupplierCommissionCondition rows are replaced transactionally for the same outcome version.
  *
@@ -13,8 +13,6 @@
  * - expose expected-vs-actual comparison without replacing network actual commission truth.
  */
 
-import { randomUUID } from "node:crypto";
-import { Prisma } from "@prisma/client";
 import { prisma } from "../../../database/prisma.js";
 import {
   buildSupplierCommissionMatchFacts,
@@ -30,10 +28,6 @@ function asDate(value, fallback = null) {
 function normalizeCurrency(value) {
   if (!value) return null;
   return String(value).slice(0, 3).toUpperCase();
-}
-
-function jsonParam(value) {
-  return value == null ? null : JSON.stringify(value);
 }
 
 function normalizeConditions(input = []) {
@@ -72,6 +66,73 @@ function sameDate(a, b) {
   return new Date(a).getTime() === new Date(b).getTime();
 }
 
+function sameRuleEconomics(row, input, currency) {
+  return (
+    sameMoney(row.ratePercent, input.ratePercent) &&
+    sameMoney(row.fixedAmount, input.fixedAmount) &&
+    (row.currency ?? null) === currency &&
+    (row.supplierRuleType ?? null) === (input.supplierRuleType ?? null) &&
+    (row.basis ?? "UNKNOWN") === (input.basis ?? "UNKNOWN") &&
+    (row.commissionModel ?? null) === (input.commissionModel ?? null) &&
+    (row.commissionType ?? null) === (input.commissionType ?? null) &&
+    (row.actionType ?? null) === (input.actionType ?? null)
+  );
+}
+
+function resolveObservedAt(input) {
+  return asDate(input.sourceEvidenceAt, null) ?? new Date();
+}
+
+function versionData(input, {
+  sourceAccountLabel,
+  currency,
+  effectiveFrom,
+  effectiveUntil,
+  includeIdentity = false,
+} = {}) {
+  const data = {
+    campaignSourceId: input.campaignSourceId ?? null,
+    supplierCampaignId: input.supplierCampaignId ?? null,
+    sourceGroupId: input.sourceGroupId ?? null,
+    sourceGroupName: input.sourceGroupName ?? null,
+    sourceRuleId: input.sourceRuleId ?? null,
+    sourceRuleName: input.sourceRuleName ?? null,
+    outcomeKey: input.outcomeKey,
+    commissionSequence: input.commissionSequence ?? null,
+    commissionModel: input.commissionModel ?? null,
+    commissionType: input.commissionType ?? null,
+    supplierRuleType: input.supplierRuleType ?? null,
+    basis: input.basis ?? "UNKNOWN",
+    ratePercent: input.ratePercent ?? null,
+    fixedAmount: input.fixedAmount ?? null,
+    currency,
+    actionType: input.actionType ?? null,
+    priority: input.priority ?? null,
+    rank: input.rank ?? null,
+    customerType: input.customerType ?? null,
+    country: input.country ?? null,
+    categoryProductGoal: input.categoryProductGoal ?? null,
+    couponOrTier: input.couponOrTier ?? null,
+    networkSource: input.networkSource ?? null,
+    sourceObject: input.sourceObject ?? null,
+    sourcePath: input.sourcePath ?? null,
+    mappingStatus: input.mappingStatus ?? null,
+    fieldMappingOutcome: input.fieldMappingOutcome ?? null,
+    ruleVersion: input.ruleVersion ?? null,
+    effectiveUntil,
+    rawPayloadId: input.rawPayloadId ?? null,
+    rawRuleReference: input.rawRuleReference ?? null,
+    metadata: input.metadata ?? null,
+  };
+
+  if (effectiveFrom) data.effectiveFrom = effectiveFrom;
+  if (includeIdentity) {
+    data.supplier = input.supplier;
+    data.sourceAccountLabel = sourceAccountLabel;
+  }
+  return data;
+}
+
 export class SupplierCommissionRuleService {
   constructor(deps = {}) {
     this.db = deps.prisma ?? prisma;
@@ -80,9 +141,11 @@ export class SupplierCommissionRuleService {
   /**
    * Persist one normalized supplier payable outcome.
    *
-   * Idempotency scope is supplier + sourceAccountLabel + outcomeKey + effectiveFrom.
-   * If the same outcomeKey later changes its financial value or effective start, a new
-   * historical version is created instead of overwriting the old rule.
+   * `outcomeKey` is a logical lineage key and must not contain the payout value.
+   * Re-syncing identical economics without a supplier effective date reuses the
+   * current open version. A genuine economics change closes the prior open version
+   * and creates a successor, using supplier effective date when present and otherwise
+   * the first observed source-evidence time for that change.
    */
   async upsertNormalizedFact(input, client = null) {
     const db = client ?? this.db;
@@ -90,139 +153,110 @@ export class SupplierCommissionRuleService {
     if (!input?.outcomeKey) throw new Error("outcomeKey is required");
 
     const sourceAccountLabel = input.sourceAccountLabel ?? "default";
-    const effectiveFrom = asDate(input.effectiveFrom, new Date());
+    const explicitEffectiveFrom = asDate(input.effectiveFrom, null);
     const effectiveUntil = asDate(input.effectiveUntil, null);
     const currency = normalizeCurrency(input.currency);
     const conditions = normalizeConditions(input.conditions);
 
     return db.$transaction(async (tx) => {
-      const versions = await tx.$queryRaw(Prisma.sql`
-        SELECT
-          id,
-          "effectiveFrom",
-          "effectiveUntil",
-          "ratePercent",
-          "fixedAmount",
-          currency,
-          "supplierRuleType",
-          basis
-        FROM "supplier_commission_rules"
-        WHERE supplier = ${input.supplier}::"SupplierKey"
-          AND "sourceAccountLabel" = ${sourceAccountLabel}
-          AND "outcomeKey" = ${input.outcomeKey}
-        ORDER BY "effectiveFrom" DESC
-      `);
+      const versions = await tx.supplierCommissionRule.findMany({
+        where: {
+          supplier: input.supplier,
+          sourceAccountLabel,
+          outcomeKey: input.outcomeKey,
+        },
+        include: { conditions: true },
+        orderBy: [{ effectiveFrom: "desc" }, { createdAt: "desc" }],
+      });
 
-      const exactVersion = versions.find((row) =>
-        sameDate(row.effectiveFrom, effectiveFrom) &&
-        sameMoney(row.ratePercent, input.ratePercent) &&
-        sameMoney(row.fixedAmount, input.fixedAmount) &&
-        (row.currency ?? null) === currency &&
-        (row.supplierRuleType ?? null) === (input.supplierRuleType ?? null) &&
-        (row.basis ?? "UNKNOWN") === (input.basis ?? "UNKNOWN"),
-      );
-
-      let rule;
-      if (exactVersion) {
-        rule = await tx.supplierCommissionRule.update({
-          where: { id: exactVersion.id },
-          data: {
-            campaignSourceId: input.campaignSourceId ?? null,
-            supplierCampaignId: input.supplierCampaignId ?? null,
-            sourceGroupId: input.sourceGroupId ?? null,
-            sourceGroupName: input.sourceGroupName ?? null,
-            sourceRuleId: input.sourceRuleId ?? null,
-            sourceRuleName: input.sourceRuleName ?? null,
-            outcomeKey: input.outcomeKey,
-            commissionSequence: input.commissionSequence ?? null,
-            commissionModel: input.commissionModel ?? null,
-            commissionType: input.commissionType ?? null,
-            supplierRuleType: input.supplierRuleType ?? null,
-            basis: input.basis ?? "UNKNOWN",
-            ratePercent: input.ratePercent ?? null,
-            fixedAmount: input.fixedAmount ?? null,
-            currency,
-            actionType: input.actionType ?? null,
-            priority: input.priority ?? null,
-            rank: input.rank ?? null,
-            customerType: input.customerType ?? null,
-            country: input.country ?? null,
-            categoryProductGoal: input.categoryProductGoal ?? null,
-            couponOrTier: input.couponOrTier ?? null,
-            networkSource: input.networkSource ?? null,
-            sourceObject: input.sourceObject ?? null,
-            sourcePath: input.sourcePath ?? null,
-            mappingStatus: input.mappingStatus ?? null,
-            fieldMappingOutcome: input.fieldMappingOutcome ?? null,
-            ruleVersion: input.ruleVersion ?? null,
-            effectiveUntil,
-            rawPayloadId: input.rawPayloadId ?? null,
-            rawRuleReference: input.rawRuleReference ?? null,
-            metadata: input.metadata ?? null,
-            conditions: {
-              deleteMany: {},
-              create: conditions,
-            },
-          },
-          include: { conditions: true },
-        });
-      } else {
-        const priorOpen = versions.find(
-          (row) => !row.effectiveUntil && new Date(row.effectiveFrom).getTime() < effectiveFrom.getTime(),
+      // Exact supplier-effective version: safe idempotent update when economics match.
+      if (explicitEffectiveFrom) {
+        const exactVersion = versions.find(
+          (row) => sameDate(row.effectiveFrom, explicitEffectiveFrom) && sameRuleEconomics(row, input, currency),
         );
-        if (priorOpen) {
-          await tx.supplierCommissionRule.update({
-            where: { id: priorOpen.id },
-            data: { effectiveUntil: effectiveFrom },
+        if (exactVersion) {
+          return tx.supplierCommissionRule.update({
+            where: { id: exactVersion.id },
+            data: {
+              ...versionData(input, {
+                sourceAccountLabel,
+                currency,
+                effectiveUntil,
+              }),
+              conditions: { deleteMany: {}, create: conditions },
+            },
+            include: { conditions: true },
           });
         }
-
-        rule = await tx.supplierCommissionRule.create({
-          data: {
-            campaignSourceId: input.campaignSourceId ?? null,
-            supplierCampaignId: input.supplierCampaignId ?? null,
-            supplier: input.supplier,
-            sourceAccountLabel,
-            sourceGroupId: input.sourceGroupId ?? null,
-            sourceGroupName: input.sourceGroupName ?? null,
-            sourceRuleId: input.sourceRuleId ?? null,
-            sourceRuleName: input.sourceRuleName ?? null,
-            outcomeKey: input.outcomeKey,
-            commissionSequence: input.commissionSequence ?? null,
-            commissionModel: input.commissionModel ?? null,
-            commissionType: input.commissionType ?? null,
-            supplierRuleType: input.supplierRuleType ?? null,
-            basis: input.basis ?? "UNKNOWN",
-            ratePercent: input.ratePercent ?? null,
-            fixedAmount: input.fixedAmount ?? null,
-            currency,
-            actionType: input.actionType ?? null,
-            priority: input.priority ?? null,
-            rank: input.rank ?? null,
-            customerType: input.customerType ?? null,
-            country: input.country ?? null,
-            categoryProductGoal: input.categoryProductGoal ?? null,
-            couponOrTier: input.couponOrTier ?? null,
-            networkSource: input.networkSource ?? null,
-            sourceObject: input.sourceObject ?? null,
-            sourcePath: input.sourcePath ?? null,
-            mappingStatus: input.mappingStatus ?? null,
-            fieldMappingOutcome: input.fieldMappingOutcome ?? null,
-            ruleVersion: input.ruleVersion ?? null,
-            effectiveFrom,
-            effectiveUntil,
-            rawPayloadId: input.rawPayloadId ?? null,
-            rawRuleReference: input.rawRuleReference ?? null,
-            metadata: input.metadata ?? null,
-            conditions: {
-              create: conditions,
+      } else {
+        // No source effective date: identical repeated payloads must reuse the open
+        // version rather than manufacture a new timestamp/version on every sync.
+        const identicalOpenVersion = versions.find(
+          (row) => row.effectiveUntil == null && sameRuleEconomics(row, input, currency),
+        );
+        if (identicalOpenVersion) {
+          return tx.supplierCommissionRule.update({
+            where: { id: identicalOpenVersion.id },
+            data: {
+              ...versionData(input, {
+                sourceAccountLabel,
+                currency,
+                effectiveUntil: effectiveUntil ?? identicalOpenVersion.effectiveUntil,
+              }),
+              conditions: { deleteMany: {}, create: conditions },
             },
+            include: { conditions: true },
+          });
+        }
+      }
+
+      const effectiveFrom = explicitEffectiveFrom ?? resolveObservedAt(input);
+
+      // If an identical historical version already exists at the resolved observation
+      // timestamp, reuse it. This also protects retries that carry a stable fetchedAt.
+      const existingAtResolvedTime = versions.find(
+        (row) => sameDate(row.effectiveFrom, effectiveFrom) && sameRuleEconomics(row, input, currency),
+      );
+      if (existingAtResolvedTime) {
+        return tx.supplierCommissionRule.update({
+          where: { id: existingAtResolvedTime.id },
+          data: {
+            ...versionData(input, {
+              sourceAccountLabel,
+              currency,
+              effectiveUntil,
+            }),
+            conditions: { deleteMany: {}, create: conditions },
           },
           include: { conditions: true },
         });
       }
 
-      return rule;
+      // Close only the predecessor that is open before this version starts. Never
+      // destructively overwrite historical economics.
+      const priorOpen = versions.find(
+        (row) => row.effectiveUntil == null && new Date(row.effectiveFrom).getTime() < effectiveFrom.getTime(),
+      );
+      if (priorOpen) {
+        await tx.supplierCommissionRule.update({
+          where: { id: priorOpen.id },
+          data: { effectiveUntil: effectiveFrom },
+        });
+      }
+
+      return tx.supplierCommissionRule.create({
+        data: {
+          ...versionData(input, {
+            sourceAccountLabel,
+            currency,
+            effectiveFrom,
+            effectiveUntil,
+            includeIdentity: true,
+          }),
+          conditions: { create: conditions },
+        },
+        include: { conditions: true },
+      });
     });
   }
 
