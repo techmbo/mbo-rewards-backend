@@ -29,6 +29,10 @@ on:
 jobs:
   contract:
     runs-on: ubuntu-latest
+    env:
+      # Prisma generate/validate require syntactically valid URLs but do not connect.
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/mbo_ci
+      DIRECT_URL: postgresql://ci:ci@localhost:5432/mbo_ci
     steps:
       - name: Checkout
         uses: actions/checkout@v4
