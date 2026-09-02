@@ -12,7 +12,26 @@ import { collectEmbeddedCommissionRulesFromCampaigns } from "./supplierCommissio
 import { SupplierCommissionRuleService } from "./services/supplierCommissionRule.service.js";
 
 function resolveCampaignId(raw = {}) {
-  return raw.id ?? raw.campaignId ?? raw.campaign_id ?? raw.productId ?? null;
+  return raw.sourceCampaignId ?? raw.id ?? raw.campaignId ?? raw.campaign_id ?? raw.CampaignId ?? raw.campaignID ?? raw.productId ?? raw.product_id ?? null;
+}
+
+function asDateOrNull(value) {
+  if (value == null || value === "") return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function resolveSourceEvidenceAt(record = {}) {
+  return asDateOrNull(
+    record.sourceEvidenceAt ??
+      record.fetchedAt ??
+      record.receivedAt ??
+      record.syncedAt ??
+      record.lastSyncedAt ??
+      record.originalPayload?.fetchedAt ??
+      record.originalPayload?.receivedAt ??
+      null,
+  );
 }
 
 export async function upsertCommissionRulesForPreparedCampaigns({
@@ -56,13 +75,21 @@ export async function upsertCommissionRulesForPreparedCampaigns({
   const campaignBySupplierId = new Map(
     supplierCampaigns.map((row) => [String(row.supplierCampaignId), row]),
   );
+  const preparedByCampaignId = new Map(
+    preparedRecords
+      .map((record) => [resolveCampaignId(record.originalPayload ?? {}), record])
+      .filter(([campaignId]) => campaignId != null)
+      .map(([campaignId, record]) => [String(campaignId), record]),
+  );
 
   const ruleService = new SupplierCommissionRuleService();
   let upserted = 0;
 
   for (const rule of embedded) {
     const campaignId = resolveCampaignId(rule);
-    const sc = campaignId ? campaignBySupplierId.get(String(campaignId)) : null;
+    const campaignKey = campaignId != null ? String(campaignId) : null;
+    const sc = campaignKey ? campaignBySupplierId.get(campaignKey) : null;
+    const preparedRecord = campaignKey ? preparedByCampaignId.get(campaignKey) : null;
     const cs = sc?.campaignSources?.[0] ?? null;
     const enriched = enrichSupplierCommissionRuleRecord(
       {
@@ -124,14 +151,19 @@ export async function upsertCommissionRulesForPreparedCampaigns({
       mappingStatus: enriched.mappingStatus,
       fieldMappingOutcome: enriched.fieldMappingOutcome,
       ruleVersion: enriched.ruleVersion,
-      effectiveFrom: rule.effectiveFrom ? new Date(rule.effectiveFrom) : new Date(),
-      effectiveUntil: rule.effectiveUntil ? new Date(rule.effectiveUntil) : null,
+      // Missing supplier effective dates stay missing here. The persistence service
+      // uses an existing open version for identical re-syncs and source evidence time
+      // only when a new observed version genuinely has to be created.
+      effectiveFrom: asDateOrNull(rule.effectiveFrom),
+      effectiveUntil: asDateOrNull(rule.effectiveUntil),
+      sourceEvidenceAt: resolveSourceEvidenceAt(preparedRecord ?? {}),
       rawPayloadId: rule.rawPayloadId ?? null,
       rawRuleReference: rule.rawRuleReference ?? null,
       metadata: {
         brandName: sc?.merchantNameRaw ?? null,
         campaignName: sc?.campaignName ?? null,
-        sourceCampaignId: campaignId ? String(campaignId) : null,
+        sourceCampaignId: campaignKey,
+        sourceEffectiveFromProvided: Boolean(rule.effectiveFrom),
       },
     });
 
