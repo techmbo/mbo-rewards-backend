@@ -26,6 +26,13 @@ export const SUPPLIER_PAYMENT_TRANSITIONS = {
   ],
 };
 
+export const CLIENT_FINANCE_GATED_STATUSES = new Set([
+  "CLIENT_PAYMENT_PAYABLE",
+  "CLIENT_PAYMENT_INVOICED",
+  "CLIENT_PAYMENT_PROCESSING",
+  "CLIENT_PAYMENT_PAID",
+]);
+
 export const CLIENT_PAYMENT_TRANSITIONS = {
   CLIENT_PAYMENT_NOT_READY: ["CLIENT_PAYMENT_PAYABLE", "CLIENT_PAYMENT_ON_HOLD"],
   CLIENT_PAYMENT_PAYABLE: [
@@ -165,16 +172,16 @@ export class PaymentStateService {
       }
     }
 
-    if (toStatus === "CLIENT_PAYMENT_PAYABLE") {
+    if (CLIENT_FINANCE_GATED_STATUSES.has(toStatus)) {
       if (order.validationStatus !== "VALIDATION_APPROVED") {
-        throw fail("Client payment cannot become PAYABLE before order confirmation.", 409);
+        throw fail("Client payment cannot advance before order confirmation.", 409);
       }
 
       if (
         this.requireSupplierReceivedForClientPayable &&
         String(order.supplierPaymentStatus || "").toUpperCase() !== "PAYMENT_RECEIVED"
       ) {
-        throw fail("Supplier payment must be PAYMENT_RECEIVED before client payment can become PAYABLE.", 409);
+        throw fail("Supplier payment must be PAYMENT_RECEIVED before client payment can advance.", 409);
       }
 
       const fts = await db.financialTransaction?.findMany?.({

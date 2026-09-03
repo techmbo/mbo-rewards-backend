@@ -234,10 +234,8 @@ export function runReconciliationChecks({
 export function shouldBlockClientPayableRelease(checks = []) {
   return checks.some(
     (check) =>
-      !check.ok &&
-      !check.skipped &&
-      check.material &&
-      CLIENT_PAYABLE_BLOCKING_PAIRS.has(check.pair),
+      CLIENT_PAYABLE_BLOCKING_PAIRS.has(check.pair) &&
+      check.status !== RECONCILIATION_STATUS.MATCHED,
   );
 }
 

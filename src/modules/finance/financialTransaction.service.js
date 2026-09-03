@@ -793,16 +793,8 @@ export class FinancialTransactionService {
         continue;
       }
 
-      const assignmentId = order.clientAssignmentId || conversion.clientAssignmentId;
-      const rule = assignmentId
-        ? await this.commissionRepo.findEffectiveForAssignment(
-            assignmentId,
-            conversion.conversionDate || order.orderDate || new Date(),
-            db,
-          )
-        : null;
-
-      if (!rule) {
+      const attribution = resolveFinancialAttribution(order, conversion);
+      if (!attribution.resolved) {
         await this.exceptions.report(
           {
             type: "COMMISSION_MISSING",
@@ -810,23 +802,20 @@ export class FinancialTransactionService {
             conversionId: conversion.id,
             orderId: order.id,
             clientId: order.clientId,
-            reason: "No EFFECTIVE ClientCommissionRule for basis sync",
+            reason: attribution.reason,
+            metadata: { scope: "item_basis_sync" },
           },
           db,
         );
-        results.push({ conversionId: conversion.id, action: "unresolved", reason: "missing_effective_commission_rule" });
+        results.push({ conversionId: conversion.id, action: "unresolved", reason: attribution.reason });
         continue;
       }
 
+      const assignmentId = attribution.assignmentId;
+      const transactionAt = conversion.conversionDate || order.orderDate || new Date();
       const approvedBasis = resolveApprovedCommercialBasis(order, conversion);
-      const calc = this.calculate({
-        order,
-        conversion,
-        clientCommissionRule: rule,
-        approvedBasis,
-      });
-
-      if (!calc.ok) {
+      const networkActual = resolveValidatedNetworkActualCommission({ approvedBasis, conversion });
+      if (!networkActual.ok) {
         await this.exceptions.report(
           {
             type: "COMMISSION_INVALID",
@@ -834,14 +823,91 @@ export class FinancialTransactionService {
             conversionId: conversion.id,
             orderId: order.id,
             clientId: order.clientId,
-            reason: calc.reason,
-            metadata: { ...(calc.calculationMetadata || {}), approvedBasis, scope: "item_basis_sync" },
+            reason: networkActual.reason,
+            metadata: { approvedBasis, scope: "item_basis_sync" },
           },
           db,
         );
-        results.push({ conversionId: conversion.id, action: "unresolved", reason: calc.reason, approvedBasis });
+        results.push({
+          conversionId: conversion.id,
+          action: "unresolved",
+          reason: networkActual.reason,
+          approvedBasis,
+        });
         continue;
       }
+
+      const originalCurrency =
+        networkActual.currency || conversion.currency || order.currency || approvedBasis.currency || null;
+      if (!originalCurrency) {
+        results.push({ conversionId: conversion.id, action: "unresolved", reason: "missing_currency" });
+        continue;
+      }
+
+      const factOverrides = { date: transactionAt };
+      if (approvedBasis.basisMode === "ITEM_LEVEL" && approvedBasis.approvedOrderValueOk) {
+        factOverrides.orderValue = approvedBasis.approvedOrderValue;
+      }
+      const campaignFact =
+        order.canonicalCampaignId ||
+        conversion.clientAssignment?.canonicalCampaignId ||
+        null;
+      if (campaignFact) factOverrides.campaign = campaignFact;
+
+      const runtime = await this.clientCommercialRuntime.evaluate(
+        {
+          assignmentId,
+          attributionResolved: true,
+          attributionStatus: "RESOLVED",
+          order,
+          conversion,
+          assignment:
+            conversion.clientAssignment?.id === assignmentId
+              ? conversion.clientAssignment
+              : null,
+          factOverrides,
+          networkActualCommission: networkActual.amount,
+          networkActualCurrency: originalCurrency,
+          validatedSupplierCommission: networkActual.amount,
+          provisionalAllowed: false,
+          orderCount: 1,
+          requireAgreementLineage: true,
+        },
+        db,
+      );
+
+      if (runtime.status !== "CALCULATED" || runtime.provisional === true) {
+        await this.exceptions.report(
+          {
+            type: "COMMISSION_INVALID",
+            severity: "HIGH",
+            conversionId: conversion.id,
+            orderId: order.id,
+            clientId: order.clientId,
+            reason: runtime.reason || runtime.status || "client_commercial_runtime_unresolved",
+            metadata: {
+              scope: "item_basis_sync",
+              runtimeStatus: runtime.status,
+              matchedClientCommissionRuleId: runtime.matchedClientCommissionRuleId ?? null,
+              approvedBasis,
+            },
+          },
+          db,
+        );
+        results.push({
+          conversionId: conversion.id,
+          action: "unresolved",
+          reason: runtime.reason || runtime.status,
+          approvedBasis,
+        });
+        continue;
+      }
+
+      const calc = {
+        supplierGross: networkActual.amount,
+        clientCommission: runtime.clientPayable,
+        mboMargin: runtime.mboMargin,
+      };
 
       const { net } = await this.netPositionForConversion(conversion.id, db);
       const targetSupplier = Number(calc.supplierGross);

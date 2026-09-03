@@ -87,7 +87,7 @@ function parseReceiptDateTime(value) {
   if (value == null || value === "") return null;
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
   const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? String(value) : d.toISOString();
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
 /**
@@ -103,7 +103,13 @@ export function extractMboActualReceipt({ order = null, financialTransactions = 
         dateTime,
         date: dateTime.slice(0, 10),
         time: dateTime.includes("T") ? dateTime.slice(11, 16) : null,
-        amount: orderMeta.mboReceivedAmount ?? null,
+        amount: firstPresent(
+          orderMeta.mboReceivedAmount,
+          orderMeta.mbo_received_amount,
+          orderMeta.bankReceivedAmount,
+          orderMeta.bank_received_amount,
+          orderMeta.reconciliationAmount,
+        ),
         currency: orderMeta.mboReceivedCurrency ?? order?.currency ?? null,
         source: orderMeta.mboReceiptSource || "BANK_RECONCILIATION",
         bankReference: orderMeta.bankReference ?? orderMeta.reconciliationReference ?? null,
@@ -121,7 +127,20 @@ export function extractMboActualReceipt({ order = null, financialTransactions = 
           dateTime,
           date: dateTime.slice(0, 10),
           time: dateTime.includes("T") ? dateTime.slice(11, 16) : null,
-          amount: ft.supplierReceivable ?? null,
+          // Bank receipt amount must be explicit bank/reconciliation evidence.
+          // Never substitute the internal FinancialTransaction supplier receivable.
+          amount: firstPresent(
+            meta.mboReceivedAmount,
+            meta.mbo_received_amount,
+            meta.bankReceivedAmount,
+            meta.bank_received_amount,
+            meta.reconciliationAmount,
+            calc.mboReceivedAmount,
+            calc.mbo_received_amount,
+            calc.bankReceivedAmount,
+            calc.bank_received_amount,
+            calc.reconciliationAmount,
+          ),
           currency: ft.originalCurrency ?? order?.currency ?? null,
           source: meta.mboReceiptSource || calc.mboReceiptSource || "FINANCIAL_TRANSACTION",
           bankReference: meta.bankReference ?? calc.bankReference ?? calc.reconciliationId ?? null,
@@ -138,7 +157,11 @@ export function hasMboActualReceipt(context = {}) {
   return extractMboActualReceipt(context) != null;
 }
 
-export function resolveFinanceEventStage({ order = null, financialTransactions = [] } = {}) {
+export function resolveFinanceEventStage({
+  order = null,
+  financialTransactions = [],
+  reconciliationChecks = null,
+} = {}) {
   const validation = String(order?.validationStatus || "").toUpperCase();
   const supplierPayment = String(order?.supplierPaymentStatus || "").toUpperCase();
   const clientPayment = String(order?.clientPaymentStatus || "").toUpperCase();
@@ -151,15 +174,17 @@ export function resolveFinanceEventStage({ order = null, financialTransactions =
   if (supplierPayment === "PAYMENT_INVOICED" || supplierPayment === "PAYMENT_PAYABLE") {
     stages.push(FINANCE_EVENT.NETWORK_INVOICE);
   }
-  if (
-    networkPaymentEvidence ||
-    supplierPayment === "PAYMENT_RECEIVED" ||
-    supplierPayment === "PAYMENT_PAYABLE"
-  ) {
+  if (networkPaymentEvidence || supplierPayment === "PAYMENT_RECEIVED") {
     stages.push(FINANCE_EVENT.NETWORK_PAYMENT);
   }
   if (receipt) stages.push(FINANCE_EVENT.MBO_ACTUAL_RECEIPT);
-  if (resolveClientPayableEligibility({ order, financialTransactions }).eligible) {
+  if (
+    resolveClientPayableEligibility({
+      order,
+      financialTransactions,
+      reconciliationChecks,
+    }).eligible
+  ) {
     stages.push(FINANCE_EVENT.CLIENT_PAYABLE_ELIGIBILITY);
   }
   if (
@@ -185,7 +210,10 @@ export function resolveClientPayableEligibility({
   if (!hasMboActualReceipt({ order, financialTransactions })) {
     return { eligible: false, reason: "MBO actual receipt required before client payable eligibility" };
   }
-  if (reconciliationChecks?.length && shouldBlockClientPayableRelease(reconciliationChecks)) {
+  if (!Array.isArray(reconciliationChecks) || reconciliationChecks.length === 0) {
+    return { eligible: false, reason: "Reconciliation required before client payable eligibility" };
+  }
+  if (shouldBlockClientPayableRelease(reconciliationChecks)) {
     const blocking = reconciliationChecks.find((c) => !c.ok && !c.skipped && c.material);
     return {
       eligible: false,

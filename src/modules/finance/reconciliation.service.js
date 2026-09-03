@@ -31,9 +31,10 @@ function netFinancialAmount(rows = [], field) {
     const value = Number(raw);
     if (!Number.isFinite(value)) return null;
 
+    // FinancialTransaction adjustment/reversal rows already carry signed deltas.
+    // Summing them directly avoids double-negating REVERSAL rows.
     hasEvidence = true;
-    if (row?.transactionType === "REVERSAL") total -= value;
-    else total += value;
+    total += value;
   }
 
   return hasEvidence ? total : null;
