@@ -27,9 +27,10 @@ describe("CJ sync wiring", () => {
     assert.match(terms?.notes || "", /endpoint\/root query is verified/i);
   });
 
-  it("keeps Commission Detail conversion ingestion gated on live publisher schema", () => {
+  it("keeps Commission Detail conversion ingestion gated on verified publisher GraphQL schema", () => {
     const detail = listSourceObjectCatalog("cj").find((item) => item.sourceObject === "commission_detail");
     assert.equal(detail?.live, false);
-    assert.match(detail?.notes || "", /live publisher GraphQL schema/i);
+    assert.match(detail?.notes || "", /publisher GraphQL schema/i);
+    assert.match(detail?.notes || "", /real response fixture/i);
   });
 });
