@@ -13,6 +13,7 @@ on:
       - 'src/modules/order/paymentState.service.js'
       - 'src/modules/ops/campaignCommissions.js'
       - 'src/modules/networkOps/campaignCommissionSummary.contract.js'
+      - 'test/admitadAdapter.test.js'
       - 'test/campaignCommissions.test.js'
       - 'test/clientCommercialMatcher.test.js'
       - 'test/clientCommercialCalculation.test.js'
@@ -44,6 +45,7 @@ on:
       - 'src/modules/order/paymentState.service.js'
       - 'src/modules/ops/campaignCommissions.js'
       - 'src/modules/networkOps/campaignCommissionSummary.contract.js'
+      - 'test/admitadAdapter.test.js'
       - 'test/campaignCommissions.test.js'
       - 'test/clientCommercialMatcher.test.js'
       - 'test/clientCommercialCalculation.test.js'
@@ -120,3 +122,5 @@ jobs:
         run: node --test test/orderStatusApprovalSafety.test.js
       - name: Run nine-network registry coverage tests
         run: node --test test/networkRegistryCoverage.test.js
+      - name: Run Admitad adapter contract tests
+        run: node --test test/admitadAdapter.test.js
