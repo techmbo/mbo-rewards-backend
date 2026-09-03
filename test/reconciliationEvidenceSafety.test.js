@@ -54,4 +54,25 @@ describe("Finance safety — reconciliation evidence integrity", () => {
     assert.equal(inputs.mboGrossNetworkCommission, null);
     assert.equal(inputs.clientPayableAmount, 50);
   });
+
+  it("nets signed reversal rows exactly once", () => {
+    const inputs = buildOrderReconciliationInputs({
+      order: { id: "ord-reversed", supplierOrderId: "net-reversed", metadata: {} },
+      financialTransactions: [
+        {
+          supplierReceivable: "100",
+          clientPayable: "70",
+          transactionType: "COMMISSION_EARNED",
+        },
+        {
+          supplierReceivable: "-100",
+          clientPayable: "-70",
+          transactionType: "REVERSAL",
+        },
+      ],
+    });
+
+    assert.equal(inputs.mboGrossNetworkCommission, 0);
+    assert.equal(inputs.clientPayableAmount, 0);
+  });
 });
