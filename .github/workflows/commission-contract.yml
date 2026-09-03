@@ -8,6 +8,7 @@ on:
       - 'src/adapters/**'
       - 'src/jobs/admitadSupplierSync.js'
       - 'src/jobs/rakutenSupplierSync.js'
+      - 'src/jobs/cjSupplierSync.js'
       - 'src/jobs/promotion.job.js'
       - 'src/jobs/sync.job.js'
       - 'src/modules/commercial/**'
@@ -24,7 +25,10 @@ on:
       - 'test/admitadAdapter.test.js'
       - 'test/admitadSyncWiring.test.js'
       - 'test/cjAdapter.test.js'
+      - 'test/cjMapper.test.js'
+      - 'test/cjSyncWiring.test.js'
       - 'test/cjProgramTermsMapper.test.js'
+      - 'test/cjProgramTermsPersistence.test.js'
       - 'test/rakutenAdapter.test.js'
       - 'test/rakutenSyncWiring.test.js'
       - 'test/rakutenOfferCommissionMapper.test.js'
@@ -58,6 +62,7 @@ on:
       - 'src/adapters/**'
       - 'src/jobs/admitadSupplierSync.js'
       - 'src/jobs/rakutenSupplierSync.js'
+      - 'src/jobs/cjSupplierSync.js'
       - 'src/jobs/promotion.job.js'
       - 'src/jobs/sync.job.js'
       - 'src/modules/commercial/**'
@@ -74,7 +79,10 @@ on:
       - 'test/admitadAdapter.test.js'
       - 'test/admitadSyncWiring.test.js'
       - 'test/cjAdapter.test.js'
+      - 'test/cjMapper.test.js'
+      - 'test/cjSyncWiring.test.js'
       - 'test/cjProgramTermsMapper.test.js'
+      - 'test/cjProgramTermsPersistence.test.js'
       - 'test/rakutenAdapter.test.js'
       - 'test/rakutenSyncWiring.test.js'
       - 'test/rakutenOfferCommissionMapper.test.js'
@@ -164,8 +172,14 @@ jobs:
         run: node --test test/admitadSyncWiring.test.js
       - name: Run CJ discovery adapter tests
         run: node --test test/cjAdapter.test.js
+      - name: Run CJ campaign/coupon mapper tests
+        run: node --test test/cjMapper.test.js
+      - name: Run CJ sync wiring tests
+        run: node --test test/cjSyncWiring.test.js
       - name: Run CJ Program Terms mapper tests
         run: node --test test/cjProgramTermsMapper.test.js
+      - name: Run CJ Program Terms persistence tests
+        run: node --test test/cjProgramTermsPersistence.test.js
       - name: Run Rakuten adapter contract tests
         run: node --test test/rakutenAdapter.test.js
       - name: Run Rakuten sync wiring tests
