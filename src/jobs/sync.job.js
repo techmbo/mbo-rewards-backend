@@ -72,6 +72,7 @@ import {
 } from "./trackierResourceSync.js";
 import { logger } from "../platform/logging/logger.js";
 import { syncImpactAccount, syncPartnerizeAccount, syncAwinAccount } from "./waveESupplierSync.js";
+import { syncAdmitadAccount } from "./admitadSupplierSync.js";
 import {
   fetchOptimiseSourceObject,
   fetchTrackierSourceObject,
@@ -385,7 +386,17 @@ async function syncAccountsWithConcurrency(accountLabels, syncFn, { platform } =
 async function countAllSyncAccounts() {
   const boostinyAccounts = await listMarketplaceAccounts("boostiny");
   const trackierAccounts = await listMarketplaceAccounts("trackier");
-  let total = boostinyAccounts.length + trackierAccounts.length;
+  const impactAccounts = await listMarketplaceAccounts("impact");
+  const partnerizeAccounts = await listMarketplaceAccounts("partnerize");
+  const awinAccounts = await listMarketplaceAccounts("awin");
+  const admitadAccounts = await listMarketplaceAccounts("admitad");
+  let total =
+    boostinyAccounts.length +
+    trackierAccounts.length +
+    impactAccounts.length +
+    partnerizeAccounts.length +
+    awinAccounts.length +
+    admitadAccounts.length;
   for (const region of ["sea", "mena", "uk"]) {
     // eslint-disable-next-line no-await-in-loop
     const accounts = await listMarketplaceAccounts(`optimise_${region}`);
@@ -409,6 +420,11 @@ async function countSyncAccountsForPlatform(platform, accountLabel) {
 
   if (platform === "trackier") {
     const accounts = await listMarketplaceAccounts("trackier");
+    return [...new Set(accounts.map((acc) => acc.accountLabel).filter(Boolean))].length;
+  }
+
+  if (["impact", "partnerize", "awin", "admitad"].includes(platform)) {
+    const accounts = await listMarketplaceAccounts(platform);
     return [...new Set(accounts.map((acc) => acc.accountLabel).filter(Boolean))].length;
   }
 
@@ -1675,6 +1691,12 @@ export async function syncPlatformAccount(platform, accountLabel, options = {}) 
         success: !accountResult?.failed && !accountResult?.skipped,
       });
       result = { [accountLabel || "default"]: accountResult };
+    } else if (platform === "admitad") {
+      const accountResult = await syncAdmitadAccount(accountLabel || "default");
+      recordAccountSyncComplete({
+        success: !accountResult?.failed && !accountResult?.skipped,
+      });
+      result = { [accountLabel || "default"]: accountResult };
     } else {
       throw new Error(`Unsupported platform: ${platform}`);
     }
@@ -1734,7 +1756,12 @@ export async function syncAll(options = {}) {
       const awin = await syncAwinAccount("default");
       jobTimer.end("awinMs");
 
-      const result = { boostiny, optimise, trackier, impact, partnerize, awin };
+      setSyncStage("admitad");
+      jobTimer.start("admitadMs");
+      const admitad = await syncAdmitadAccount("default");
+      jobTimer.end("admitadMs");
+
+      const result = { boostiny, optimise, trackier, impact, partnerize, awin, admitad };
       jobTimer.end("totalJobMs");
 
       const timings = mergeTimings(jobTimer.toObject(), drainAccountTimings());
