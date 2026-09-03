@@ -24,6 +24,7 @@ import {
   mapAwinCampaign,
   mapAwinOffer,
 } from "./awin.mapper.js";
+import { mapRakutenCampaign } from "./rakuten.mapper.js";
 import { enrichCouponVoucherRecord } from "../../coupons/couponVoucher.contract.js";
 import { buildCampaignBaseFromEntity, buildCouponBaseFromEntity } from "./shared.js";
 
@@ -34,6 +35,7 @@ const CAMPAIGN_MAPPERS = {
   PARTNERIZE: mapPartnerizeCampaign,
   IMPACT: mapImpactCampaign,
   AWIN: mapAwinCampaign,
+  RAKUTEN: mapRakutenCampaign,
 };
 
 const COUPON_MAPPERS = {
@@ -52,6 +54,8 @@ const KNOWN_CONVERSION_SUPPLIERS = new Set([
   "PARTNERIZE",
   "IMPACT",
   "AWIN",
+  "ADMITAD",
+  "RAKUTEN",
 ]);
 
 /** True when a JS mapper exists for this supplier + entity type (fallback if mapping JSON is absent). */
