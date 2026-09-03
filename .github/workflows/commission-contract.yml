@@ -6,14 +6,19 @@ on:
       - fix/mbo-rewards-backend-final-corrections
     paths:
       - 'src/adapters/**'
+      - 'src/jobs/admitadSupplierSync.js'
+      - 'src/jobs/sync.job.js'
       - 'src/modules/commercial/**'
       - 'src/modules/finance/**'
+      - 'src/modules/networkOps/sourceObjects.catalog.js'
       - 'src/modules/order/orderMerge.js'
       - 'src/modules/order/orderStatusNormalization.contract.js'
       - 'src/modules/order/paymentState.service.js'
       - 'src/modules/ops/campaignCommissions.js'
+      - 'src/modules/supplier/entityIdentity.js'
       - 'src/modules/networkOps/campaignCommissionSummary.contract.js'
       - 'test/admitadAdapter.test.js'
+      - 'test/admitadSyncWiring.test.js'
       - 'test/campaignCommissions.test.js'
       - 'test/clientCommercialMatcher.test.js'
       - 'test/clientCommercialCalculation.test.js'
@@ -33,19 +38,25 @@ on:
       - 'prisma/schema.prisma'
       - 'prisma/migrations/20260902010000_supplier_commission_conditions/**'
       - 'prisma/migrations/20260902170000_client_commercial_runtime/**'
+      - 'prisma/migrations/20260903060000_expand_supplier_keys/**'
       - '.github/workflows/commission-contract.yml'
   pull_request:
     branches: [backend1]
     paths:
       - 'src/adapters/**'
+      - 'src/jobs/admitadSupplierSync.js'
+      - 'src/jobs/sync.job.js'
       - 'src/modules/commercial/**'
       - 'src/modules/finance/**'
+      - 'src/modules/networkOps/sourceObjects.catalog.js'
       - 'src/modules/order/orderMerge.js'
       - 'src/modules/order/orderStatusNormalization.contract.js'
       - 'src/modules/order/paymentState.service.js'
       - 'src/modules/ops/campaignCommissions.js'
+      - 'src/modules/supplier/entityIdentity.js'
       - 'src/modules/networkOps/campaignCommissionSummary.contract.js'
       - 'test/admitadAdapter.test.js'
+      - 'test/admitadSyncWiring.test.js'
       - 'test/campaignCommissions.test.js'
       - 'test/clientCommercialMatcher.test.js'
       - 'test/clientCommercialCalculation.test.js'
@@ -65,6 +76,7 @@ on:
       - 'prisma/schema.prisma'
       - 'prisma/migrations/20260902010000_supplier_commission_conditions/**'
       - 'prisma/migrations/20260902170000_client_commercial_runtime/**'
+      - 'prisma/migrations/20260903060000_expand_supplier_keys/**'
       - '.github/workflows/commission-contract.yml'
   workflow_dispatch:
 
@@ -124,3 +136,5 @@ jobs:
         run: node --test test/networkRegistryCoverage.test.js
       - name: Run Admitad adapter contract tests
         run: node --test test/admitadAdapter.test.js
+      - name: Run Admitad sync wiring tests
+        run: node --test test/admitadSyncWiring.test.js
