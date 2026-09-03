@@ -1,0 +1,67 @@
+name: Backend Full Regression
+
+on:
+  push:
+    branches:
+      - fix/mbo-rewards-backend-final-corrections
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - 'prisma/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/backend-full-regression.yml'
+  pull_request:
+    branches: [backend1]
+  workflow_dispatch:
+
+jobs:
+  full-regression:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/mbo_ci
+      DIRECT_URL: postgresql://ci:ci@localhost:5432/mbo_ci
+      BACKEND_URL: http://127.0.0.1:3001
+      FRONTEND_URL: http://127.0.0.1:3000
+      JWT_SECRET: ci-jwt-secret-only
+      OAUTH_TOKEN_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate Prisma client
+        run: npx prisma generate
+      - name: Validate Prisma schema
+        run: npx prisma validate
+      - name: Assert no legacy finance calculation call sites
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -R --line-number --fixed-strings 'allowClientExceedSupplier: true' src; then
+            echo 'Legacy negative-margin bypass remains in runtime source.' >&2
+            exit 1
+          fi
+          if grep -R --line-number --fixed-strings 'this.calculate({' src/modules/finance; then
+            echo 'Legacy finance calculator call remains in finance runtime.' >&2
+            exit 1
+          fi
+          if grep -R --line-number --fixed-strings 'commissionRepo.findEffectiveForAssignment' src/modules/finance; then
+            echo 'Legacy single-rule finance lookup remains in finance runtime.' >&2
+            exit 1
+          fi
+          legacy_calculate_refs=$(grep -R --line-number --fixed-strings 'calculateCommission' src/modules/finance \
+            --exclude='commissionCalculation.service.js' \
+            --exclude='index.js' || true)
+          if [ -n "$legacy_calculate_refs" ]; then
+            echo "$legacy_calculate_refs"
+            echo 'Unexpected legacy calculateCommission finance call site remains.' >&2
+            exit 1
+          fi
+      - name: Run full backend test suite
+        run: npm test
