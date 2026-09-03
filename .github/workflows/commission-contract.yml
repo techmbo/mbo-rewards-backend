@@ -104,6 +104,8 @@ jobs:
         run: node --test test/reconciliationEvidenceSafety.test.js
       - name: Run client payable finance chain tests
         run: node --test test/paymentStateFinanceSafety.test.js
+      - name: Run deterministic client commercial finance recognition tests
+        run: node --test test/financialTransactionClientCommercialRuntime.test.js
       - name: Run order status approval safety tests
         run: node --test test/orderStatusApprovalSafety.test.js
       - name: Run nine-network registry coverage tests
