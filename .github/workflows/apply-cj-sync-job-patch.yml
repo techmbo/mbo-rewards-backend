@@ -1,0 +1,39 @@
+name: Apply CJ Sync Job Patch
+
+on:
+  push:
+    branches:
+      - fix/mbo-rewards-backend-final-corrections
+    paths:
+      - 'scripts/apply-cj-sync-job-patch.mjs'
+      - '.github/workflows/apply-cj-sync-job-patch.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-cj-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout correction branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/mbo-rewards-backend-final-corrections
+          fetch-depth: 0
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Apply deterministic CJ sync patch
+        run: node scripts/apply-cj-sync-job-patch.mjs
+      - name: Commit CJ sync integration
+        run: |
+          if git diff --quiet -- src/jobs/sync.job.js; then
+            echo "CJ sync integration already applied; nothing to commit."
+            exit 0
+          fi
+          git config user.name "MBO Group"
+          git config user.email "tech@marketingblueocean.com"
+          git add src/jobs/sync.job.js
+          git commit -m "Wire CJ publisher discovery into sync runtime"
+          git push origin HEAD:fix/mbo-rewards-backend-final-corrections
