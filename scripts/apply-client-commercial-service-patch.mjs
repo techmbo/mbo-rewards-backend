@@ -76,6 +76,30 @@ service = service.replace(
 
 fs.writeFileSync(servicePath, service);
 
+const enginePath = "src/modules/commercial/commercialRuleEngine.js";
+let engine = fs.readFileSync(enginePath, "utf8");
+
+// Legacy calculator is compatibility-only. It must not bypass the platform-wide
+// negative-margin rule. Approved subsidies are handled by the deterministic
+// clientCommercialCalculation/runtime path, not by an unscoped boolean here.
+engine = engine.replace(/\n\s*allowClientExceedSupplier: true,/g, "");
+engine = engine.replace(
+  `  if (kind === V15_RULE_TYPES.MANUAL_APPROVED_CLIENT_COMMISSION) {
+    if (!clientCommissionRule.manualApproved) {
+      return fail("manual_commission_not_approved");
+    }`,
+  `  if (kind === V15_RULE_TYPES.MANUAL_APPROVED_CLIENT_COMMISSION) {
+    if (
+      !clientCommissionRule.manualApproved ||
+      !clientCommissionRule.manualApprovedAt ||
+      !clientCommissionRule.manualApprovedBy
+    ) {
+      return fail("manual_commission_not_approved");
+    }`,
+);
+
+fs.writeFileSync(enginePath, engine);
+
 const validatorPath = "src/modules/commercial/validators/schemas.js";
 let validators = fs.readFileSync(validatorPath, "utf8");
 
@@ -123,28 +147,13 @@ validators = validators.replace(
     manualApprovedBy: z.string().max(200).optional().nullable(),`,
 );
 
-// The same field pair occurs in both create and update schemas; ensure the update schema is covered too.
 const manualFieldNeedle = `    manualApproved: z.boolean().optional(),\n    manualApprovedBy: z.string().max(200).optional().nullable(),`;
 validators = validators.replace(
   manualFieldNeedle,
   `    manualApproved: z.boolean().optional(),\n    manualApprovedAt: z.coerce.date().optional().nullable(),\n    manualApprovedBy: z.string().max(200).optional().nullable(),`,
 );
 
-if (validators.endsWith("  });\n")) {
-  validators = validators.replace(
-    /export const updateCommissionRuleBodySchema = z\n  \.object\(([\s\S]*?)\n  \}\);\n$/,
-    (match) => match,
-  );
-}
-
-// Add the focused partial-update approval refinement without applying create-only ratio rules.
 if (!validators.includes(".superRefine(refineManualApprovalEvidence);\n")) {
-  validators = validators.replace(
-    `export const updateCommissionRuleBodySchema = z
-  .object({`,
-    `export const updateCommissionRuleBodySchema = z
-  .object({`,
-  );
   validators = validators.replace(
     /export const updateCommissionRuleBodySchema = z([\s\S]*?)\n  \}\);\n$/,
     (full) => full.replace(/\n  \}\);\n$/, "\n  })\n  .superRefine(refineManualApprovalEvidence);\n"),
@@ -152,4 +161,4 @@ if (!validators.includes(".superRefine(refineManualApprovalEvidence);\n")) {
 }
 
 fs.writeFileSync(validatorPath, validators);
-console.log("Client commercial approval and condition hardening patch applied.");
+console.log("Client commercial approval, condition, and legacy finance hardening patch applied.");
