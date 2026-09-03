@@ -96,10 +96,17 @@ const CATALOG = Object.freeze({
     }),
   ]),
   admitad: Object.freeze([
-    obj({ sourceObject: "programs", label: "Programs", endpoint: "programs", live: false, entityType: "campaign" }),
-    obj({ sourceObject: "coupons", label: "Coupons", endpoint: "coupons", live: false, entityType: "coupon" }),
-    obj({ sourceObject: "actions", label: "Actions", endpoint: "actions", live: false, entityType: "conversion" }),
-    obj({ sourceObject: "product_feeds", label: "Product Feeds", endpoint: "product feeds", live: false, entityType: "product" }),
+    obj({ sourceObject: "programs", label: "Programs", endpoint: "GET /advcampaigns/", live: true, entityType: "campaign" }),
+    obj({ sourceObject: "coupons", label: "Coupons", endpoint: "GET /coupons/", live: true, entityType: "coupon" }),
+    obj({ sourceObject: "actions", label: "Actions", endpoint: "GET /statistics/actions/", live: true, entityType: "conversion" }),
+    obj({
+      sourceObject: "product_feeds",
+      label: "Product Feeds",
+      endpoint: "product feeds",
+      live: false,
+      entityType: "product",
+      notes: "Product feed remains declared until a live publisher CSV/XML fixture is captured.",
+    }),
   ]),
   cj: Object.freeze([
     obj({ sourceObject: "advertisers", label: "Advertisers", endpoint: "advertisers", live: false, entityType: "campaign" }),
