@@ -38,24 +38,31 @@ describe("MBO nine-network registry", () => {
     assert.equal(isSupplierRegistered("vCommission"), true);
   });
 
-  it("registers Admitad while keeping CJ and Rakuten gated", () => {
+  it("registers Admitad and the Rakuten foundation while keeping CJ gated", () => {
     const registered = new Set(listRegisteredSuppliers());
+
     assert.equal(registered.has("ADMITAD"), true);
     assert.equal(isSupplierRegistered("ADMITAD"), true);
     assert.equal(getSupplierCapabilities("ADMITAD").implementationStatus, "IMPLEMENTED");
 
-    for (const key of ["CJ", "RAKUTEN"]) {
-      assert.equal(registered.has(key), false);
-      assert.equal(isSupplierRegistered(key), false);
-      assert.throws(
-        () => createSupplierAdapter(key),
-        (error) => {
-          assert.equal(error.code, "ADAPTER_NOT_IMPLEMENTED");
-          assert.equal(error.supplierKey, key);
-          return true;
-        },
-      );
-    }
+    assert.equal(registered.has("RAKUTEN"), true);
+    assert.equal(isSupplierRegistered("RAKUTEN"), true);
+    assert.equal(
+      getSupplierCapabilities("RAKUTEN").implementationStatus,
+      "IMPLEMENTED_FOUNDATION",
+    );
+    assert.doesNotThrow(() => createSupplierAdapter("RAKUTEN", { accessToken: "test-token" }));
+
+    assert.equal(registered.has("CJ"), false);
+    assert.equal(isSupplierRegistered("CJ"), false);
+    assert.throws(
+      () => createSupplierAdapter("CJ"),
+      (error) => {
+        assert.equal(error.code, "ADAPTER_NOT_IMPLEMENTED");
+        assert.equal(error.supplierKey, "CJ");
+        return true;
+      },
+    );
   });
 
   it("keeps CJ conversion schema explicitly gated on live verification", () => {
@@ -68,5 +75,16 @@ describe("MBO nine-network registry", () => {
   it("keeps payment evidence separate from order approval in Admitad notes", () => {
     const admitad = getSupplierCapabilities("ADMITAD");
     assert.match(admitad.notes.join(" "), /do not collapse payment evidence into order approval/i);
+  });
+
+  it("keeps Rakuten Events and Advanced Reports financially separated", () => {
+    const rakuten = getSupplierCapabilities("RAKUTEN");
+    assert.equal(rakuten.capabilities.includes("CONVERSIONS"), true);
+    assert.equal(rakuten.capabilities.includes("PAYMENTS"), true);
+    assert.equal(rakuten.capabilities.includes("COUPONS"), false);
+    assert.equal(rakuten.capabilities.includes("PRODUCTS"), false);
+    assert.match(rakuten.notes.join(" "), /Events are directional recent transaction components/i);
+    assert.match(rakuten.notes.join(" "), /never automatic MBO receipt evidence/i);
+    assert.match(rakuten.notes.join(" "), /XML ingestion remains gated/i);
   });
 });
