@@ -74,6 +74,7 @@ import { logger } from "../platform/logging/logger.js";
 import { syncImpactAccount, syncPartnerizeAccount, syncAwinAccount } from "./waveESupplierSync.js";
 import { syncAdmitadAccount } from "./admitadSupplierSync.js";
 import { syncRakutenAccount } from "./rakutenSupplierSync.js";
+import { syncCjAccount } from "./cjSupplierSync.js";
 import {
   fetchOptimiseSourceObject,
   fetchTrackierSourceObject,
@@ -392,6 +393,7 @@ async function countAllSyncAccounts() {
   const awinAccounts = await listMarketplaceAccounts("awin");
   const admitadAccounts = await listMarketplaceAccounts("admitad");
   const rakutenAccounts = await listMarketplaceAccounts("rakuten");
+  const cjAccounts = await listMarketplaceAccounts("cj");
   let total =
     boostinyAccounts.length +
     trackierAccounts.length +
@@ -399,7 +401,8 @@ async function countAllSyncAccounts() {
     partnerizeAccounts.length +
     awinAccounts.length +
     admitadAccounts.length +
-    rakutenAccounts.length;
+    rakutenAccounts.length +
+    cjAccounts.length;
   for (const region of ["sea", "mena", "uk"]) {
     // eslint-disable-next-line no-await-in-loop
     const accounts = await listMarketplaceAccounts(`optimise_${region}`);
@@ -426,7 +429,7 @@ async function countSyncAccountsForPlatform(platform, accountLabel) {
     return [...new Set(accounts.map((acc) => acc.accountLabel).filter(Boolean))].length;
   }
 
-  if (["impact", "partnerize", "awin", "admitad", "rakuten"].includes(platform)) {
+  if (["impact", "partnerize", "awin", "admitad", "rakuten", "cj"].includes(platform)) {
     const accounts = await listMarketplaceAccounts(platform);
     return [...new Set(accounts.map((acc) => acc.accountLabel).filter(Boolean))].length;
   }
@@ -1700,6 +1703,12 @@ export async function syncPlatformAccount(platform, accountLabel, options = {}) 
         success: !accountResult?.failed && !accountResult?.skipped,
       });
       result = { [accountLabel || "default"]: accountResult };
+    } else if (platform === "cj") {
+      const accountResult = await syncCjAccount(accountLabel || "default");
+      recordAccountSyncComplete({
+        success: !accountResult?.failed && !accountResult?.skipped,
+      });
+      result = { [accountLabel || "default"]: accountResult };
     } else if (platform === "rakuten") {
       const accountResult = await syncRakutenAccount(accountLabel || "default");
       recordAccountSyncComplete({
@@ -1775,7 +1784,12 @@ export async function syncAll(options = {}) {
       const rakuten = await syncRakutenAccount("default");
       jobTimer.end("rakutenMs");
 
-      const result = { boostiny, optimise, trackier, impact, partnerize, awin, admitad, rakuten };
+      setSyncStage("cj");
+      jobTimer.start("cjMs");
+      const cj = await syncCjAccount("default");
+      jobTimer.end("cjMs");
+
+      const result = { boostiny, optimise, trackier, impact, partnerize, awin, admitad, rakuten, cj };
       jobTimer.end("totalJobMs");
 
       const timings = mergeTimings(jobTimer.toObject(), drainAccountTimings());
