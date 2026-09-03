@@ -97,6 +97,14 @@ function normalizeConditionType(value) {
   return SOURCE_CONDITION_TYPE_MAP[key] ?? "OTHER_SOURCE_CONDITION";
 }
 
+/**
+ * Public alias for network-specific mappers (e.g. Optimise commission groups) so
+ * source condition structures normalize through one shared dimension map.
+ */
+export function conditionsFromSourceEntry(entry = {}) {
+  return conditionsFromEntry(entry);
+}
+
 function conditionsFromEntry(entry = {}) {
   const conditions = [];
 

@@ -114,6 +114,7 @@ export function resolveResourceKey(entityType, metadata = null) {
     product: "products",
     click: "clicks",
     reporting: "reporting",
+    commission_group: "commission_groups",
   };
   return map[type] || type || "unknown";
 }

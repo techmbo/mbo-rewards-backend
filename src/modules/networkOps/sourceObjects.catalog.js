@@ -48,6 +48,15 @@ const CATALOG = Object.freeze({
     obj({ sourceObject: "payment_overview", label: "Payment Overview", endpoint: "GET /payments", live: true, entityType: "payment" }),
     obj({ sourceObject: "products", label: "Products", endpoint: "product feed", live: true, entityType: "product" }),
     obj({ sourceObject: "reporting", label: "Reporting", endpoint: "POST /reporting/", live: true, entityType: "performance" }),
+    obj({
+      sourceObject: "commission_groups",
+      label: "Commission Groups",
+      endpoint: "GET /campaigns/{campaignId}/commission-groups",
+      live: true,
+      entityType: "commission_group",
+      notes:
+        "Campaign-scoped detailed supplier commission structure (one request per applicable campaign). Feeds SupplierCommissionRule[] / SupplierCommissionCondition[]; campaign commissionCost stays summary evidence.",
+    }),
     obj({ sourceObject: "invoices", label: "Invoices", endpoint: "GET /invoices", live: true, entityType: "payment" }),
   ]),
   impact: Object.freeze([

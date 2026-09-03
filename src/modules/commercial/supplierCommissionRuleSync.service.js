@@ -34,24 +34,43 @@ function resolveSourceEvidenceAt(record = {}) {
   );
 }
 
-export async function upsertCommissionRulesForPreparedCampaigns({
-  networkSource,
-  preparedRecords = [],
-  sourceAccountKey,
-}) {
-  if (!preparedRecords.length) return { upserted: 0 };
+export async function upsertCommissionRulesForPreparedCampaigns(
+  {
+    networkSource,
+    preparedRecords = [],
+    sourceAccountKey,
+    /**
+     * Campaign ids whose detailed supplier commission structure was ingested from a
+     * dedicated endpoint (e.g. Optimise GET /campaigns/{id}/commission-groups) in this
+     * sync. Their campaign-level summary commission (commissionCost, first group) stays
+     * display evidence and must not be fanned out into duplicate canonical rules.
+     */
+    skipCampaignIds = null,
+  },
+  deps = {},
+) {
+  const db = deps.prisma ?? prisma;
+  if (!preparedRecords.length) return { upserted: 0, skippedDetailedCampaigns: 0 };
 
   const { supplier, supplierRegion } = parseNetworkSource(networkSource);
   const { sourceAccountLabel } = parseSourceAccountLabel(sourceAccountKey ?? "default");
+  const skip = new Set([...(skipCampaignIds ?? [])].map(String));
+  const eligibleRecords = skip.size
+    ? preparedRecords.filter((record) => {
+        const campaignId = resolveCampaignId(record.originalPayload ?? {});
+        return campaignId == null || !skip.has(String(campaignId));
+      })
+    : preparedRecords;
+  const skippedDetailedCampaigns = preparedRecords.length - eligibleRecords.length;
   const embedded = collectEmbeddedCommissionRulesFromCampaigns(
-    preparedRecords.map((record) => ({ originalPayload: record.originalPayload })),
+    eligibleRecords.map((record) => ({ originalPayload: record.originalPayload })),
     { sourceObject: "campaigns" },
   );
-  if (!embedded.length) return { upserted: 0 };
+  if (!embedded.length) return { upserted: 0, skippedDetailedCampaigns };
 
   const campaignIds = [
     ...new Set(
-      preparedRecords
+      eligibleRecords
         .map((record) => resolveCampaignId(record.originalPayload ?? {}))
         .filter(Boolean)
         .map(String),
@@ -59,7 +78,7 @@ export async function upsertCommissionRulesForPreparedCampaigns({
   ];
 
   const supplierCampaigns = campaignIds.length
-    ? await prisma.supplierCampaign.findMany({
+    ? await db.supplierCampaign.findMany({
         where: {
           supplier,
           supplierRegion,
@@ -76,13 +95,13 @@ export async function upsertCommissionRulesForPreparedCampaigns({
     supplierCampaigns.map((row) => [String(row.supplierCampaignId), row]),
   );
   const preparedByCampaignId = new Map(
-    preparedRecords
+    eligibleRecords
       .map((record) => [resolveCampaignId(record.originalPayload ?? {}), record])
       .filter(([campaignId]) => campaignId != null)
       .map(([campaignId, record]) => [String(campaignId), record]),
   );
 
-  const ruleService = new SupplierCommissionRuleService();
+  const ruleService = deps.ruleService ?? new SupplierCommissionRuleService({ prisma: db });
   let upserted = 0;
 
   for (const rule of embedded) {
@@ -170,5 +189,5 @@ export async function upsertCommissionRulesForPreparedCampaigns({
     upserted += 1;
   }
 
-  return { upserted };
+  return { upserted, skippedDetailedCampaigns };
 }

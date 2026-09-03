@@ -317,6 +317,9 @@ function commissionValueField(entry = {}) {
   return { valueField: null, valueKind: null };
 }
 
+const HAS_EXPLICIT_UNIT_RE =
+  /%|\bor\b|\$|£|€|₹|\b(?:rp|rm|rs\.?|usd|aed|sar|gbp|eur|idr|myr|sgd|hkd|thb|inr)\b/i;
+
 function structuredFacts(entry, { fallbackUnit, fallbackCurrency } = {}) {
   if (entry == null || entry === "") return [];
   if (typeof entry !== "object") {
@@ -344,7 +347,9 @@ function structuredFacts(entry, { fallbackUnit, fallbackCurrency } = {}) {
     );
   }
 
-  if (typeof valueField === "string" && /%|or\b|\$|rp|£|€/i.test(valueField)) {
+  // Route explicit percent / currency text ("8.20% Or $17.50", "USD 20", "Rp80000") through the
+  // text parser so an ISO-coded fixed amount is never misread as a percentage.
+  if (typeof valueField === "string" && HAS_EXPLICIT_UNIT_RE.test(valueField)) {
     const parsed = parseCommissionText(valueField);
     if (parsed.length) {
       return withEffectiveWindow(

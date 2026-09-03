@@ -59,6 +59,14 @@ function resolveExternalId(rawData, fallbackPrefix, index, entityType = null) {
     return `${fallbackPrefix}-${rawData.id}`;
   }
 
+  if (rawData?.record_source === "commission_group") {
+    const campaignId = rawData?.campaignId ?? rawData?.sourceCampaignId ?? "unknown-campaign";
+    const groupId = rawData?.id ?? rawData?.commissionGroupId ?? rawData?.groupId ?? null;
+    return groupId != null && String(groupId).trim() !== ""
+      ? `${fallbackPrefix}-${campaignId}-${groupId}`
+      : `${fallbackPrefix}-${campaignId}-index-${index}`;
+  }
+
   if (rawData?.record_source === "deal" && rawData?.id != null) {
     return `${fallbackPrefix}-deal-${rawData.id}`;
   }
@@ -365,6 +373,8 @@ export async function upsertManyRawEntities({
   sourceAccountKey,
   onTiming,
   evidence = null,
+  /** Campaign ids whose detailed commission rules were ingested separately this sync. */
+  commissionRuleSkipCampaignIds = null,
 }) {
   if (!rows.length) {
     if (onTiming) onTiming({ dbWriteMs: 0, fieldExtractionMs: 0, batchUpsertMs: 0, rowUpsertMs: 0 });
@@ -457,6 +467,7 @@ export async function upsertManyRawEntities({
           networkSource,
           preparedRecords,
           sourceAccountKey,
+          skipCampaignIds: commissionRuleSkipCampaignIds,
         });
       } catch {
         // Commission rule fan-out must not block entity staging.

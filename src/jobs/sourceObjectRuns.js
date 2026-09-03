@@ -154,6 +154,10 @@ export const OPTIMISE_RESOURCE_IDENTITY = Object.freeze({
   payments: { sourceObject: "payment_overview", endpoint: "GET /payments" },
   invoices: { sourceObject: "invoices", endpoint: "GET /invoices" },
   voucherCodes: { sourceObject: "voucher_codes", endpoint: "GET /vouchercodes" },
+  commissionGroups: {
+    sourceObject: "commission_groups",
+    endpoint: "GET /campaigns/{campaignId}/commission-groups",
+  },
 });
 
 export async function fetchOptimiseSourceObject(

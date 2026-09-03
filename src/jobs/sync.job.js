@@ -76,6 +76,12 @@ import { syncAdmitadAccount } from "./admitadSupplierSync.js";
 import { syncRakutenAccount } from "./rakutenSupplierSync.js";
 import { syncCjAccount } from "./cjSupplierSync.js";
 import {
+  fetchOptimiseCommissionGroupSourceObject,
+  loadStagedOptimiseCampaignRows,
+  optimiseCommissionGroupSyncConfig,
+} from "./optimiseCommissionGroupSync.js";
+import { OptimiseCommissionGroupPersistenceService } from "../modules/commercial/optimiseCommissionGroupPersistence.service.js";
+import {
   fetchOptimiseSourceObject,
   fetchTrackierSourceObject,
   includeSourceObject,
@@ -968,6 +974,39 @@ async function syncOptimiseRegion(region, accountLabel) {
         ),
   ]);
 
+  // Detailed commission groups are campaign-scoped (one GET per applicable campaign) and
+  // run after the campaign list, sequentially through the shared rate limiter.
+  const commissionGroupConfig = optimiseCommissionGroupSyncConfig();
+  const wantCommissionGroups =
+    commissionGroupConfig.enabled &&
+    (!requested || requested === "commission_groups") &&
+    (refreshCampaigns || requested === "commission_groups");
+  let commissionGroupsResult = null;
+  if (wantCommissionGroups) {
+    let campaignRowsForGroups = campaignsResult.error ? [] : asArray(campaignsResult.rows);
+    if (!campaignRowsForGroups.length && !refreshCampaigns) {
+      campaignRowsForGroups = await loadStagedOptimiseCampaignRows({
+        networkSource: platform,
+        sourceAccountKey: accountLabel,
+      });
+    }
+    commissionGroupsResult = campaignsResult.error
+      ? await fetchOptimiseSourceObject(
+          "commissionGroups",
+          credentials,
+          async () => [],
+          { skipped: true, skipReason: "campaigns_fetch_failed" },
+          srcCtx,
+        )
+      : await fetchOptimiseCommissionGroupSourceObject({
+          adapter,
+          credentials,
+          campaignRows: campaignRowsForGroups,
+          ctx: srcCtx,
+          config: commissionGroupConfig,
+        });
+  }
+
   accountTimer.end("apiFetchMs");
 
   const resourceResults = [
@@ -979,6 +1018,7 @@ async function syncOptimiseRegion(region, accountLabel) {
     paymentsResult,
     invoicesResult,
     voucherCodesResult,
+    ...(commissionGroupsResult ? [commissionGroupsResult] : []),
   ];
 
   const warnings = summariseOptimiseResourceWarnings(resourceResults, credentials);
@@ -1007,6 +1047,32 @@ async function syncOptimiseRegion(region, accountLabel) {
   const entityTiming = createEntityTimingCollector();
   let removedDuplicateCampaigns = 0;
 
+  // RAW/SOURCE evidence for commission groups (RawPayload + Entity commission_group).
+  const commissionGroupPersistence = new OptimiseCommissionGroupPersistenceService();
+  const commissionGroupByCampaign = commissionGroupsResult?.byCampaign ?? new Map();
+  let detailedCommissionCampaignIds = new Set();
+  if (commissionGroupsResult && !commissionGroupsResult.error && !commissionGroupsResult.skipped) {
+    await upsertManyRawEntities({
+      networkSource,
+      entityType: "commission_group",
+      rows: commissionGroupsResult.rows,
+      externalIdPrefix: `${networkSource}-commission-group`,
+      sourceAccountKey: accountLabel,
+      onTiming: entityTiming.onTiming,
+      evidence: evidenceFromRunSummary(commissionGroupsResult.syncRun),
+    });
+    // Precedence: campaigns with detailed group outcomes keep commissionCost as display
+    // evidence only — the campaign-level fan-out is skipped for them (no duplicate rules).
+    const planned = commissionGroupPersistence.planCandidates({
+      networkSource,
+      sourceAccountLabel: accountLabel || "default",
+      byCampaign: commissionGroupByCampaign,
+    });
+    for (const [campaignId, candidates] of planned) {
+      if (candidates.length) detailedCommissionCampaignIds.add(campaignId);
+    }
+  }
+
   if (refreshCampaigns) {
     await upsertManyRawEntities({
       networkSource,
@@ -1016,8 +1082,25 @@ async function syncOptimiseRegion(region, accountLabel) {
       sourceAccountKey: accountLabel,
       onTiming: entityTiming.onTiming,
       evidence: evidenceFromRunSummary(campaignsResult.syncRun),
+      commissionRuleSkipCampaignIds: detailedCommissionCampaignIds,
     });
     removedDuplicateCampaigns = await cleanupOptimiseCampaignDuplicates(networkSource, accountLabel);
+  }
+
+  // Detailed rules → canonical SupplierCommissionRule[] with historical versioning.
+  // Failed campaign requests are reported only; their existing rules stay untouched.
+  let commissionGroupRules = null;
+  if (commissionGroupsResult && !commissionGroupsResult.error && !commissionGroupsResult.skipped) {
+    try {
+      commissionGroupRules = await commissionGroupPersistence.persistFetchedGroups({
+        networkSource,
+        sourceAccountLabel: accountLabel || "default",
+        byCampaign: commissionGroupByCampaign,
+        syncRunId: commissionGroupsResult.syncRun?.syncRunId ?? null,
+      });
+    } catch (error) {
+      commissionGroupRules = { error: error?.message || String(error) };
+    }
   }
 
   await upsertManyRawEntities({
@@ -1120,6 +1203,7 @@ async function syncOptimiseRegion(region, accountLabel) {
     payments: paymentsResult.rows.length,
     invoices: optimiseInvoices.length,
     vouchers: refreshCoupons ? voucherCodesResult.rows.length : 0,
+    commissionGroups: commissionGroupsResult && !commissionGroupsResult.error ? commissionGroupsResult.rows.length : 0,
   };
 
   const totalSaved = Object.values(savedCounts).reduce((sum, count) => sum + count, 0);
@@ -1155,6 +1239,19 @@ async function syncOptimiseRegion(region, accountLabel) {
     mboLinkClickEnrich: mboClickEnrich.updated,
     conversionCouponEnrich: couponEnrich.updated,
     sourceObjectRuns: resourceResults.map((r) => r.syncRun).filter(Boolean),
+    commissionGroupSync: commissionGroupsResult
+      ? {
+          ...(commissionGroupsResult.campaignScope ?? {}),
+          skipped: Boolean(commissionGroupsResult.skipped),
+          error: commissionGroupsResult.error?.message ?? null,
+          rulesPersisted: commissionGroupRules?.rulesPersisted ?? 0,
+          financeReady: commissionGroupRules?.financeReady ?? 0,
+          reviewRequired: commissionGroupRules?.reviewRequired ?? 0,
+          campaignsWithDetailedRules: commissionGroupRules?.campaignsWithDetailedRules ?? 0,
+          supersededSummaryRules: commissionGroupRules?.supersededSummaryRules ?? 0,
+          persistErrors: commissionGroupRules?.persistErrors ?? (commissionGroupRules?.error ? [{ message: commissionGroupRules.error }] : []),
+        }
+      : null,
     ...savedCounts,
   };
 }

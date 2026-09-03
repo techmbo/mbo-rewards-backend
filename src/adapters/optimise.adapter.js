@@ -160,35 +160,113 @@ export function toOptimiseReportingDate(isoDate) {
   return `${day}/${month}/${year}`;
 }
 
+/**
+ * One rate-limited Optimise request with the shared retry policy and 429 back-off.
+ * Every Optimise API call (paginated or campaign-scoped) goes through this path.
+ */
+async function requestWithOptimiseLimits(fn) {
+  await optimiseRateLimiter.acquireSlot();
+  try {
+    return await requestWithRetry(fn, { retries: 6, delayMs: 2000 });
+  } catch (error) {
+    if (error?.response?.status === 429) {
+      const retryAfterHeader = error?.response?.headers?.["retry-after"];
+      const retryAfterSeconds = Number(retryAfterHeader);
+      const waitMs = Number.isFinite(retryAfterSeconds) ? retryAfterSeconds * 1000 : 60000;
+      optimiseRateLimiter.resetAfterRateLimit(waitMs);
+    }
+    throw error;
+  }
+}
+
+const COMMISSION_GROUP_ARRAY_KEYS = [
+  "response",
+  "data",
+  "results",
+  "items",
+  "commissionGroups",
+  "commission_groups",
+  "commissionGroup",
+  "groups",
+];
+
+/**
+ * Rows of GET /campaigns/{campaignId}/commission-groups.
+ *
+ * Unlike the generic extractRows(), an unrecognised non-empty object is never
+ * reported as "zero groups": that would silently turn a broken envelope into a
+ * campaign with no commission rules. Recognised shapes: a bare array, or an object
+ * whose response/data/results/items/commissionGroups/commission_groups/commissionGroup/
+ * groups member is an array (one level of payload.data / data.commissionGroups nesting).
+ *
+ * @returns {{ groups: object[], envelopeKind: string }}
+ */
+export function extractCommissionGroupRows(responseData) {
+  if (responseData == null || responseData === "") return { groups: [], envelopeKind: "empty" };
+  if (Array.isArray(responseData)) return { groups: responseData, envelopeKind: "array" };
+  if (typeof responseData !== "object") {
+    const error = new Error("Optimise commission-groups response is not JSON");
+    error.code = "optimise_commission_groups_unrecognised_envelope";
+    throw error;
+  }
+
+  const candidates = [responseData, responseData.payload, responseData.data].filter(
+    (value) => value && typeof value === "object" && !Array.isArray(value),
+  );
+  for (const container of candidates) {
+    for (const key of COMMISSION_GROUP_ARRAY_KEYS) {
+      if (Array.isArray(container[key])) {
+        return {
+          groups: container[key],
+          envelopeKind: container === responseData ? key : `${container === responseData.payload ? "payload" : "data"}.${key}`,
+        };
+      }
+    }
+  }
+
+  // A single commission-group object (has an id) is one row.
+  const single = responseData.data && typeof responseData.data === "object" ? responseData.data : responseData;
+  if (single && typeof single === "object" && !Array.isArray(single)) {
+    const keys = Object.keys(single);
+    if (!keys.length) return { groups: [], envelopeKind: "empty_object" };
+    if (keys.includes("id") || keys.includes("commissionGroupId") || keys.includes("groupId")) {
+      return { groups: [single], envelopeKind: "single_object" };
+    }
+  }
+
+  const error = new Error(
+    `Optimise commission-groups response envelope not recognised (keys: ${Object.keys(responseData).slice(0, 8).join(", ")})`,
+  );
+  error.code = "optimise_commission_groups_unrecognised_envelope";
+  error.responseKeys = Object.keys(responseData).slice(0, 20);
+  throw error;
+}
+
+function assertCampaignId(campaignId) {
+  const text = campaignId == null ? "" : String(campaignId).trim();
+  if (!text || /[\/\s?#]/.test(text)) {
+    const error = new Error(`Invalid Optimise campaignId for commission-groups: ${JSON.stringify(campaignId)}`);
+    error.code = "optimise_commission_groups_invalid_campaign_id";
+    throw error;
+  }
+  return text;
+}
+
 async function fetchOffsetPaginated(httpClient, endpoint, baseParams) {
   const rows = [];
   let offset = 0;
   const limit = Number(baseParams.limit ?? OPTIMISE_PAGE_LIMIT);
 
   for (;;) {
-    await optimiseRateLimiter.acquireSlot();
-    let response;
-    try {
-      response = await requestWithRetry(
-        () =>
-          httpClient.get(endpoint, {
-            params: {
-              ...baseParams,
-              offset,
-              limit,
-            },
-          }),
-        { retries: 6, delayMs: 2000 },
-      );
-    } catch (error) {
-      if (error?.response?.status === 429) {
-        const retryAfterHeader = error?.response?.headers?.["retry-after"];
-        const retryAfterSeconds = Number(retryAfterHeader);
-        const waitMs = Number.isFinite(retryAfterSeconds) ? retryAfterSeconds * 1000 : 60000;
-        optimiseRateLimiter.resetAfterRateLimit(waitMs);
-      }
-      throw error;
-    }
+    const response = await requestWithOptimiseLimits(() =>
+      httpClient.get(endpoint, {
+        params: {
+          ...baseParams,
+          offset,
+          limit,
+        },
+      }),
+    );
 
     const pageRows = extractRows(response.data);
     rows.push(...pageRows);
@@ -249,20 +327,23 @@ export function createOptimiseAdapter({
   baseURL = "https://public.api.optimisemedia.com/v1",
   agencyId,
   contactId,
+  httpClient: injectedHttpClient = null,
 }) {
   if (!agencyId || !contactId) {
     throw new Error("Optimise adapter requires agencyId and contactId");
   }
 
-  const httpClient = createHttpClient({
-    baseURL,
-    apiKey,
-    headers: {
-      apikey: String(apiKey),
-      "x-agency-id": String(agencyId),
-      "x-contact-id": String(contactId),
-    },
-  });
+  const httpClient =
+    injectedHttpClient ??
+    createHttpClient({
+      baseURL,
+      apiKey,
+      headers: {
+        apikey: String(apiKey),
+        "x-agency-id": String(agencyId),
+        "x-contact-id": String(contactId),
+      },
+    });
 
   const commonParams = { agencyId, contactId };
 
@@ -277,6 +358,7 @@ export function createOptimiseAdapter({
           "PAYMENTS",
           "INVOICES",
           "REPORTING",
+          "COMMISSION_GROUPS",
           "MULTI_CURRENCY",
           "TRACKING_SUBID",
         ],
@@ -298,6 +380,30 @@ export function createOptimiseAdapter({
           params: commonParams,
         }),
       ).then((res) => res.data);
+    },
+    /**
+     * Detailed supplier commission groups for one campaign:
+     * GET /campaigns/{campaignId}/commission-groups (apikey / x-agency-id / x-contact-id).
+     * Campaign-scoped: callers issue one request per campaign through the shared
+     * rate limiter; failures propagate (never an invented empty success).
+     *
+     * @returns {Promise<{ campaignId: string, groups: object[], envelopeKind: string, httpStatus: number|null, fetchedAt: Date }>}
+     */
+    async fetchCommissionGroups(campaignId) {
+      const id = assertCampaignId(campaignId);
+      const response = await requestWithOptimiseLimits(() =>
+        httpClient.get(`/campaigns/${encodeURIComponent(id)}/commission-groups`, {
+          params: commonParams,
+        }),
+      );
+      const { groups, envelopeKind } = extractCommissionGroupRows(response?.data);
+      return {
+        campaignId: id,
+        groups,
+        envelopeKind,
+        httpStatus: response?.status ?? null,
+        fetchedAt: new Date(),
+      };
     },
     fetchConversions(params = {}) {
       const {

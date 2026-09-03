@@ -1037,3 +1037,21 @@ MBO Rewards syncs affiliate networks into a unified PostgreSQL model, promotes r
 2. Copy tracking URLs from **Assigned Campaigns**.  
 3. Monitor **Performance**; configure bank and withdraw on **Payments**.  
 4. Use **Support** for tickets/campaign requests and API key rotation; adjust org prefs in **Settings**.
+
+## Optimise detailed commission groups
+
+`GET /campaigns/{campaignId}/commission-groups` is a campaign-scoped Optimise resource
+(`commission_groups`): one rate-limited request per applicable campaign, run sequentially
+after the campaign list during campaign refresh. Groups are kept as RAW/SOURCE evidence
+(RawPayload + Entity `commission_group`), normalized by
+`src/modules/commercial/optimiseCommissionGroup.mapper.js` and persisted into
+`SupplierCommissionRule[]` / `SupplierCommissionCondition[]` with historical versioning.
+Bands and source conditions are preserved as child conditions and marked
+`REVIEW_REQUIRED` / `VERIFY_LIVE` (matcher fails closed) until verified live. Campaign
+`commissionCost` stays summary/display evidence once detailed rules exist.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `OPTIMISE_COMMISSION_GROUPS_ENABLED` | `true` | Fetch detailed commission groups during Optimise campaign refresh |
+| `OPTIMISE_COMMISSION_GROUPS_SCOPE` | `joined` | `joined` = only verified JOINED campaigns; `all` = every campaign with an id |
+| `OPTIMISE_COMMISSION_GROUPS_MAX_CAMPAIGNS` | `200` | Upper bound of per-campaign requests per account per sync |

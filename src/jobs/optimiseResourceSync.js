@@ -12,6 +12,16 @@ export const OPTIMISE_RESOURCE_ENDPOINTS = {
   payments: { method: "GET", path: "/payments" },
   invoices: { method: "GET", path: "/invoices" },
   voucherCodes: { method: "GET", path: "/vouchercodes" },
+  /**
+   * Campaign-scoped, not a global paginated list: one request per applicable campaign
+   * (see jobs/optimiseCommissionGroupSync.js). Sync metadata carries the per-campaign
+   * request tally under `campaignScope`.
+   */
+  commissionGroups: {
+    method: "GET",
+    path: "/campaigns/{campaignId}/commission-groups",
+    scope: "campaign",
+  },
 };
 
 function formatEndpoint(resource) {
@@ -106,6 +116,25 @@ export function buildOptimiseSyncMetadata(
     if (result.skipped) {
       entry.skipped = true;
       entry.skipReason = result.skipReason || "skipped";
+    }
+
+    if (result.campaignScope) {
+      entry.scope = "campaign";
+      entry.campaignScope = result.campaignScope;
+      if (!result.error && result.campaignScope.requestsFailed > 0) {
+        entry.success = false;
+        entry.partial = true;
+        failures.push({
+          resource: result.resource,
+          endpoint: result.endpoint,
+          httpStatus: null,
+          retryCount: null,
+          responseMessage: `${result.campaignScope.requestsFailed} of ${result.campaignScope.requestsAttempted} campaign commission-group requests failed`,
+          userMessage:
+            "Some Optimise campaign commission-group requests failed. Existing supplier commission rules for those campaigns were kept unchanged; detailed commission mapping is incomplete until the next successful sync.",
+          campaignIds: (result.campaignScope.failures || []).map((failure) => failure.campaignId),
+        });
+      }
     }
 
     resources[result.resource] = entry;
