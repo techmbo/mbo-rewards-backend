@@ -23,6 +23,7 @@ on:
       - 'src/modules/networkOps/campaignCommissionSummary.contract.js'
       - 'test/admitadAdapter.test.js'
       - 'test/admitadSyncWiring.test.js'
+      - 'test/cjAdapter.test.js'
       - 'test/rakutenAdapter.test.js'
       - 'test/rakutenSyncWiring.test.js'
       - 'test/rakutenOfferCommissionMapper.test.js'
@@ -71,6 +72,7 @@ on:
       - 'src/modules/networkOps/campaignCommissionSummary.contract.js'
       - 'test/admitadAdapter.test.js'
       - 'test/admitadSyncWiring.test.js'
+      - 'test/cjAdapter.test.js'
       - 'test/rakutenAdapter.test.js'
       - 'test/rakutenSyncWiring.test.js'
       - 'test/rakutenOfferCommissionMapper.test.js'
@@ -158,6 +160,8 @@ jobs:
         run: node --test test/admitadAdapter.test.js
       - name: Run Admitad sync wiring tests
         run: node --test test/admitadSyncWiring.test.js
+      - name: Run CJ discovery adapter tests
+        run: node --test test/cjAdapter.test.js
       - name: Run Rakuten adapter contract tests
         run: node --test test/rakutenAdapter.test.js
       - name: Run Rakuten sync wiring tests
