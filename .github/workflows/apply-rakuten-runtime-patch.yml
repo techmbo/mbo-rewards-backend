@@ -1,0 +1,40 @@
+name: Apply Rakuten Runtime Patch
+
+on:
+  push:
+    branches:
+      - fix/mbo-rewards-backend-final-corrections
+    paths:
+      - 'scripts/apply-rakuten-runtime-patch.mjs'
+      - '.github/workflows/apply-rakuten-runtime-patch.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout correction branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/mbo-rewards-backend-final-corrections
+          fetch-depth: 0
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Apply deterministic Rakuten runtime patch
+        run: node scripts/apply-rakuten-runtime-patch.mjs
+      - name: Commit Rakuten orchestration updates
+        run: |
+          if git diff --quiet -- src/jobs/sync.job.js src/modules/order/orderConversionIngestion.contract.js; then
+            echo "Rakuten runtime integration already applied; nothing to commit."
+            exit 0
+          fi
+          git config user.name "MBO Group"
+          git config user.email "tech@marketingblueocean.com"
+          git add src/jobs/sync.job.js src/modules/order/orderConversionIngestion.contract.js
+          git commit -m "Integrate Rakuten into sync orchestration"
+          git push origin HEAD:fix/mbo-rewards-backend-final-corrections
