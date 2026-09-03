@@ -21,14 +21,26 @@ export function parseNetworkSource(networkSource) {
   if (source === "boostiny") {
     return { supplier: "BOOSTINY", supplierRegion: "GLOBAL" };
   }
-  if (source === "trackier") {
+  if (source === "trackier" || source === "vcommission") {
     return { supplier: "TRACKIER", supplierRegion: "GLOBAL" };
   }
   if (source === "partnerize") {
     return { supplier: "PARTNERIZE", supplierRegion: "GLOBAL" };
   }
-  if (source === "impact") {
+  if (source === "impact" || source === "impact_com" || source === "mediapartner") {
     return { supplier: "IMPACT", supplierRegion: "GLOBAL" };
+  }
+  if (source === "awin") {
+    return { supplier: "AWIN", supplierRegion: "GLOBAL" };
+  }
+  if (source === "admitad") {
+    return { supplier: "ADMITAD", supplierRegion: "GLOBAL" };
+  }
+  if (source === "cj") {
+    return { supplier: "CJ", supplierRegion: "GLOBAL" };
+  }
+  if (source === "rakuten") {
+    return { supplier: "RAKUTEN", supplierRegion: "GLOBAL" };
   }
   if (source.startsWith("optimise_")) {
     const regionToken = source.replace("optimise_", "").toUpperCase();
