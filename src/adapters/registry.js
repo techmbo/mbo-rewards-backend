@@ -5,6 +5,7 @@ import { createImpactAdapter } from "./impact.adapter.js";
 import { createPartnerizeAdapter } from "./partnerize.adapter.js";
 import { createAwinAdapter } from "./awin.adapter.js";
 import { createAdmitadAdapter } from "./admitad.adapter.js";
+import { createRakutenAdapter } from "./rakuten.adapter.js";
 import { assertAdapterContract, SUPPLIER_CAPABILITIES } from "./contract.js";
 
 export const KNOWN_SUPPLIER_KEYS = Object.freeze([
@@ -69,10 +70,10 @@ export const SUPPLIER_CAPABILITY_CATALOG = Object.freeze({
     notes: ["Link Search / advertiser discovery are documented.", "Commission Detail and Product Feed GraphQL are account/role/schema dependent.", "Do not declare conversion/payment source fields until the live publisher GraphQL schema and fixture are captured.", "No runnable adapter is registered yet."],
   },
   RAKUTEN: {
-    implementationStatus: "PLANNED",
-    capabilities: [SUPPLIER_CAPABILITIES.CAMPAIGNS, SUPPLIER_CAPABILITIES.COUPONS, SUPPLIER_CAPABILITIES.CONVERSIONS, SUPPLIER_CAPABILITIES.PRODUCTS, SUPPLIER_CAPABILITIES.DEEP_LINK, SUPPLIER_CAPABILITIES.TRACKING_SUBID, SUPPLIER_CAPABILITIES.ORDER_ITEMS, SUPPLIER_CAPABILITIES.PAYMENTS, SUPPLIER_CAPABILITIES.REPORTING],
+    implementationStatus: "IMPLEMENTED_FOUNDATION",
+    capabilities: [SUPPLIER_CAPABILITIES.CAMPAIGNS, SUPPLIER_CAPABILITIES.CONVERSIONS, SUPPLIER_CAPABILITIES.TRACKING_SUBID, SUPPLIER_CAPABILITIES.ORDER_ITEMS, SUPPLIER_CAPABILITIES.PAYMENTS, SUPPLIER_CAPABILITIES.REPORTING],
     pagination: "source_specific",
-    notes: ["Recent Events and Advanced Reports are separate sources with different purposes.", "Events are directional recent transaction evidence, not the sole historical/payment ledger.", "Advanced Reports supply finance/payment reconciliation evidence.", "No runnable adapter is registered yet."],
+    notes: ["Advertisers, Partnerships, Offers, recent Events and Advanced Reports foundation are implemented.", "Events are directional recent transaction components and are not the sole historical/expected-commission ledger.", "Advanced Reports require a separate web security token and provide network payment evidence, never automatic MBO receipt evidence.", "Coupon, Product Search and Link Locator XML ingestion remains gated until the XML ingestion path is wired."],
   },
 });
 
@@ -84,6 +85,7 @@ const FACTORIES = {
   IMPACT: createImpactAdapter,
   AWIN: createAwinAdapter,
   ADMITAD: createAdmitadAdapter,
+  RAKUTEN: createRakutenAdapter,
 };
 
 export function normalizeSupplierKey(value) {
