@@ -89,9 +89,7 @@ export class PromotionJob {
 
     if (shouldRunRakutenCommissionPromotion({ entityTypes, networkSource })) {
       try {
-        summary.rakutenCommissionPromotion = await this.rakutenCommissionPromotion({
-          sourceAccountLabel: networkSource === "rakuten" ? null : null,
-        });
+        summary.rakutenCommissionPromotion = await this.rakutenCommissionPromotion();
       } catch (error) {
         summary.rakutenCommissionPromotion = {
           failed: true,
