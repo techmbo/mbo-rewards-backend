@@ -6,6 +6,7 @@ import { createPartnerizeAdapter } from "./partnerize.adapter.js";
 import { createAwinAdapter } from "./awin.adapter.js";
 import { createAdmitadAdapter } from "./admitad.adapter.js";
 import { createRakutenAdapter } from "./rakuten.adapter.js";
+import { createCjAdapter } from "./cj.adapter.js";
 import { assertAdapterContract, SUPPLIER_CAPABILITIES } from "./contract.js";
 
 export const KNOWN_SUPPLIER_KEYS = Object.freeze([
@@ -64,10 +65,10 @@ export const SUPPLIER_CAPABILITY_CATALOG = Object.freeze({
     notes: ["OAuth2 Bearer publisher API foundation implemented for websites, programmes, coupons and /statistics/actions/.", "Action status plus processed/paid are separate source facts; do not collapse payment evidence into order approval.", "status_updated windows are the incremental action-status path.", "Product CSV/XML feed ingestion remains gated on a live feed fixture."],
   },
   CJ: {
-    implementationStatus: "VERIFY_LIVE",
-    capabilities: [SUPPLIER_CAPABILITIES.CAMPAIGNS, SUPPLIER_CAPABILITIES.COUPONS, SUPPLIER_CAPABILITIES.PRODUCTS, SUPPLIER_CAPABILITIES.DEEP_LINK],
+    implementationStatus: "IMPLEMENTED_DISCOVERY",
+    capabilities: [SUPPLIER_CAPABILITIES.CAMPAIGNS, SUPPLIER_CAPABILITIES.COUPONS, SUPPLIER_CAPABILITIES.DEEP_LINK],
     pagination: "page",
-    notes: ["Link Search / advertiser discovery are documented.", "Commission Detail and Product Feed GraphQL are account/role/schema dependent.", "Do not declare conversion/payment source fields until the live publisher GraphQL schema and fixture are captured.", "No runnable adapter is registered yet."],
+    notes: ["Publisher Advertiser Lookup and Link Search REST/XML discovery are implemented.", "Personal Access Token Bearer authentication is required; legacy developer keys are deprecated.", "Advertiser Lookup default Program Term commissions are discovery/display facts only and are not payable commission truth.", "Commission Detail GraphQL remains VERIFY_LIVE until the connected publisher schema and a real fixture are captured.", "Product Search GraphQL is documented but remains gated until its live publisher contract is verified in this integration."],
   },
   RAKUTEN: {
     implementationStatus: "IMPLEMENTED_FOUNDATION",
@@ -85,6 +86,7 @@ const FACTORIES = {
   IMPACT: createImpactAdapter,
   AWIN: createAwinAdapter,
   ADMITAD: createAdmitadAdapter,
+  CJ: createCjAdapter,
   RAKUTEN: createRakutenAdapter,
 };
 
