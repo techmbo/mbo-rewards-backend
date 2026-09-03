@@ -38,9 +38,13 @@ describe("MBO nine-network registry", () => {
     assert.equal(isSupplierRegistered("vCommission"), true);
   });
 
-  it("does not pretend planned networks have runnable adapters", () => {
+  it("registers Admitad while keeping CJ and Rakuten gated", () => {
     const registered = new Set(listRegisteredSuppliers());
-    for (const key of ["ADMITAD", "CJ", "RAKUTEN"]) {
+    assert.equal(registered.has("ADMITAD"), true);
+    assert.equal(isSupplierRegistered("ADMITAD"), true);
+    assert.equal(getSupplierCapabilities("ADMITAD").implementationStatus, "IMPLEMENTED");
+
+    for (const key of ["CJ", "RAKUTEN"]) {
       assert.equal(registered.has(key), false);
       assert.equal(isSupplierRegistered(key), false);
       assert.throws(
