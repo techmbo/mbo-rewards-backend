@@ -43,12 +43,17 @@ function offerCurrency(raw = {}, supplierCampaign = null) {
   return value ? String(value).slice(0, 3).toUpperCase() : null;
 }
 
+function isFinanceReadyCandidate(candidate = {}) {
+  return candidate.mappingStatus === "VERIFIED" && candidate.metadata?.financeReady === true;
+}
+
 /**
- * Persist Rakuten offer commission candidates only after the advertiser master has
- * been promoted to SupplierCampaign. Review-required candidates are persisted as
- * source evidence but remain finance-ineligible through their mappingStatus and
- * metadata.financeReady=false. This prevents source economics from being lost while
- * still keeping unverified dynamic/tier semantics out of payable calculations.
+ * Resolve Rakuten offer economics against the promoted advertiser SupplierCampaign.
+ *
+ * Only finance-ready, verified candidates are promoted into SupplierCommissionRule.
+ * Dynamic rules, unresolved tiers, unsupported grains, and missing-currency fixed
+ * payouts remain in immutable/raw source evidence and are counted REVIEW_REQUIRED.
+ * This prevents unverified source economics from entering payable matching.
  */
 export class RakutenCommissionPersistenceService {
   constructor(deps = {}) {
@@ -95,6 +100,16 @@ export class RakutenCommissionPersistenceService {
     }
 
     const campaignSourceId = supplierCampaign.campaignSources?.[0]?.id ?? null;
+    if (!campaignSourceId) {
+      return {
+        persisted: 0,
+        skipped: true,
+        reason: "campaign_source_not_normalized",
+        supplierCampaignId: supplierCampaign.id,
+        sourceAdvertiserId: String(sourceAdvertiserId),
+      };
+    }
+
     const candidates = mapRakutenOfferCommissionCandidates(raw, {
       sourceAccountLabel,
       campaignSourceId,
@@ -102,10 +117,11 @@ export class RakutenCommissionPersistenceService {
       currency: offerCurrency(raw, supplierCampaign),
     });
 
+    const ready = candidates.filter(isFinanceReadyCandidate);
+    const reviewRequired = candidates.length - ready.length;
     let persisted = 0;
-    let financeReady = 0;
-    let reviewRequired = 0;
-    for (const candidate of candidates) {
+
+    for (const candidate of ready) {
       await this.ruleService.upsertNormalizedFact({
         ...candidate,
         supplierCampaignId: supplierCampaign.id,
@@ -118,20 +134,17 @@ export class RakutenCommissionPersistenceService {
           sourceAdvertiserId: String(sourceAdvertiserId),
           supplierCampaignDbId: supplierCampaign.id,
           campaignSourceId,
+          promotionGate: "VERIFIED_FINANCE_READY_ONLY",
         },
       }, db);
       persisted += 1;
-      if (candidate.metadata?.financeReady === true && candidate.mappingStatus === "VERIFIED") {
-        financeReady += 1;
-      } else {
-        reviewRequired += 1;
-      }
     }
 
     return {
       persisted,
-      financeReady,
+      financeReady: ready.length,
       reviewRequired,
+      candidateCount: candidates.length,
       skipped: false,
       supplierCampaignId: supplierCampaign.id,
       sourceAdvertiserId: String(sourceAdvertiserId),
