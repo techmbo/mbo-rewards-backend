@@ -31,6 +31,8 @@ export function extractNetworkConversionId(rawInput = {}, entity = {}) {
     raw.conversion_id,
     raw.ActionId,
     raw.action_id,
+    raw.etransaction_id,
+    raw.networkConversionComponentId,
     raw.advertiserConversionId,
     raw.network_conversion_id,
     raw.networkConversionId,
