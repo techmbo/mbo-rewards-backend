@@ -2,14 +2,14 @@ import { prisma } from "../../database/prisma.js";
 import { isPrismaUniqueViolation } from "../../core/prismaErrors.js";
 import { fail } from "../../core/apiResponse.js";
 import { auditService } from "../../platform/audit/audit.service.js";
-import { CommissionRuleRepository } from "../commercial/repositories/commercial.repository.js";
+import { ClientCommercialRuntimeService } from "../commercial/services/clientCommercialRuntime.service.js";
 import { ExceptionCaseService } from "../order/exceptionCase.service.js";
 import { ALERT_CONDITION } from "../ops/alertException.contract.js";
 import {
   resolveApprovedCommercialBasis,
   approvedBasisFingerprint,
 } from "../order/approvedCommercialBasis.js";
-import { calculateCommission, netFinancialPosition } from "./commissionCalculation.service.js";
+import { netFinancialPosition } from "./commissionCalculation.service.js";
 import { FxService, resolveReportingCurrency } from "./fx.service.js";
 
 export function earnRecognitionKey(conversionId) {
@@ -28,6 +28,85 @@ export function lateRejectionAdjustmentKey(conversionId) {
   return `LATE_REJECTION:${conversionId}`;
 }
 
+function finiteNumber(value) {
+  if (value == null || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function resolveFinancialAttribution(order = {}, conversion = {}) {
+  const orderAssignmentId = order?.clientAssignmentId ?? null;
+  const conversionAssignmentId = conversion?.clientAssignmentId ?? null;
+  const orderClientId = order?.clientId ?? null;
+  const conversionClientId = conversion?.clientAssignment?.clientId ?? null;
+
+  if (orderAssignmentId && conversionAssignmentId && orderAssignmentId !== conversionAssignmentId) {
+    return {
+      resolved: false,
+      reason: "assignment_attribution_conflict",
+      assignmentId: null,
+      orderAssignmentId,
+      conversionAssignmentId,
+    };
+  }
+  if (orderClientId && conversionClientId && orderClientId !== conversionClientId) {
+    return {
+      resolved: false,
+      reason: "client_attribution_conflict",
+      assignmentId: null,
+      orderAssignmentId,
+      conversionAssignmentId,
+    };
+  }
+
+  const assignmentId = orderAssignmentId || conversionAssignmentId || null;
+  return {
+    resolved: Boolean(assignmentId),
+    reason: assignmentId ? "resolved" : "missing_assignment",
+    assignmentId,
+    orderAssignmentId,
+    conversionAssignmentId,
+  };
+}
+
+export function resolveValidatedNetworkActualCommission({ approvedBasis = null, conversion = null } = {}) {
+  const itemLevel = approvedBasis?.basisMode === "ITEM_LEVEL";
+  const raw = itemLevel
+    ? approvedBasis?.approvedSupplierCommissionOk
+      ? approvedBasis.approvedSupplierCommission
+      : null
+    : conversion?.approvedCommission != null && conversion.approvedCommission !== ""
+      ? conversion.approvedCommission
+      : conversion?.supplierCommission;
+  const amount = finiteNumber(raw);
+  if (amount == null) {
+    return {
+      ok: false,
+      reason: itemLevel ? "missing_approved_item_supplier_commission" : "missing_network_actual_commission",
+      amount: null,
+      currency: approvedBasis?.currency ?? conversion?.currency ?? null,
+    };
+  }
+  if (amount < 0) {
+    return {
+      ok: false,
+      reason: "negative_network_actual_commission",
+      amount: null,
+      currency: approvedBasis?.currency ?? conversion?.currency ?? null,
+    };
+  }
+  return {
+    ok: true,
+    amount,
+    currency: approvedBasis?.currency ?? conversion?.currency ?? null,
+    source: itemLevel
+      ? "sum_approved_order_item_commission"
+      : conversion?.approvedCommission != null && conversion.approvedCommission !== ""
+        ? "conversion.approvedCommission"
+        : "conversion.supplierCommission",
+  };
+}
+
 /**
  * Wave D financial recognition — single entry point.
  * Creates immutable COMMISSION_EARNED rows; adjustments create new signed rows.
@@ -38,9 +117,9 @@ export class FinancialTransactionService {
     this.audit = deps.audit ?? auditService;
     this.exceptions = deps.exceptions ?? new ExceptionCaseService({ prisma: this.db, audit: this.audit });
     this.fx = deps.fx ?? new FxService({ prisma: this.db, exceptions: this.exceptions });
-    this.commissionRepo = deps.commissionRepo ?? new CommissionRuleRepository();
-    this.calculate = deps.calculate ?? calculateCommission;
-    this.supplierCommissionRules = deps.supplierCommissionRules ?? null;
+    this.clientCommercialRuntime =
+      deps.clientCommercialRuntime ??
+      new ClientCommercialRuntimeService({ commissionRepo: deps.commissionRepo });
   }
 
   async findByRecognitionKey(recognitionKey, client = null) {
@@ -211,91 +290,54 @@ export class FinancialTransactionService {
       return { record: null, created: false, unresolved: true, reason: "missing_client" };
     }
 
-    const assignmentId = order.clientAssignmentId || conversion.clientAssignmentId;
-    if (!assignmentId) {
+    const attribution = resolveFinancialAttribution(order, conversion);
+    if (!attribution.resolved) {
       await this.exceptions.report({
         type: "COMMISSION_MISSING",
         severity: "HIGH",
         conversionId,
         orderId: order.id,
         clientId,
-        reason: "Missing assignment for effective rule resolution",
+        reason: attribution.reason,
+        metadata: {
+          orderAssignmentId: attribution.orderAssignmentId,
+          conversionAssignmentId: attribution.conversionAssignmentId,
+        },
       }, db);
-      return { record: null, created: false, unresolved: true, reason: "missing_assignment" };
+      return {
+        record: null,
+        created: false,
+        unresolved: true,
+        reason: attribution.reason,
+      };
     }
-
-    const rule = await this.commissionRepo.findEffectiveForAssignment(
-      assignmentId,
-      conversion.conversionDate || order.orderDate || new Date(),
-      db,
-    );
-
-    if (!rule) {
-      await this.exceptions.report({
-        type: "COMMISSION_MISSING",
-        severity: "HIGH",
-        conversionId,
-        orderId: order.id,
-        clientId,
-        reason: "No EFFECTIVE ClientCommissionRule",
-      }, db);
-      return { record: null, created: false, unresolved: true, reason: "missing_effective_commission_rule" };
-    }
-
-    const supplierRuleSvc = this.supplierCommissionRules;
-    let supplierCommissionRule = null;
-    if (supplierRuleSvc?.findEffectiveForCampaignSource) {
-      try {
-        supplierCommissionRule = await supplierRuleSvc.findEffectiveForCampaignSource(
-          order.campaignSourceId || conversion.campaignSourceId,
-          conversion.conversionDate || order.orderDate || new Date(),
-          db,
-        );
-      } catch {
-        supplierCommissionRule = null;
-      }
-    }
-
+    const assignmentId = attribution.assignmentId;
+    const transactionAt = conversion.conversionDate || order.orderDate || new Date();
     const approvedBasis = resolveApprovedCommercialBasis(order, conversion);
+    const networkActual = resolveValidatedNetworkActualCommission({ approvedBasis, conversion });
 
-    const calc = this.calculate({
-      order,
-      conversion,
-      clientCommissionRule: rule,
-      supplierCommissionRule,
-      approvedBasis,
-    });
-    if (!calc.ok) {
-      const exceptionType =
-        calc.reason === "currency_mismatch"
-          ? "INVALID_CURRENCY"
-          : calc.reason?.includes("commission") ||
-              calc.reason?.includes("rule") ||
-              calc.reason === "legacy_fixed_unmapped" ||
-              calc.reason === "tiered_not_implemented" ||
-              calc.reason === "manual_commission_not_approved" ||
-              calc.reason === "missing_order_value" ||
-              calc.reason === "missing_order_value_percent" ||
-              calc.reason === "missing_fixed_amount" ||
-              calc.reason === "missing_manual_amount" ||
-              calc.reason === "partial_approval_fixed_amount_unresolved" ||
-              calc.reason === "missing_approved_item_supplier_commission" ||
-              calc.reason === "missing_approved_order_value"
-            ? "COMMISSION_INVALID"
-            : "COMMISSION_MISSING";
+    if (!networkActual.ok) {
       await this.exceptions.report({
-        type: exceptionType,
+        type: "COMMISSION_INVALID",
         severity: "HIGH",
         conversionId,
         orderId: order.id,
         clientId,
-        reason: calc.reason,
-        metadata: { ...(calc.calculationMetadata || {}), approvedBasis },
+        reason: networkActual.reason,
+        metadata: { approvedBasis },
       }, db);
-      return { record: null, created: false, unresolved: true, reason: calc.reason, approvedBasis };
+      return {
+        record: null,
+        created: false,
+        unresolved: true,
+        reason: networkActual.reason,
+        approvedBasis,
+      };
     }
 
-    if (!calc.currency) {
+    const originalCurrency =
+      networkActual.currency || conversion.currency || order.currency || approvedBasis.currency || null;
+    if (!originalCurrency) {
       await this.exceptions.report({
         type: "INVALID_CURRENCY",
         severity: "HIGH",
@@ -306,6 +348,96 @@ export class FinancialTransactionService {
       }, db);
       return { record: null, created: false, unresolved: true, reason: "missing_currency" };
     }
+
+    const factOverrides = { date: transactionAt };
+    if (approvedBasis.basisMode === "ITEM_LEVEL" && approvedBasis.approvedOrderValueOk) {
+      factOverrides.orderValue = approvedBasis.approvedOrderValue;
+    }
+    const campaignFact =
+      order.canonicalCampaignId ||
+      conversion.clientAssignment?.canonicalCampaignId ||
+      null;
+    if (campaignFact) factOverrides.campaign = campaignFact;
+
+    const runtime = await this.clientCommercialRuntime.evaluate(
+      {
+        assignmentId,
+        attributionResolved: true,
+        attributionStatus: "RESOLVED",
+        order,
+        conversion,
+        assignment:
+          conversion.clientAssignment?.id === assignmentId
+            ? conversion.clientAssignment
+            : null,
+        factOverrides,
+        networkActualCommission: networkActual.amount,
+        networkActualCurrency: originalCurrency,
+        validatedSupplierCommission: networkActual.amount,
+        provisionalAllowed: false,
+        orderCount: 1,
+        requireAgreementLineage: true,
+      },
+      db,
+    );
+
+    if (runtime.status !== "CALCULATED" || runtime.provisional === true) {
+      const exceptionType = String(runtime.reason || "").includes("currency")
+        ? "INVALID_CURRENCY"
+        : runtime.status === "NO_MATCH"
+          ? "COMMISSION_MISSING"
+          : "COMMISSION_INVALID";
+      await this.exceptions.report({
+        type: exceptionType,
+        severity: "HIGH",
+        conversionId,
+        orderId: order.id,
+        clientId,
+        reason: runtime.reason || runtime.status || "client_commercial_runtime_unresolved",
+        metadata: {
+          runtimeStatus: runtime.status,
+          ruleSelectionStatus: runtime.ruleSelectionStatus ?? null,
+          matchedClientCommissionRuleId: runtime.matchedClientCommissionRuleId ?? null,
+          payoutBasis: runtime.payoutBasis ?? null,
+          marginProtection: runtime.marginProtection ?? null,
+          approvedBasis,
+        },
+      }, db);
+      return {
+        record: null,
+        created: false,
+        unresolved: true,
+        reason: runtime.reason || runtime.status,
+        approvedBasis,
+      };
+    }
+
+    const calc = {
+      supplierGross: networkActual.amount,
+      clientCommission: runtime.clientPayable,
+      mboMargin: runtime.mboMargin,
+      currency: originalCurrency,
+      ruleId: runtime.matchedClientCommissionRuleId,
+      ruleSnapshot: runtime.matchedRuleSnapshot ?? {
+        id: runtime.matchedClientCommissionRuleId,
+        assignmentId,
+      },
+      calculationMetadata: {
+        engine: "ClientCommercialRuntimeService",
+        deterministicRuleSelection: true,
+        ruleSelectionStatus: runtime.ruleSelectionStatus,
+        payoutBasis: runtime.payoutBasis,
+        provisional: false,
+        marginProtection: runtime.marginProtection,
+        tierSelection: runtime.tierSelection,
+        lineage: runtime.lineage,
+        facts: runtime.facts,
+        networkActualCommissionSource: networkActual.source,
+        approvedBasis,
+      },
+      displayCommission: runtime.displayCommission ?? null,
+      ruleKind: runtime.ruleKind ?? runtime.matchedRuleSnapshot?.commissionType ?? null,
+    };
 
     const clientRecord = conversion.clientAssignment?.client ||
       (await db.client.findUnique({ where: { id: clientId } }));

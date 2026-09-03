@@ -23,6 +23,59 @@ function transactionDate({ order = null, conversion = null, overrides = {} } = {
   return firstDefined(overrides.date, order?.orderDate, conversion?.conversionDate, new Date());
 }
 
+function jsonSafe(value) {
+  if (value == null) return value;
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(jsonSafe);
+  if (typeof value === "object") {
+    if (typeof value.toJSON === "function") return jsonSafe(value.toJSON());
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, jsonSafe(entry)]),
+    );
+  }
+  return value;
+}
+
+function snapshotClientCommercialRule(rule = {}) {
+  const keys = [
+    "id",
+    "assignmentId",
+    "commissionType",
+    "grossCommission",
+    "clientCommission",
+    "mboCommission",
+    "currency",
+    "orderValuePercent",
+    "fixedAmount",
+    "manualAmount",
+    "manualApproved",
+    "manualApprovedAt",
+    "manualApprovedBy",
+    "displayRangeMin",
+    "displayRangeMax",
+    "displayLabel",
+    "priority",
+    "priorityVerified",
+    "agreementRef",
+    "agreementApprovedAt",
+    "agreementApprovedBy",
+    "subsidyApproved",
+    "subsidyApprovalRef",
+    "subsidyApprovedAt",
+    "subsidyApprovedBy",
+    "tierMetric",
+    "tierPeriod",
+    "effectiveFrom",
+    "effectiveUntil",
+    "status",
+    "conditions",
+    "tiers",
+  ];
+  return Object.fromEntries(
+    keys.filter((key) => rule[key] !== undefined).map((key) => [key, jsonSafe(rule[key])]),
+  );
+}
+
 /**
  * Runtime bridge from persisted ClientCommissionRule graphs to deterministic matching/calculation.
  * This service calculates the commercial amount only. Finance/reconciliation remains responsible
@@ -119,6 +172,17 @@ export class ClientCommercialRuntimeService {
       status: calculation.status,
       reason: calculation.reason,
       matchedClientCommissionRuleId: match.matchedClientCommissionRuleId,
+      matchedRuleSnapshot: snapshotClientCommercialRule(rule),
+      ruleKind: rule.commissionType ?? null,
+      displayCommission:
+        String(rule.commissionType || "").toUpperCase() === "DISPLAY_RANGE_WITH_ACTUAL_SPLIT"
+          ? {
+              displayRangeMin: rule.displayRangeMin ?? null,
+              displayRangeMax: rule.displayRangeMax ?? null,
+              displayLabel: rule.displayLabel ?? null,
+              financialBasis: calculation.payoutBasis ?? null,
+            }
+          : null,
       ruleSelectionStatus: match.status,
       clientPayable: calculation.clientPayable,
       mboMargin: calculation.mboMargin,
