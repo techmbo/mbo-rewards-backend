@@ -45,7 +45,10 @@ function round4(value) {
 }
 
 function asNumber(value) {
-  if (value == null || value === "") return null;
+  // Explicit zero is a valid supplier commission; blank/whitespace input is missing data.
+  if (value == null) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  if (typeof value === "boolean") return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }

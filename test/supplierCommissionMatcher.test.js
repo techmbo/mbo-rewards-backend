@@ -284,4 +284,98 @@ describe("Supplier Commission Matcher", () => {
     assert.equal(facts.commissionableValue, undefined);
     assert.equal(facts.customerType, undefined);
   });
+
+  describe("explicit zero supplier commission is a valid matching outcome", () => {
+    it("selects the specific 0% category rule over the broader positive default", () => {
+      const result = matchSupplierCommissionRule({
+        rules: [
+          rule({ id: "rule-a-default", commissionSequence: 1, ratePercent: 10 }),
+          rule({
+            id: "rule-b-category-x",
+            commissionSequence: 2,
+            ratePercent: 0,
+            conditions: [{ conditionType: "CATEGORY", operator: "EQ", value: "X" }],
+          }),
+        ],
+        facts: { category: "X", orderValue: 250, currency: "USD" },
+        actualCommission: 0,
+        actualCurrency: "USD",
+      });
+
+      assert.equal(result.status, "MATCHED");
+      assert.equal(result.matchedSupplierCommissionRuleId, "rule-b-category-x");
+      assert.equal(result.matchedCommissionSequence, 2);
+      assert.equal(result.expectedSupplierCommission, 0);
+      assert.notEqual(result.expectedSupplierCommission, 25);
+      assert.equal(result.networkActualCommission, 0);
+      assert.equal(result.comparisonStatus, "MATCH");
+    });
+
+    it("keeps the default rule for orders outside the zero category", () => {
+      const result = matchSupplierCommissionRule({
+        rules: [
+          rule({ id: "rule-a-default", commissionSequence: 1, ratePercent: 10 }),
+          rule({
+            id: "rule-b-category-x",
+            commissionSequence: 2,
+            ratePercent: 0,
+            conditions: [{ conditionType: "CATEGORY", operator: "EQ", value: "X" }],
+          }),
+        ],
+        facts: { category: "Y", orderValue: 250, currency: "USD" },
+      });
+
+      assert.equal(result.status, "MATCHED");
+      assert.equal(result.matchedSupplierCommissionRuleId, "rule-a-default");
+      assert.equal(result.expectedSupplierCommission, 25);
+    });
+
+    it("calculates an explicit zero percentage rule as 0 instead of missing data", () => {
+      const expected = calculateExpectedSupplierCommission(rule({ ratePercent: 0 }), {
+        orderValue: 100,
+        currency: "USD",
+      });
+      assert.equal(expected.status, "CALCULATED");
+      assert.equal(expected.amount, 0);
+      assert.equal(expected.ratePercent, 0);
+    });
+
+    it("calculates an explicit fixed zero rule as 0 instead of missing data", () => {
+      const expected = calculateExpectedSupplierCommission(
+        rule({ ratePercent: null, fixedAmount: 0, basis: "FIXED_PER_ORDER", currency: "USD" }),
+        { orderValue: 100, currency: "USD" },
+      );
+      assert.equal(expected.status, "CALCULATED");
+      assert.equal(expected.amount, 0);
+      assert.equal(expected.currency, "USD");
+    });
+
+    it("still treats a blank rate as missing rule data", () => {
+      const expected = calculateExpectedSupplierCommission(
+        rule({ ratePercent: "", fixedAmount: "   ", basis: "FIXED_PER_ORDER" }),
+        { orderValue: 100, currency: "USD" },
+      );
+      assert.equal(expected.status, "SOURCE_DATA_MISSING");
+      assert.equal(expected.reason, "missing_rule_amount");
+    });
+
+    it("reports variance when the network pays for an excluded 0% category", () => {
+      const result = matchSupplierCommissionRule({
+        rules: [
+          rule({
+            id: "rule-b-category-x",
+            ratePercent: 0,
+            conditions: [{ conditionType: "CATEGORY", operator: "EQ", value: "X" }],
+          }),
+        ],
+        facts: { category: "X", orderValue: 100, currency: "USD" },
+        actualCommission: 4,
+        actualCurrency: "USD",
+      });
+      assert.equal(result.expectedSupplierCommission, 0);
+      assert.equal(result.networkActualCommission, 4);
+      assert.equal(result.variance, 4);
+      assert.equal(result.comparisonStatus, "VARIANCE");
+    });
+  });
 });

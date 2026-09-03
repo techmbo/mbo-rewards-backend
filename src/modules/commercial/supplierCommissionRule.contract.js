@@ -85,14 +85,15 @@ export function toSupplierCommissionRuleDto(record, context = {}) {
   const sc = record.supplierCampaign ?? context.supplierCampaign ?? null;
   const cs = record.campaignSource ?? context.campaignSource ?? null;
   const campaign = sc ?? cs?.supplierCampaign ?? null;
-  const ratePercent =
-    record.ratePercent != null && record.ratePercent !== ""
-      ? Number(record.ratePercent)
-      : null;
-  const fixedAmount =
-    record.fixedAmount != null && record.fixedAmount !== ""
-      ? Number(record.fixedAmount)
-      : null;
+  // Explicit zero stays 0; blank/whitespace stays null (never coerced to 0).
+  const numberOrNull = (value) => {
+    if (value == null) return null;
+    if (typeof value === "string" && value.trim() === "") return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  };
+  const ratePercent = numberOrNull(record.ratePercent);
+  const fixedAmount = numberOrNull(record.fixedAmount);
   const commissionValue =
     ratePercent != null
       ? `${ratePercent}%`

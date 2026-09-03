@@ -5,6 +5,8 @@ import {
   listCampaignCommissionFacts,
   parseCommissionText,
   averageCommissionFacts,
+  explicitNumber,
+  summarizeCommissionFacts,
 } from "../src/modules/ops/campaignCommissions.js";
 import { buildNetworkCampaignFields } from "../src/modules/ops/importedRecords.service.js";
 
@@ -227,5 +229,225 @@ describe("network ops campaign commissions", () => {
       ]),
       "5.6%",
     );
+  });
+
+  describe("explicit zero commission is a real fact, blank is missing", () => {
+    it("explicitNumber keeps explicit zero and rejects blank or malformed input", () => {
+      assert.equal(explicitNumber(0), 0);
+      assert.equal(explicitNumber("0"), 0);
+      assert.equal(explicitNumber("0.0"), 0);
+      assert.equal(explicitNumber("0.00"), 0);
+      assert.equal(explicitNumber(12.5), 12.5);
+      assert.equal(explicitNumber(null), null);
+      assert.equal(explicitNumber(undefined), null);
+      assert.equal(explicitNumber(""), null);
+      assert.equal(explicitNumber("   "), null);
+      assert.equal(explicitNumber("abc"), null);
+      assert.equal(explicitNumber("n/a"), null);
+      assert.equal(explicitNumber(true), null);
+      assert.equal(explicitNumber(NaN), null);
+      assert.equal(explicitNumber({}), null);
+    });
+
+    it("parses 0% as a valid zero percentage commission fact", () => {
+      const facts = parseCommissionText("0%");
+      assert.equal(facts.length, 1);
+      assert.equal(facts[0].kind, "PERCENT");
+      assert.equal(facts[0].value, 0);
+      assert.equal(facts[0].display, "0%");
+      assert.deepEqual(
+        parseCommissionText("0% Or $17.50").map((f) => [f.kind, f.value]),
+        [["PERCENT", 0], ["FIXED", 17.5]],
+      );
+    });
+
+    it("parses an explicit fixed zero with currency as a valid fixed commission fact", () => {
+      const facts = parseCommissionText("USD 0");
+      assert.equal(facts.length, 1);
+      assert.equal(facts[0].kind, "FIXED");
+      assert.equal(facts[0].value, 0);
+      assert.equal(facts[0].currency, "USD");
+      assert.equal(facts[0].display, "USD 0");
+    });
+
+    it("does not create commission facts from blank or missing text", () => {
+      assert.deepEqual(parseCommissionText(null), []);
+      assert.deepEqual(parseCommissionText(undefined), []);
+      assert.deepEqual(parseCommissionText(""), []);
+      assert.deepEqual(parseCommissionText("   "), []);
+      assert.deepEqual(parseCommissionText("see terms"), []);
+    });
+
+    for (const input of [0, "0", "0.0", "0%"]) {
+      it(`keeps structured zero percentage input ${JSON.stringify(input)} where context is percentage`, () => {
+        const { facts, display } = listCampaignCommissionFacts({
+          groups: [{ value: input, model: "percentage" }],
+          commissionUnit: "PERCENT",
+          at: NOW,
+        });
+        assert.equal(facts.length, 1);
+        assert.equal(facts[0].kind, "PERCENT");
+        assert.equal(facts[0].value, 0);
+        assert.equal(facts[0].basis, "PERCENT_OF_SALE");
+        assert.equal(display, "0%");
+      });
+    }
+
+    it("keeps a structured fixed zero payout with currency and basis", () => {
+      const { facts } = listCampaignCommissionFacts({
+        groups: [{ model: "cpa", value: 0, currency: "USD" }],
+        at: NOW,
+      });
+      assert.equal(facts.length, 1);
+      assert.equal(facts[0].kind, "FIXED");
+      assert.equal(facts[0].value, 0);
+      assert.equal(facts[0].currency, "USD");
+      assert.equal(facts[0].basis, "CPA");
+      assert.equal(facts[0].display, "USD 0");
+    });
+
+    it("keeps supplied zero on explicit rate / percentage / amount / fixed fields", () => {
+      const percentKeyed = listCampaignCommissionFacts({
+        groups: [{ percentage: 0, category: "Excluded" }],
+        at: NOW,
+      });
+      assert.deepEqual(percentKeyed.facts.map((f) => [f.kind, f.value]), [["PERCENT", 0]]);
+
+      const rateKeyed = listCampaignCommissionFacts({
+        groups: [{ rate: "0", model: "revshare" }],
+        at: NOW,
+      });
+      assert.deepEqual(rateKeyed.facts.map((f) => [f.kind, f.value]), [["PERCENT", 0]]);
+
+      const fixedKeyed = listCampaignCommissionFacts({
+        groups: [{ fixed_amount: 0, currency: "AED" }],
+        at: NOW,
+      });
+      assert.deepEqual(fixedKeyed.facts.map((f) => [f.kind, f.value, f.currency]), [["FIXED", 0, "AED"]]);
+
+      const amountKeyed = listCampaignCommissionFacts({
+        groups: [{ amount: 0, model: "cpa", currency: "USD" }],
+        at: NOW,
+      });
+      assert.deepEqual(amountKeyed.facts.map((f) => [f.kind, f.value]), [["FIXED", 0]]);
+    });
+
+    it("keeps a specific zero rule next to the campaign default instead of discarding it", () => {
+      const { facts } = listCampaignCommissionFacts({
+        groups: [
+          { id: "default", value: 10, model: "percentage" },
+          { id: "category-x", value: 0, model: "percentage", category: "X" },
+        ],
+        at: NOW,
+      });
+      assert.deepEqual(facts.map((f) => f.value).sort(), [0, 10]);
+    });
+
+    for (const input of [null, undefined, "", "   "]) {
+      it(`does not create a commission fact for missing structured input ${JSON.stringify(input)}`, () => {
+        const result = listCampaignCommissionFacts({
+          groups: [{ value: input, model: "percentage" }],
+          commissionUnit: "PERCENT",
+          at: NOW,
+        });
+        assert.equal(result.facts.length, 0);
+        assert.equal(result.display, null);
+        assert.equal(result.averageDisplay, null);
+      });
+    }
+
+    it("does not convert malformed non-numeric input into zero", () => {
+      const result = listCampaignCommissionFacts({
+        groups: [
+          { value: "n/a", model: "percentage" },
+          { value: "abc", model: "cpa", currency: "USD" },
+          { value: true, model: "percentage" },
+          { value: {}, model: "percentage" },
+        ],
+        commissionUnit: "PERCENT",
+        at: NOW,
+      });
+      assert.equal(result.facts.length, 0);
+      assert.equal(result.display, null);
+    });
+
+    it("does not treat a blank campaign default as a zero commission", () => {
+      for (const defaultValue of [null, undefined, "", "   "]) {
+        const result = listCampaignCommissionFacts({
+          defaultValue,
+          commissionUnit: "PERCENT",
+          at: NOW,
+        });
+        assert.equal(result.facts.length, 0, `defaultValue=${JSON.stringify(defaultValue)}`);
+      }
+    });
+
+    it("keeps an explicit zero campaign default when the supplier supplied it", () => {
+      const result = listCampaignCommissionFacts({ defaultValue: 0, commissionUnit: "PERCENT", at: NOW });
+      assert.deepEqual(result.facts.map((f) => [f.kind, f.value]), [["PERCENT", 0]]);
+    });
+
+    it("includes explicit zero in Avg / Min / Max percentage summaries", () => {
+      const facts = [
+        { kind: "PERCENT", value: 0, display: "0%" },
+        { kind: "PERCENT", value: 10, display: "10%" },
+      ];
+      assert.equal(averageCommissionFacts(facts), "5%");
+      const summary = summarizeCommissionFacts(facts);
+      assert.equal(summary.kind, "PERCENT");
+      assert.equal(summary.average, 5);
+      assert.equal(summary.min, 0);
+      assert.equal(summary.max, 10);
+      assert.equal(summary.averageDisplay, "5%");
+      assert.equal(summary.minDisplay, "0%");
+      assert.equal(summary.maxDisplay, "10%");
+    });
+
+    it("includes explicit zero in Avg / Min / Max for compatible fixed facts", () => {
+      const facts = [
+        { kind: "FIXED", value: 0, currency: "USD", basis: "FIXED_PER_ORDER", display: "USD 0" },
+        { kind: "FIXED", value: 10, currency: "USD", basis: "FIXED_PER_ORDER", display: "USD 10" },
+      ];
+      assert.equal(averageCommissionFacts(facts), "USD 5");
+      const summary = summarizeCommissionFacts(facts);
+      assert.equal(summary.kind, "FIXED");
+      assert.equal(summary.average, 5);
+      assert.equal(summary.min, 0);
+      assert.equal(summary.max, 10);
+      assert.equal(summary.averageDisplay, "USD 5");
+      assert.equal(summary.minDisplay, "USD 0");
+      assert.equal(summary.maxDisplay, "USD 10");
+      assert.equal(summary.basis, "FIXED_PER_ORDER");
+    });
+
+    it("summarizes a single zero fact as 0 rather than nothing", () => {
+      assert.equal(averageCommissionFacts([{ kind: "PERCENT", value: 0, display: "0%" }]), "0%");
+    });
+
+    it("keeps MIXED behaviour unchanged when zero facts are involved", () => {
+      assert.equal(
+        averageCommissionFacts([
+          { kind: "PERCENT", value: 0, display: "0%" },
+          { kind: "FIXED", value: 10, currency: "USD", display: "USD 10" },
+        ]),
+        "MIXED",
+      );
+      assert.equal(
+        averageCommissionFacts([
+          { kind: "FIXED", value: 0, currency: "USD", basis: "CPA", display: "USD 0" },
+          { kind: "FIXED", value: 10, currency: "EUR", basis: "CPA", display: "EUR 10" },
+        ]),
+        "MIXED",
+      );
+      assert.equal(
+        averageCommissionFacts([
+          { kind: "FIXED", value: 0, currency: "USD", basis: "CPA", display: "USD 0" },
+          { kind: "FIXED", value: 10, currency: "USD", basis: "FIXED_PER_ITEM", display: "USD 10" },
+        ]),
+        "MIXED",
+      );
+      assert.equal(summarizeCommissionFacts([]).averageDisplay, null);
+      assert.equal(averageCommissionFacts([{ kind: "PERCENT", value: "", display: "" }]), null);
+    });
   });
 });

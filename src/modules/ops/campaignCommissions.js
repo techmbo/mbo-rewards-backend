@@ -5,9 +5,28 @@
  * Never invent rates. Never return a raw object as the display string.
  */
 
+/**
+ * Explicit numeric value only.
+ *
+ * An explicit zero (0, "0", "0.0", "0.00") is a real supplier commission fact: excluded
+ * categories, non-commissionable products, excluded customer types, markets with no payout,
+ * promotional exclusions. Blank or missing input (null, undefined, "", "   ") stays missing
+ * and malformed text stays invalid — neither is ever coerced to zero the way Number("")
+ * would. Objects are not numbers; callers unwrap them first.
+ */
+export function explicitNumber(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string") return null;
+  const text = value.replace(/,/g, "").trim();
+  if (!text) return null;
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function trimNum(n) {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return null;
+  const x = explicitNumber(n);
+  if (x == null) return null;
   return Number.isInteger(x) ? String(x) : String(Number(x.toFixed(4))).replace(/\.?0+$/, "");
 }
 
@@ -188,11 +207,13 @@ function factKey(fact) {
 }
 
 function makePercentFact(value, { upTo = false, basis = "PERCENT_OF_SALE" } = {}) {
-  const shown = trimNum(value);
-  if (shown == null || Number(value) === 0) return null;
+  // Explicit zero is a valid PERCENT fact (e.g. "Category X: 0%"); blank input is not.
+  const n = explicitNumber(value);
+  const shown = trimNum(n);
+  if (n == null || shown == null) return null;
   return {
     kind: "PERCENT",
-    value: Number(value),
+    value: n,
     currency: null,
     basis,
     display: upTo ? `Up to ${shown}%` : `${shown}%`,
@@ -200,11 +221,13 @@ function makePercentFact(value, { upTo = false, basis = "PERCENT_OF_SALE" } = {}
 }
 
 function makeFixedFact(value, currency, { basis = "FIXED_AMOUNT" } = {}) {
-  const shown = trimNum(value);
-  if (shown == null || Number(value) === 0) return null;
+  // Explicit fixed zero (e.g. "USD 0 per order") is a valid FIXED fact; blank input is not.
+  const n = explicitNumber(value);
+  const shown = trimNum(n);
+  if (n == null || shown == null) return null;
   return {
     kind: "FIXED",
-    value: Number(value),
+    value: n,
     currency: currency || null,
     basis,
     display: currency ? `${currency} ${shown}` : shown,
@@ -227,7 +250,7 @@ export function parseCommissionText(text) {
 
   for (const match of s.matchAll(/(up\s*to\s*)?(-?\d+(?:[.,]\d+)?)\s*%/gi)) {
     const n = Number(String(match[2]).replace(",", "."));
-    if (!Number.isFinite(n) || n === 0) continue;
+    if (!Number.isFinite(n)) continue;
     const fact = makePercentFact(n, { upTo: Boolean(match[1]), basis: "PERCENT_OF_SALE" });
     if (fact) facts.push(fact);
     mark(match.index, match.index + match[0].length);
@@ -249,12 +272,49 @@ export function parseCommissionText(text) {
       amount = Number(String(match[3]).replace(/,/g, ""));
       currency = currencyFrom(match[4]);
     }
-    if (!Number.isFinite(amount) || amount === 0) continue;
+    if (!Number.isFinite(amount)) continue;
     const fact = makeFixedFact(amount, currency, { basis: "FIXED_AMOUNT" });
     if (fact) facts.push(fact);
   }
 
   return facts;
+}
+
+const PERCENT_VALUE_KEYS = ["percentage", "percent", "rate_percent", "ratePercent"];
+const FIXED_VALUE_KEYS = ["fixed", "fixed_amount", "fixedAmount"];
+
+function isPresent(value) {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "string" && value.trim() === "") return false;
+  if (typeof value === "boolean") return false;
+  return true;
+}
+
+/**
+ * Pick the supplied commission value of a structured entry.
+ * Presence is decided by the property being supplied (0 is supplied; ""/null are not),
+ * never by truthiness. Explicit percent/fixed keys also carry their kind.
+ */
+function commissionValueField(entry = {}) {
+  const generic = [
+    entry.value,
+    entry.commission,
+    entry.performance_value,
+    entry.amount,
+    entry.rate,
+    entry.payout_value,
+    entry.commissionCost,
+  ];
+  for (const candidate of generic) {
+    if (isPresent(candidate)) return { valueField: candidate, valueKind: null };
+  }
+  for (const key of PERCENT_VALUE_KEYS) {
+    if (isPresent(entry[key]) && typeof entry[key] !== "object") return { valueField: entry[key], valueKind: "PERCENT" };
+  }
+  for (const key of FIXED_VALUE_KEYS) {
+    if (isPresent(entry[key]) && typeof entry[key] !== "object") return { valueField: entry[key], valueKind: "FIXED" };
+  }
+  return { valueField: null, valueKind: null };
 }
 
 function structuredFacts(entry, { fallbackUnit, fallbackCurrency } = {}) {
@@ -263,7 +323,7 @@ function structuredFacts(entry, { fallbackUnit, fallbackCurrency } = {}) {
     const fromText = parseCommissionText(entry);
     if (fromText.length) return fromText;
     const n = numericFrom(entry);
-    if (n == null || n === 0) return [];
+    if (n == null) return [];
     const percent = looksPercent({}, String(entry), fallbackUnit);
     return [
       percent === false
@@ -272,15 +332,7 @@ function structuredFacts(entry, { fallbackUnit, fallbackCurrency } = {}) {
     ].filter(Boolean);
   }
 
-  const valueField =
-    entry.value ??
-    entry.commission ??
-    entry.performance_value ??
-    entry.amount ??
-    entry.rate ??
-    entry.payout_value ??
-    entry.commissionCost ??
-    null;
+  const { valueField, valueKind: keyedKind } = commissionValueField(entry);
 
   if (valueField && typeof valueField === "object") {
     return withEffectiveWindow(
@@ -317,11 +369,12 @@ function structuredFacts(entry, { fallbackUnit, fallbackCurrency } = {}) {
     }
   }
 
+  // A supplied zero survives normalization; only a missing/blank/malformed value is dropped.
   const amount = numericFrom(valueField);
-  if (amount == null || amount === 0) return [];
+  if (amount == null) return [];
   const currency = currencyFrom(entry, fallbackCurrency);
   const valueText = valueField != null && typeof valueField !== "object" ? String(valueField) : "";
-  const percent = looksPercent(entry, valueText, fallbackUnit);
+  const percent = keyedKind === "FIXED" ? false : keyedKind === "PERCENT" ? true : looksPercent(entry, valueText, fallbackUnit);
   if (percent === false) {
     const fact = makeFixedFact(amount, currency, {
       basis: payoutBasisFrom(entry, fallbackUnit, "FIXED"),
@@ -483,23 +536,27 @@ export function listCampaignCommissionFacts({
 }
 
 /**
- * Current campaign Avg Commission is a display/reporting summary only.
- * It must never be used as an order-level supplier or client payout rate.
+ * Current campaign Avg / Min / Max Commission are display/reporting summaries only.
+ * They must never be used as an order-level supplier or client payout rate.
+ *
+ * Explicit zero facts participate: [0%, 10%] → avg 5%, min 0%, max 10%.
  *
  * Comparable sets:
  * - percentages with percentages;
  * - fixed amounts only when currency AND payout basis are the same.
- * Anything else returns MIXED.
+ * Anything else is MIXED.
+ *
+ * @returns {{ comparable: boolean, kind: "PERCENT"|"FIXED"|"MIXED"|null, count: number,
+ *   average: number|null, min: number|null, max: number|null, currency: string|null, basis: string|null,
+ *   averageDisplay: string|null, minDisplay: string|null, maxDisplay: string|null }}
  */
-export function averageCommissionFacts(facts = []) {
+export function summarizeCommissionFacts(facts = []) {
   const normalized = [];
   for (const fact of facts || []) {
     if (!fact) continue;
-    const n =
-      Number.isFinite(Number(fact.value)) && Number(fact.value) !== 0
-        ? Number(fact.value)
-        : numericFrom(fact.display);
-    if (n == null || n === 0) continue;
+    // fact.value wins when it is an explicit number (including 0); otherwise parse the display.
+    const n = explicitNumber(fact.value) ?? numericFrom(fact.display);
+    if (n == null) continue;
     const display = String(fact.display || "");
     const isPercent = fact.kind === "PERCENT" || /%/.test(display);
     normalized.push({
@@ -510,24 +567,80 @@ export function averageCommissionFacts(facts = []) {
     });
   }
 
-  if (!normalized.length) return null;
+  const empty = {
+    comparable: false,
+    kind: null,
+    count: normalized.length,
+    average: null,
+    min: null,
+    max: null,
+    currency: null,
+    basis: null,
+    averageDisplay: null,
+    minDisplay: null,
+    maxDisplay: null,
+  };
+  if (!normalized.length) return empty;
+
+  const mixed = { ...empty, kind: "MIXED", averageDisplay: "MIXED", minDisplay: "MIXED", maxDisplay: "MIXED" };
 
   const kinds = new Set(normalized.map((fact) => fact.kind));
-  if (kinds.size > 1) return "MIXED";
+  if (kinds.size > 1) return mixed;
+
+  const values = normalized.map((fact) => fact.value);
+  const average = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
 
   if (kinds.has("PERCENT")) {
-    const avg = normalized.reduce((sum, fact) => sum + fact.value, 0) / normalized.length;
-    const shown = trimNum(avg);
-    return shown == null ? null : `${shown}%`;
+    const format = (value) => {
+      const shown = trimNum(value);
+      return shown == null ? null : `${shown}%`;
+    };
+    return {
+      comparable: true,
+      kind: "PERCENT",
+      count: normalized.length,
+      average,
+      min,
+      max,
+      currency: null,
+      basis: "PERCENT_OF_SALE",
+      averageDisplay: format(average),
+      minDisplay: format(min),
+      maxDisplay: format(max),
+    };
   }
 
   const currencies = new Set(normalized.map((fact) => fact.currency || ""));
   const bases = new Set(normalized.map((fact) => fact.basis || "FIXED_AMOUNT"));
-  if (currencies.size > 1 || bases.size > 1) return "MIXED";
+  if (currencies.size > 1 || bases.size > 1) return mixed;
 
-  const avg = normalized.reduce((sum, fact) => sum + fact.value, 0) / normalized.length;
-  const shown = trimNum(avg);
-  if (shown == null) return null;
   const currency = normalized[0].currency;
-  return currency ? `${currency} ${shown}` : shown;
+  const format = (value) => {
+    const shown = trimNum(value);
+    if (shown == null) return null;
+    return currency ? `${currency} ${shown}` : shown;
+  };
+  return {
+    comparable: true,
+    kind: "FIXED",
+    count: normalized.length,
+    average,
+    min,
+    max,
+    currency,
+    basis: normalized[0].basis,
+    averageDisplay: format(average),
+    minDisplay: format(min),
+    maxDisplay: format(max),
+  };
+}
+
+/**
+ * Current campaign Avg Commission display string (see summarizeCommissionFacts).
+ * Display/reporting only — never an order-level payout input.
+ */
+export function averageCommissionFacts(facts = []) {
+  return summarizeCommissionFacts(facts).averageDisplay;
 }

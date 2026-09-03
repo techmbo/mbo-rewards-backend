@@ -80,7 +80,10 @@ export class CampaignCommissionSummaryError extends Error {
 }
 
 function asNumber(value) {
-  if (value == null || value === "") return null;
+  // Explicit zero participates in Avg/Min/Max; blank/whitespace input does not.
+  if (value == null) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  if (typeof value === "boolean") return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }

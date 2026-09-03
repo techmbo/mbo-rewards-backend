@@ -41,6 +41,32 @@ describe("supplier commission rules (pointer 12)", () => {
     assert.deepEqual(rules.map((r) => r.commissionSequence), [1, 2, 3, 4]);
   });
 
+  it("fans out an explicit 0% payout group as its own SupplierCommissionRule outcome", () => {
+    const raw = {
+      id: "camp-zero",
+      payouts: [
+        { id: "g-default", model: "cps", value: 10 },
+        { id: "g-excluded", model: "cps", value: 0, category: "Excluded Category X" },
+      ],
+    };
+    const rules = extractCommissionRulesFromCampaignRaw(raw);
+    assert.equal(rules.length, 2);
+    const zero = rules.find((r) => r.ratePercent === 0);
+    assert.ok(zero, "zero payout outcome must survive fan-out");
+    assert.equal(zero.supplierRuleType, "PERCENT");
+    assert.equal(zero.fixedAmount, null);
+    assert.ok(rules.some((r) => r.ratePercent === 10));
+    assert.equal(new Set(rules.map((r) => r.outcomeKey)).size, 2);
+  });
+
+  it("does not fan out a blank payout value as a zero rule", () => {
+    const rules = extractCommissionRulesFromCampaignRaw({
+      id: "camp-blank",
+      payouts: [{ id: "g-blank", model: "cps", value: "" }, { id: "g-null", model: "cps", value: null }],
+    });
+    assert.equal(rules.length, 0);
+  });
+
   it("collectEmbeddedCommissionRulesFromCampaigns merges campaigns without concatenating", () => {
     const all = collectEmbeddedCommissionRulesFromCampaigns([
       {

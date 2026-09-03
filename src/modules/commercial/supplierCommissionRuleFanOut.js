@@ -20,7 +20,9 @@ function asString(value) {
 }
 
 function asNumber(value) {
-  if (value == null || value === "") return null;
+  if (value == null) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  if (typeof value === "boolean") return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }

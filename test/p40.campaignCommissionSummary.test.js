@@ -198,3 +198,57 @@ describe("Pointer 40 — GET /ops/network/ai-integration-guide", () => {
     assert.equal(status, 401);
   });
 });
+
+describe("Pointer 40 — explicit zero participates in Avg / Min / Max", () => {
+  it("[0%, 10%] gives avg 5%, min 0%, max 10%", () => {
+    const summary = computeCampaignCommissionSummary({
+      now: NOW,
+      rules: [
+        { ratePercent: 0, effectiveFrom: "2026-01-01T00:00:00.000Z" },
+        { ratePercent: 10, effectiveFrom: "2026-01-01T00:00:00.000Z" },
+      ],
+    });
+    assert.equal(summary.commission_count, 2);
+    assert.equal(summary.avg_commission_type, AVG_COMMISSION_TYPE.PERCENT);
+    assert.equal(summary.avg_commission, 5);
+    assert.equal(summary.min_commission, 0);
+    assert.equal(summary.max_commission, 10);
+    assert.equal(summary.payableRateAllowed, false);
+  });
+
+  it("[USD 0/order, USD 10/order] gives avg 5, min 0, max 10", () => {
+    const summary = computeCampaignCommissionSummary({
+      now: NOW,
+      rules: [
+        { fixedAmount: 0, currency: "USD", basis: "FIXED_PER_ORDER", effectiveFrom: "2026-01-01T00:00:00.000Z" },
+        { fixedAmount: 10, currency: "USD", basis: "FIXED_PER_ORDER", effectiveFrom: "2026-01-01T00:00:00.000Z" },
+      ],
+    });
+    assert.equal(summary.avg_commission_type, AVG_COMMISSION_TYPE.FIXED);
+    assert.equal(summary.avg_commission, 5);
+    assert.equal(summary.min_commission, 0);
+    assert.equal(summary.max_commission, 10);
+    assert.equal(summary.payableRateAllowed, false);
+  });
+
+  it("a zero rule mixed with a fixed rule or another currency remains MIXED", () => {
+    const percentAndFixed = computeCampaignCommissionSummary({
+      now: NOW,
+      rules: [
+        { ratePercent: 0, effectiveFrom: "2026-01-01T00:00:00.000Z" },
+        { fixedAmount: 10, currency: "USD", basis: "CPA", effectiveFrom: "2026-01-01T00:00:00.000Z" },
+      ],
+    });
+    assert.equal(percentAndFixed.avg_commission_type, AVG_COMMISSION_TYPE.MIXED);
+    assert.equal(percentAndFixed.avg_commission, null);
+
+    const crossCurrency = computeCampaignCommissionSummary({
+      now: NOW,
+      rules: [
+        { fixedAmount: 0, currency: "USD", basis: "CPA", effectiveFrom: "2026-01-01T00:00:00.000Z" },
+        { fixedAmount: 10, currency: "EUR", basis: "CPA", effectiveFrom: "2026-01-01T00:00:00.000Z" },
+      ],
+    });
+    assert.equal(crossCurrency.avg_commission_type, AVG_COMMISSION_TYPE.MIXED);
+  });
+});

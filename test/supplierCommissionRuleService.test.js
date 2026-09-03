@@ -130,4 +130,83 @@ describe("SupplierCommissionRuleService history and idempotency", () => {
     assert.equal(rows.length, 1);
     assert.equal(new Date(rows[0].effectiveFrom).toISOString(), "2026-10-01T00:00:00.000Z");
   });
+
+  describe("explicit zero commission versioning", () => {
+    it("closes the 10% version and opens a 0% successor when the supplier drops to 0%", async () => {
+      const { rows, db } = createRuleDb();
+      const service = new SupplierCommissionRuleService({ prisma: db });
+
+      const previous = await service.upsertNormalizedFact(baseInput({ ratePercent: 10 }));
+      const successor = await service.upsertNormalizedFact(
+        baseInput({ ratePercent: 0, sourceEvidenceAt: new Date("2026-09-15T00:00:00.000Z") }),
+      );
+
+      assert.notEqual(previous.id, successor.id);
+      assert.equal(rows.length, 2);
+      const oldRow = rows.find((row) => row.id === previous.id);
+      const newRow = rows.find((row) => row.id === successor.id);
+      assert.equal(oldRow.ratePercent, 10);
+      assert.equal(new Date(oldRow.effectiveUntil).toISOString(), "2026-09-15T00:00:00.000Z");
+      assert.equal(newRow.ratePercent, 0);
+      assert.equal(newRow.effectiveUntil, null);
+    });
+
+    it("re-syncing an identical 0% rule is idempotent and creates no new version", async () => {
+      const { rows, db } = createRuleDb();
+      const service = new SupplierCommissionRuleService({ prisma: db });
+
+      const first = await service.upsertNormalizedFact(baseInput({ ratePercent: 0 }));
+      const second = await service.upsertNormalizedFact(
+        baseInput({ ratePercent: 0, sourceEvidenceAt: new Date("2026-09-20T00:00:00.000Z") }),
+      );
+      const third = await service.upsertNormalizedFact(
+        baseInput({ ratePercent: "0", sourceEvidenceAt: new Date("2026-09-25T00:00:00.000Z") }),
+      );
+
+      assert.equal(first.id, second.id);
+      assert.equal(first.id, third.id);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].effectiveUntil, null);
+    });
+
+    it("closes the 0% version and opens a 10% successor when the supplier restores payout", async () => {
+      const { rows, db } = createRuleDb();
+      const service = new SupplierCommissionRuleService({ prisma: db });
+
+      const zero = await service.upsertNormalizedFact(baseInput({ ratePercent: 0 }));
+      const restored = await service.upsertNormalizedFact(
+        baseInput({ ratePercent: 10, sourceEvidenceAt: new Date("2026-10-01T00:00:00.000Z") }),
+      );
+
+      assert.notEqual(zero.id, restored.id);
+      assert.equal(rows.length, 2);
+      const zeroRow = rows.find((row) => row.id === zero.id);
+      assert.equal(zeroRow.ratePercent, 0);
+      assert.equal(new Date(zeroRow.effectiveUntil).toISOString(), "2026-10-01T00:00:00.000Z");
+      assert.equal(rows.find((row) => row.id === restored.id).ratePercent, 10);
+    });
+
+    it("treats a fixed zero and a missing fixed amount as different economics", async () => {
+      const { rows, db } = createRuleDb();
+      const service = new SupplierCommissionRuleService({ prisma: db });
+      const fixedInput = (overrides = {}) =>
+        baseInput({
+          supplierRuleType: "FIXED",
+          basis: "FIXED_PER_ORDER",
+          ratePercent: null,
+          fixedAmount: 0,
+          currency: "USD",
+          outcomeKey: "campaign-1::campaigns::commission::network-rule-2::FIXED::FIXED_PER_ORDER::USD::slot:1::",
+          ...overrides,
+        });
+
+      const zero = await service.upsertNormalizedFact(fixedInput());
+      const again = await service.upsertNormalizedFact(
+        fixedInput({ sourceEvidenceAt: new Date("2026-09-10T00:00:00.000Z") }),
+      );
+      assert.equal(zero.id, again.id);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].fixedAmount, 0);
+    });
+  });
 });

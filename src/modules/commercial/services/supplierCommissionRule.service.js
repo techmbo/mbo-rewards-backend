@@ -53,11 +53,19 @@ function normalizeConditions(input = []) {
   return rows;
 }
 
+function moneyOrNull(value) {
+  // Explicit zero is real economics (10% -> 0% is a genuine change); blank input is absent.
+  if (value == null) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function sameMoney(a, b) {
-  const left = a == null ? null : Number(a);
-  const right = b == null ? null : Number(b);
+  const left = moneyOrNull(a);
+  const right = moneyOrNull(b);
   if (left == null && right == null) return true;
-  return Number.isFinite(left) && Number.isFinite(right) && left === right;
+  return left != null && right != null && left === right;
 }
 
 function sameDate(a, b) {
