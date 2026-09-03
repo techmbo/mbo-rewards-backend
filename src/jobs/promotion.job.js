@@ -4,6 +4,7 @@ import { PromotionService } from "../modules/supplier/services/promotion.service
 import { SupplierCampaignPromotionService } from "../modules/supplier/services/supplierCampaignPromotion.service.js";
 import { SupplierCouponPromotionService } from "../modules/supplier/services/supplierCouponPromotion.service.js";
 import { CampaignNormalizationService } from "../modules/ops/campaignNormalization.service.js";
+import { persistRakutenCommissionOffers } from "../modules/commercial/rakutenCommissionPersistence.service.js";
 
 function emptySummary() {
   return {
@@ -35,6 +36,13 @@ function accumulate(summary, result) {
   }
 }
 
+function shouldRunRakutenCommissionPromotion({ entityTypes, networkSource } = {}) {
+  const types = Array.isArray(entityTypes) ? entityTypes : [];
+  const includesCampaign = types.includes(SUPPLIER_ENTITY_TYPES.CAMPAIGN);
+  const network = String(networkSource || "").toLowerCase();
+  return includesCampaign && (!network || network === "rakuten");
+}
+
 export class PromotionJob {
   constructor(deps = {}) {
     this.campaignPromotion = deps.campaignPromotion ?? new SupplierCampaignPromotionService();
@@ -43,6 +51,7 @@ export class PromotionJob {
     this.mapperErrorRepo = deps.mapperErrorRepo ?? new MapperErrorRepository();
     this.entityRepo = deps.entityRepo ?? new EntityRepository();
     this.normalization = deps.normalization ?? new CampaignNormalizationService();
+    this.rakutenCommissionPromotion = deps.rakutenCommissionPromotion ?? persistRakutenCommissionOffers;
   }
 
   async run({
@@ -76,6 +85,19 @@ export class PromotionJob {
 
       cursorId = batch[batch.length - 1].id;
       if (batch.length < batchSize) break;
+    }
+
+    if (shouldRunRakutenCommissionPromotion({ entityTypes, networkSource })) {
+      try {
+        summary.rakutenCommissionPromotion = await this.rakutenCommissionPromotion({
+          sourceAccountLabel: networkSource === "rakuten" ? null : null,
+        });
+      } catch (error) {
+        summary.rakutenCommissionPromotion = {
+          failed: true,
+          error: error?.message || "Rakuten commission promotion failed",
+        };
+      }
     }
 
     summary.durationMs = Date.now() - startedAt;
