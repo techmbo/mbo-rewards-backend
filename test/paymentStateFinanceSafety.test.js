@@ -132,6 +132,48 @@ describe("Finance safety — client payable transition", () => {
     assert.equal(calls.transactionSelect.transactionType, true);
   });
 
+  it("re-checks finance evidence before later client payment states", async () => {
+    const order = makeOrder({
+      clientPaymentStatus: "CLIENT_PAYMENT_PAYABLE",
+      metadata: {
+        networkCommission: "100",
+        networkInvoiceAmount: "100",
+        networkPaymentAmount: "100",
+      },
+    });
+    const { service, calls } = makeHarness({ order });
+
+    await expectRejected(
+      service.transitionClientPayment("ord-finance-1", "CLIENT_PAYMENT_PAID"),
+      /MBO actual receipt required/i,
+    );
+    assert.equal(calls.updates.length, 0);
+  });
+
+  it("blocks later payment states when current reconciliation no longer matches", async () => {
+    const order = makeOrder({ clientPaymentStatus: "CLIENT_PAYMENT_PAYABLE" });
+    const { service, calls } = makeHarness({
+      order,
+      transactions: [
+        {
+          id: "ft-1",
+          supplierReceivable: "100",
+          clientPayable: "80",
+          transactionType: "EARN",
+          originalCurrency: "USD",
+          metadata: {},
+          calculationMetadata: {},
+        },
+      ],
+    });
+
+    await expectRejected(
+      service.transitionClientPayment("ord-finance-1", "CLIENT_PAYMENT_PROCESSING"),
+      /Reconciliation mismatch/i,
+    );
+    assert.equal(calls.updates.length, 0);
+  });
+
   it("can disable only the supplier-ledger prerequisite without bypassing reconciliation and MBO receipt", async () => {
     const { service } = makeHarness({
       order: makeOrder({ supplierPaymentStatus: "PAYMENT_PAYABLE" }),
