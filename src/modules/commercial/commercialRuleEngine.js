@@ -344,7 +344,6 @@ export function calculateCommercial({
       rule: clientCommissionRule,
       kind,
       method: "fixed_client_percent_of_order_value",
-      allowClientExceedSupplier: true,
       meta: {
         orderValue: orderValueAmount,
         orderValueSource,
@@ -372,7 +371,6 @@ export function calculateCommercial({
       rule: clientCommissionRule,
       kind,
       method: "fixed_client_amount_per_confirmed_order",
-      allowClientExceedSupplier: true,
       meta: {
         fixedAmount: amt,
         confirmedOrderCount: 1,
@@ -384,7 +382,11 @@ export function calculateCommercial({
   }
 
   if (kind === V15_RULE_TYPES.MANUAL_APPROVED_CLIENT_COMMISSION) {
-    if (!clientCommissionRule.manualApproved) {
+    if (
+      !clientCommissionRule.manualApproved ||
+      !clientCommissionRule.manualApprovedAt ||
+      !clientCommissionRule.manualApprovedBy
+    ) {
       return fail("manual_commission_not_approved");
     }
     const amt = Number(clientCommissionRule.manualAmount);
@@ -401,7 +403,6 @@ export function calculateCommercial({
       rule: clientCommissionRule,
       kind,
       method: "manual_approved_client_commission",
-      allowClientExceedSupplier: true,
       meta: {
         manualAmount: amt,
         manualApprovedAt: clientCommissionRule.manualApprovedAt ?? null,
