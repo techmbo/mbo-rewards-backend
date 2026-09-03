@@ -370,6 +370,9 @@ enum SupplierKey {
   PARTNERIZE
   IMPACT
   AWIN
+  ADMITAD
+  CJ
+  RAKUTEN
   UNKNOWN
 }
 
