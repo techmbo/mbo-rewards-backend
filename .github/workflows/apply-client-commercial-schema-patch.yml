@@ -32,7 +32,12 @@ jobs:
       - name: Apply deterministic commercial service patch
         run: node scripts/apply-client-commercial-service-patch.mjs
       - name: Apply deterministic finance runtime patch
-        run: node scripts/apply-financial-transaction-runtime-patch.mjs
+        run: |
+          if grep -q 'deterministicRuleSelection: true' src/modules/finance/financialTransaction.service.js && grep -q 'clientCommercialRuntime.evaluate' src/modules/finance/financialTransaction.service.js; then
+            echo "Deterministic finance runtime already integrated; skipping one-time patch."
+          else
+            node scripts/apply-financial-transaction-runtime-patch.mjs
+          fi
       - name: Apply finance safety hardening patch
         run: node scripts/apply-finance-safety-hardening-patch.mjs
       - name: Commit persistence integration updates
