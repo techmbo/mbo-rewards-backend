@@ -8,6 +8,7 @@ on:
       - 'scripts/apply-client-commercial-schema-patch.mjs'
       - 'scripts/apply-client-commercial-service-patch.mjs'
       - 'scripts/apply-financial-transaction-runtime-patch.mjs'
+      - 'scripts/apply-finance-safety-hardening-patch.mjs'
       - '.github/workflows/apply-client-commercial-schema-patch.yml'
 
 permissions:
@@ -32,14 +33,16 @@ jobs:
         run: node scripts/apply-client-commercial-service-patch.mjs
       - name: Apply deterministic finance runtime patch
         run: node scripts/apply-financial-transaction-runtime-patch.mjs
+      - name: Apply finance safety hardening patch
+        run: node scripts/apply-finance-safety-hardening-patch.mjs
       - name: Commit persistence integration updates
         run: |
-          if git diff --quiet -- prisma/schema.prisma src/modules/commercial/services/commercial.service.js src/modules/commercial/services/clientCommercialRuntime.service.js src/modules/commercial/commercialRuleEngine.js src/modules/finance/financialTransaction.service.js; then
+          if git diff --quiet -- prisma/schema.prisma src/modules/commercial/services/commercial.service.js src/modules/commercial/services/clientCommercialRuntime.service.js src/modules/commercial/commercialRuleEngine.js src/modules/finance/financialTransaction.service.js src/modules/finance/reconciliation.service.js src/modules/finance/financeSeparation.contract.js src/modules/finance/reconciliationLogic.contract.js src/modules/order/paymentState.service.js; then
             echo "Client commercial and finance runtime integration already applied; nothing to commit."
             exit 0
           fi
           git config user.name "MBO Group"
           git config user.email "tech@marketingblueocean.com"
-          git add prisma/schema.prisma src/modules/commercial/services/commercial.service.js src/modules/commercial/services/clientCommercialRuntime.service.js src/modules/commercial/commercialRuleEngine.js src/modules/finance/financialTransaction.service.js
-          git commit -m "Route financial recognition through deterministic client commercial runtime"
+          git add prisma/schema.prisma src/modules/commercial/services/commercial.service.js src/modules/commercial/services/clientCommercialRuntime.service.js src/modules/commercial/commercialRuleEngine.js src/modules/finance/financialTransaction.service.js src/modules/finance/reconciliation.service.js src/modules/finance/financeSeparation.contract.js src/modules/finance/reconciliationLogic.contract.js src/modules/order/paymentState.service.js
+          git commit -m "Harden reconciliation evidence and client payment release"
           git push origin HEAD:fix/mbo-rewards-backend-final-corrections
