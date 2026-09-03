@@ -1,0 +1,40 @@
+name: Apply Expanded Supplier Key Schema Patch
+
+on:
+  push:
+    branches:
+      - fix/mbo-rewards-backend-final-corrections
+    paths:
+      - 'scripts/apply-expanded-supplier-key-schema-patch.mjs'
+      - '.github/workflows/apply-expanded-supplier-key-schema-patch.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-schema:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout correction branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/mbo-rewards-backend-final-corrections
+          fetch-depth: 0
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Apply deterministic SupplierKey enum patch
+        run: node scripts/apply-expanded-supplier-key-schema-patch.mjs
+      - name: Commit schema update
+        run: |
+          if git diff --quiet -- prisma/schema.prisma; then
+            echo "SupplierKey schema already expanded; nothing to commit."
+            exit 0
+          fi
+          git config user.name "MBO Group"
+          git config user.email "tech@marketingblueocean.com"
+          git add prisma/schema.prisma
+          git commit -m "Expand SupplierKey enum to all nine networks"
+          git push origin HEAD:fix/mbo-rewards-backend-final-corrections
