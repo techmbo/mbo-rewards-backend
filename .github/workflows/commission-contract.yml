@@ -8,6 +8,7 @@ on:
       - 'src/adapters/**'
       - 'src/jobs/admitadSupplierSync.js'
       - 'src/jobs/rakutenSupplierSync.js'
+      - 'src/jobs/promotion.job.js'
       - 'src/jobs/sync.job.js'
       - 'src/modules/commercial/**'
       - 'src/modules/finance/**'
@@ -18,12 +19,16 @@ on:
       - 'src/modules/order/paymentState.service.js'
       - 'src/modules/ops/campaignCommissions.js'
       - 'src/modules/supplier/entityIdentity.js'
+      - 'src/modules/supplier/mappers/**'
       - 'src/modules/networkOps/campaignCommissionSummary.contract.js'
       - 'test/admitadAdapter.test.js'
       - 'test/admitadSyncWiring.test.js'
       - 'test/rakutenAdapter.test.js'
       - 'test/rakutenSyncWiring.test.js'
       - 'test/rakutenOfferCommissionMapper.test.js'
+      - 'test/rakutenCampaignMapper.test.js'
+      - 'test/rakutenCommissionPersistence.test.js'
+      - 'test/rakutenPromotionHook.test.js'
       - 'test/campaignCommissions.test.js'
       - 'test/clientCommercialMatcher.test.js'
       - 'test/clientCommercialCalculation.test.js'
@@ -51,6 +56,7 @@ on:
       - 'src/adapters/**'
       - 'src/jobs/admitadSupplierSync.js'
       - 'src/jobs/rakutenSupplierSync.js'
+      - 'src/jobs/promotion.job.js'
       - 'src/jobs/sync.job.js'
       - 'src/modules/commercial/**'
       - 'src/modules/finance/**'
@@ -61,12 +67,16 @@ on:
       - 'src/modules/order/paymentState.service.js'
       - 'src/modules/ops/campaignCommissions.js'
       - 'src/modules/supplier/entityIdentity.js'
+      - 'src/modules/supplier/mappers/**'
       - 'src/modules/networkOps/campaignCommissionSummary.contract.js'
       - 'test/admitadAdapter.test.js'
       - 'test/admitadSyncWiring.test.js'
       - 'test/rakutenAdapter.test.js'
       - 'test/rakutenSyncWiring.test.js'
       - 'test/rakutenOfferCommissionMapper.test.js'
+      - 'test/rakutenCampaignMapper.test.js'
+      - 'test/rakutenCommissionPersistence.test.js'
+      - 'test/rakutenPromotionHook.test.js'
       - 'test/campaignCommissions.test.js'
       - 'test/clientCommercialMatcher.test.js'
       - 'test/clientCommercialCalculation.test.js'
@@ -154,3 +164,9 @@ jobs:
         run: node --test test/rakutenSyncWiring.test.js
       - name: Run Rakuten offer commission mapper tests
         run: node --test test/rakutenOfferCommissionMapper.test.js
+      - name: Run Rakuten campaign mapper tests
+        run: node --test test/rakutenCampaignMapper.test.js
+      - name: Run Rakuten commission persistence tests
+        run: node --test test/rakutenCommissionPersistence.test.js
+      - name: Run Rakuten post-promotion hook tests
+        run: node --test test/rakutenPromotionHook.test.js
