@@ -25,6 +25,7 @@ import {
   mapAwinOffer,
 } from "./awin.mapper.js";
 import { mapRakutenCampaign } from "./rakuten.mapper.js";
+import { mapCjCampaign, mapCjCoupon } from "./cj.mapper.js";
 import { enrichCouponVoucherRecord } from "../../coupons/couponVoucher.contract.js";
 import { buildCampaignBaseFromEntity, buildCouponBaseFromEntity } from "./shared.js";
 
@@ -36,6 +37,7 @@ const CAMPAIGN_MAPPERS = {
   IMPACT: mapImpactCampaign,
   AWIN: mapAwinCampaign,
   RAKUTEN: mapRakutenCampaign,
+  CJ: mapCjCampaign,
 };
 
 const COUPON_MAPPERS = {
@@ -45,6 +47,7 @@ const COUPON_MAPPERS = {
   PARTNERIZE: mapPartnerizeCoupon,
   IMPACT: mapImpactCoupon,
   AWIN: mapAwinOffer,
+  CJ: mapCjCoupon,
 };
 
 const KNOWN_CONVERSION_SUPPLIERS = new Set([
