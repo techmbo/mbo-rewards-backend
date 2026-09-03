@@ -38,7 +38,7 @@ describe("MBO nine-network registry", () => {
     assert.equal(isSupplierRegistered("vCommission"), true);
   });
 
-  it("registers Admitad and the Rakuten foundation while keeping CJ gated", () => {
+  it("registers Admitad, Rakuten foundation and CJ discovery", () => {
     const registered = new Set(listRegisteredSuppliers());
 
     assert.equal(registered.has("ADMITAD"), true);
@@ -53,23 +53,28 @@ describe("MBO nine-network registry", () => {
     );
     assert.doesNotThrow(() => createSupplierAdapter("RAKUTEN", { accessToken: "test-token" }));
 
-    assert.equal(registered.has("CJ"), false);
-    assert.equal(isSupplierRegistered("CJ"), false);
-    assert.throws(
-      () => createSupplierAdapter("CJ"),
-      (error) => {
-        assert.equal(error.code, "ADAPTER_NOT_IMPLEMENTED");
-        assert.equal(error.supplierKey, "CJ");
-        return true;
-      },
+    assert.equal(registered.has("CJ"), true);
+    assert.equal(isSupplierRegistered("CJ"), true);
+    assert.equal(getSupplierCapabilities("CJ").implementationStatus, "IMPLEMENTED_DISCOVERY");
+    assert.doesNotThrow(() =>
+      createSupplierAdapter("CJ", {
+        accessToken: "test-token",
+        requestorCid: "123",
+        websiteId: "456",
+      }),
     );
   });
 
-  it("keeps CJ conversion schema explicitly gated on live verification", () => {
+  it("keeps CJ conversion and product schemas explicitly gated on live verification", () => {
     const cj = getSupplierCapabilities("CJ");
-    assert.equal(cj.implementationStatus, "VERIFY_LIVE");
+    assert.equal(cj.implementationStatus, "IMPLEMENTED_DISCOVERY");
+    assert.equal(cj.capabilities.includes("CAMPAIGNS"), true);
+    assert.equal(cj.capabilities.includes("COUPONS"), true);
     assert.equal(cj.capabilities.includes("CONVERSIONS"), false);
-    assert.match(cj.notes.join(" "), /live publisher GraphQL schema/i);
+    assert.equal(cj.capabilities.includes("PAYMENTS"), false);
+    assert.equal(cj.capabilities.includes("PRODUCTS"), false);
+    assert.match(cj.notes.join(" "), /Commission Detail GraphQL remains VERIFY_LIVE/i);
+    assert.match(cj.notes.join(" "), /Product Search GraphQL.*remains gated/i);
   });
 
   it("keeps payment evidence separate from order approval in Admitad notes", () => {
