@@ -243,7 +243,19 @@ const commercialLineageFields = {
   tiers: z.array(clientCommercialTierSchema).max(100).optional(),
 };
 
+function refineManualApprovalEvidence(data, ctx) {
+  if (data.manualApproved === true && (!data.manualApprovedAt || !data.manualApprovedBy)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Manual approval requires manualApprovedAt and manualApprovedBy",
+      path: ["manualApproved"],
+    });
+  }
+}
+
 function refineCommercialRule(data, ctx) {
+  refineManualApprovalEvidence(data, ctx);
+
   const type = data.commissionType || "PERCENT";
   const needsRatio =
     type === "PERCENT" ||
@@ -281,6 +293,13 @@ function refineCommercialRule(data, ctx) {
   }
 
   if (data.activate === true) {
+    if (type === "MANUAL_APPROVED_CLIENT_COMMISSION" && data.manualApproved !== true) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Manual-approved commercial rules must be explicitly approved before activation",
+        path: ["manualApproved"],
+      });
+    }
     if (!data.agreementRef) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "agreementRef is required to activate a commercial rule", path: ["agreementRef"] });
     }
@@ -314,6 +333,7 @@ export const createCommissionRuleBodySchema = z
     fixedAmount: moneySchema.optional().nullable(),
     manualAmount: moneySchema.optional().nullable(),
     manualApproved: z.boolean().optional(),
+    manualApprovedAt: z.coerce.date().optional().nullable(),
     manualApprovedBy: z.string().max(200).optional().nullable(),
     displayRangeMin: moneySchema.optional().nullable(),
     displayRangeMax: moneySchema.optional().nullable(),
@@ -335,10 +355,12 @@ export const updateCommissionRuleBodySchema = z
     fixedAmount: moneySchema.optional().nullable(),
     manualAmount: moneySchema.optional().nullable(),
     manualApproved: z.boolean().optional(),
+    manualApprovedAt: z.coerce.date().optional().nullable(),
     manualApprovedBy: z.string().max(200).optional().nullable(),
     displayRangeMin: moneySchema.optional().nullable(),
     displayRangeMax: moneySchema.optional().nullable(),
     displayLabel: z.string().max(200).optional().nullable(),
     currency: z.string().length(3).optional().nullable(),
     ...commercialLineageFields,
-  });
+  })
+  .superRefine(refineManualApprovalEvidence);
