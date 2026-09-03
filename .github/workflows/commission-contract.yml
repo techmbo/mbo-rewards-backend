@@ -7,10 +7,12 @@ on:
     paths:
       - 'src/adapters/**'
       - 'src/jobs/admitadSupplierSync.js'
+      - 'src/jobs/rakutenSupplierSync.js'
       - 'src/jobs/sync.job.js'
       - 'src/modules/commercial/**'
       - 'src/modules/finance/**'
       - 'src/modules/networkOps/sourceObjects.catalog.js'
+      - 'src/modules/order/orderConversionIngestion.contract.js'
       - 'src/modules/order/orderMerge.js'
       - 'src/modules/order/orderStatusNormalization.contract.js'
       - 'src/modules/order/paymentState.service.js'
@@ -19,6 +21,8 @@ on:
       - 'src/modules/networkOps/campaignCommissionSummary.contract.js'
       - 'test/admitadAdapter.test.js'
       - 'test/admitadSyncWiring.test.js'
+      - 'test/rakutenAdapter.test.js'
+      - 'test/rakutenSyncWiring.test.js'
       - 'test/campaignCommissions.test.js'
       - 'test/clientCommercialMatcher.test.js'
       - 'test/clientCommercialCalculation.test.js'
@@ -45,10 +49,12 @@ on:
     paths:
       - 'src/adapters/**'
       - 'src/jobs/admitadSupplierSync.js'
+      - 'src/jobs/rakutenSupplierSync.js'
       - 'src/jobs/sync.job.js'
       - 'src/modules/commercial/**'
       - 'src/modules/finance/**'
       - 'src/modules/networkOps/sourceObjects.catalog.js'
+      - 'src/modules/order/orderConversionIngestion.contract.js'
       - 'src/modules/order/orderMerge.js'
       - 'src/modules/order/orderStatusNormalization.contract.js'
       - 'src/modules/order/paymentState.service.js'
@@ -57,6 +63,8 @@ on:
       - 'src/modules/networkOps/campaignCommissionSummary.contract.js'
       - 'test/admitadAdapter.test.js'
       - 'test/admitadSyncWiring.test.js'
+      - 'test/rakutenAdapter.test.js'
+      - 'test/rakutenSyncWiring.test.js'
       - 'test/campaignCommissions.test.js'
       - 'test/clientCommercialMatcher.test.js'
       - 'test/clientCommercialCalculation.test.js'
@@ -138,3 +146,7 @@ jobs:
         run: node --test test/admitadAdapter.test.js
       - name: Run Admitad sync wiring tests
         run: node --test test/admitadSyncWiring.test.js
+      - name: Run Rakuten adapter contract tests
+        run: node --test test/rakutenAdapter.test.js
+      - name: Run Rakuten sync wiring tests
+        run: node --test test/rakutenSyncWiring.test.js
