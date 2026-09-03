@@ -44,6 +44,16 @@ function stableValue(value) {
   return value;
 }
 
+function stableConditionValue(operator, value) {
+  const normalized = stableValue(value);
+  if (["IN", "NOT_IN"].includes(String(operator || "").toUpperCase()) && Array.isArray(normalized)) {
+    return [...normalized].sort((left, right) =>
+      JSON.stringify(left).localeCompare(JSON.stringify(right)),
+    );
+  }
+  return normalized;
+}
+
 function commercialConditionSignature(conditions = []) {
   const list = Array.isArray(conditions) ? conditions : [];
   const normalized = list
@@ -52,7 +62,10 @@ function commercialConditionSignature(conditions = []) {
       conditionType: String(condition.conditionType || "CUSTOM_FIELD").trim().toUpperCase(),
       operator: String(condition.operator || "EQ").trim().toUpperCase(),
       field: condition.field || null,
-      value: stableValue(condition.value ?? null),
+      value: stableConditionValue(
+        String(condition.operator || "EQ").trim().toUpperCase(),
+        condition.value ?? null,
+      ),
     }))
     .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
   return normalized.length ? JSON.stringify(normalized) : "DEFAULT";
@@ -65,6 +78,11 @@ function assertCommercialActivationReady(rule) {
   if (String(rule.commissionType || "").toUpperCase() === "TIERED") {
     if (!rule.tierMetric || !rule.tierPeriod || !Array.isArray(rule.tiers) || !rule.tiers.length) {
       throw fail("TIERED rules require tierMetric, tierPeriod and at least one persisted tier.", 409);
+    }
+  }
+  if (String(rule.commissionType || "").toUpperCase() === "MANUAL_APPROVED_CLIENT_COMMISSION") {
+    if (rule.manualApproved !== true || !rule.manualApprovedAt || !rule.manualApprovedBy) {
+      throw fail("Manual-approved client commission requires explicit approval evidence before activation.", 409);
     }
   }
   if (rule.subsidyApproved === true && (!rule.subsidyApprovalRef || !rule.subsidyApprovedAt || !rule.subsidyApprovedBy)) {
@@ -405,7 +423,7 @@ export class CommercialService {
         fixedAmount: input.fixedAmount ?? null,
         manualAmount: input.manualAmount ?? null,
         manualApproved,
-        manualApprovedAt: manualApproved ? new Date() : null,
+        manualApprovedAt: manualApproved ? input.manualApprovedAt ?? null : null,
         manualApprovedBy: manualApproved ? input.manualApprovedBy ?? null : null,
         displayRangeMin: input.displayRangeMin ?? null,
         displayRangeMax: input.displayRangeMax ?? null,
@@ -502,10 +520,16 @@ export class CommercialService {
     if (input.metadata !== undefined) data.metadata = input.metadata;
     if (input.conditions !== undefined) data.conditions = input.conditions;
     if (input.tiers !== undefined) data.tiers = input.tiers;
+    if (input.manualApprovedAt !== undefined && input.manualApproved === undefined) {
+      data.manualApprovedAt = input.manualApprovedAt;
+    }
+    if (input.manualApprovedBy !== undefined && input.manualApproved === undefined) {
+      data.manualApprovedBy = input.manualApprovedBy;
+    }
     if (input.manualApproved !== undefined) {
       data.manualApproved = Boolean(input.manualApproved);
       if (data.manualApproved) {
-        data.manualApprovedAt = new Date();
+        data.manualApprovedAt = input.manualApprovedAt ?? rule.manualApprovedAt ?? null;
         data.manualApprovedBy = input.manualApprovedBy ?? rule.manualApprovedBy ?? null;
       } else {
         data.manualApprovedAt = null;
