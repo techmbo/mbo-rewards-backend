@@ -70,9 +70,14 @@ describe("source object catalog", () => {
       assert.ok(items.length > 0, `${network} catalog is empty`);
     }
     assert.equal(networkFamily("optimise_sea"), "optimise");
-    assert.equal(getSourceObject("admitad", "programs")?.live, false);
-    assert.equal(getSourceObject("cj", "advertisers")?.live, false);
-    assert.equal(getSourceObject("rakuten", "events")?.live, false);
+    // Verified adapters are live (Admitad programs, CJ advertisers, Rakuten events); objects
+    // without a verified adapter stay declared but not live.
+    assert.equal(getSourceObject("admitad", "programs")?.live, true);
+    assert.equal(getSourceObject("cj", "advertisers")?.live, true);
+    assert.equal(getSourceObject("rakuten", "events")?.live, true);
+    assert.equal(getSourceObject("admitad", "product_feeds")?.live, false);
+    assert.equal(getSourceObject("cj", "products")?.live, false);
+    assert.equal(getSourceObject("rakuten", "coupons")?.live, false);
     assert.equal(getSourceObject("optimise", "campaigns")?.live, true);
     assert.equal(getSourceObject("boostiny", "settlement")?.live, false);
   });
@@ -156,7 +161,7 @@ describe("isolated source object runs", () => {
     const admitad = await svc.execute({
       network: "admitad",
       networkAccountId: "acc-1",
-      sourceObject: "programs",
+      sourceObject: "product_feeds",
       execute: async () => {
         throw new Error("should not run");
       },

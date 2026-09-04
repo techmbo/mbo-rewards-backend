@@ -72,7 +72,8 @@ test("projectBrandIdentity derives brand label from landing host when advertiser
     destinationUrl: "https://www.klook.com/",
     campaignLogoUrl: "https://cdn.example/k.png",
   });
-  assert.equal(brand.name, "klook.com");
+  // The landing host becomes a readable brand label (short roots are upper-cased), never invented.
+  assert.equal(brand.name, "KLOOK");
   assert.equal(brand.websiteUrl, "https://www.klook.com/");
   assert.equal(brand.logoUrl, "https://cdn.example/k.png");
 });

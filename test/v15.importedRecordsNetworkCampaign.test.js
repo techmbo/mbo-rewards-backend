@@ -169,10 +169,12 @@ describe("imported records Network Campaign projection", () => {
       merchant: sc.merchant,
       statuses: { mappingStatus: "MAPPED" },
     });
-    assert.equal(fields.assets.link, false);
-    assert.equal(fields.assets.coupon, false);
-    assert.equal(fields.assets.deeplink, false);
-    assert.equal(fields.assets.feed, false);
+    // Pointer 9 capability states: nothing is invented, so absent capabilities are NOT_SUPPORTED.
+    assert.equal(fields.assets.link, "NOT_SUPPORTED");
+    assert.equal(fields.assets.coupon, "NOT_SUPPORTED");
+    assert.equal(fields.assets.deeplink, "NOT_SUPPORTED");
+    // No explicit feed signal exists on the source, so feed support is UNKNOWN, never invented.
+    assert.equal(fields.assets.feed, "UNKNOWN");
   });
 
   it("nulls commission when supplier has no commission data", () => {
@@ -332,7 +334,7 @@ describe("imported records Network Campaign projection", () => {
     assert.equal(row.brand, "Brand Co");
     assert.equal(row.category, "Travel");
     assert.deepEqual(row.country, ["AE", "SA"]);
-    assert.equal(row.assets.coupon, true);
+    assert.equal(row.assets.coupon, "SUPPORTED");
     assert.equal(row.mboReady, null);
   });
 
@@ -474,6 +476,6 @@ describe("imported records Network Campaign projection", () => {
     assert.equal(row.brand, "Ajio");
     assert.equal(row.category, "Fashion");
     assert.ok(row.country?.includes("IN"));
-    assert.equal(row.assets.coupon, true);
+    assert.equal(row.assets.coupon, "SUPPORTED");
   });
 });

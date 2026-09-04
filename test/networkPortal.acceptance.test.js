@@ -232,7 +232,7 @@ describe("Network Portal — performance dual clicks", () => {
       reportGranularity: "daily",
       metadata: { rawStatus: "approved", mboStandardStatus: "Confirmed" },
     });
-    assert.equal(dto.campaignType, "Coupon + Network Link");
+    assert.equal(dto.campaignType, "Link + Coupon");
     assert.equal(dto.couponSourceScope, "Network API · Shared Limited Code");
     assert.equal(dto.subIds, "mbo_ref_01 · assignment_ref_08 · click_ref_8821");
     assert.equal(dto.attribution, "Matched");
@@ -266,8 +266,11 @@ describe("Network Portal — performance dual clicks", () => {
     assert.equal(dto.campaignName, "Myntra Fashion Sale");
     assert.equal(dto.networkTrackingLink, null);
     assert.equal(dto.mboTrackingLink, null);
-    assert.equal(dto.campaignType, "Coupon Code Only");
-    assert.equal(dto.couponId, "coupon_STYLE30");
+    assert.equal(dto.campaignType, "Coupon");
+    // Coupon dimensions stay exactly as stored on the fact: the coupon id is never backfilled
+    // from the campaign's coupon masters (identity may hydrate, metrics/dimensions may not).
+    assert.equal(dto.couponId, null);
+    assert.equal(dto.couponCode, "STYLE30");
   });
 
   it("builds stable grain keys", () => {

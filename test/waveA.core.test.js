@@ -49,10 +49,25 @@ describe("Wave A Entity→Conversion promotion", () => {
         ...input,
       })),
     };
-    const service = new ConversionPromotionService({ attribution });
+    // Promotion persists the Order (finance grain) before the conversion is attributed.
+    const orders = { upsertOrder: mock.fn(async (input) => ({ id: "ord-1", ...input })) };
+    const service = new ConversionPromotionService({
+      attribution,
+      orders,
+      exceptions: { report: mock.fn(async () => ({})) },
+      prisma: {},
+    });
     const result = await service.promoteEntity(entity);
     assert.equal(result.result, "promoted");
+    assert.equal(result.orderId, "ord-1");
+    assert.equal(orders.upsertOrder.mock.calls.length, 1);
+    const upserted = orders.upsertOrder.mock.calls[0].arguments[0];
+    assert.equal(upserted.supplier, "TRACKIER");
+    assert.equal(upserted.supplierConversionId, "99");
+    assert.equal(upserted.networkRawStatus, "approved");
+    assert.equal(upserted.statusMappingExceptionRequired, true, "unverified raw status is never mapped silently");
     assert.equal(attribution.ingestConversion.mock.calls.length, 1);
+    assert.equal(attribution.ingestConversion.mock.calls[0].arguments[0].orderId, "ord-1");
   });
 
   it("is idempotent via ingestConversion unique key", async () => {
@@ -72,9 +87,16 @@ describe("Wave A Entity→Conversion promotion", () => {
     const attribution = {
       ingestConversion: mock.fn(async () => ({ id: "same", attributionStatus: "ORPHAN" })),
     };
-    const service = new ConversionPromotionService({ attribution });
+    const orders = { upsertOrder: mock.fn(async (input) => ({ id: "ord-same", ...input })) };
+    const service = new ConversionPromotionService({
+      attribution,
+      orders,
+      exceptions: { report: mock.fn(async () => ({})) },
+      prisma: {},
+    });
     await service.promoteEntity(entity);
     await service.promoteEntity(entity);
+    assert.equal(orders.upsertOrder.mock.calls.length, 2, "order upsert is keyed on the same supplier identity");
     assert.equal(attribution.ingestConversion.mock.calls.length, 2);
     assert.equal(
       attribution.ingestConversion.mock.calls[0].arguments[0].supplierConversionId,

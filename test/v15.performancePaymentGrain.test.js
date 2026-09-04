@@ -400,7 +400,8 @@ describe("04E/05E — AdminContractService projection flags + finance gate", () 
     assert.equal(financed.items[0].currency, "USD");
     assert.equal(financed.items[0].date, "2026-08-01");
     assert.equal(financed.items[0].channelType, "LINK_AND_COUPON");
-    assert.equal(financed.items[0].campaignType, "LINK_AND_COUPON");
+    // campaignType carries the v15 display vocabulary (Link / Coupon / Link + Coupon).
+    assert.equal(financed.items[0].campaignType, "Link + Coupon");
     assert.equal(financed.items[0].couponCode, "SAVE");
     assert.equal(financed.items[0].grossOrderValue, 200);
     assert.equal(financed.items[0].netOrderValue, 200);

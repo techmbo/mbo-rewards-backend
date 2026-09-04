@@ -286,7 +286,10 @@ describe("partner campaign DTO isolation", () => {
     });
     assert.equal(dto.couponAvailability, "AVAILABLE_NOT_ASSIGNED");
     assert.equal(dto.couponCode, null);
-    assert.equal(dto.channels.coupon, true);
+    // The coupon channel is only live once a code is actually assigned; capability without a
+    // code is expressed through couponAvailability, never as an active channel.
+    assert.equal(dto.channels.coupon, false);
+    assert.equal(dto.channels.link, true);
   });
 });
 

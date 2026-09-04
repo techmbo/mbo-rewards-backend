@@ -100,7 +100,13 @@ describe("Optimise Entity → Conversion ingest", () => {
     assert.equal(mapped.input.metadata.externalId, "default:optimise_sea-conversion-9001");
     assert.equal(mapped.input.metadata.supplierCampaignId, "411");
     assert.equal(mapped.input.currency, "USD");
-    assert.equal(mapped.input.status, "APPROVED");
+    // Network status normalization is source-scoped and fails closed: a raw "approved" is
+    // preserved verbatim and stays UNKNOWN (mapping exception) until a verified mapping exists.
+    assert.equal(mapped.input.status, "UNKNOWN");
+    assert.equal(mapped.input._order.networkRawStatus, "approved");
+    assert.equal(mapped.input._order.mboOrderStatus, null);
+    assert.equal(mapped.input._order.statusMappingExceptionRequired, true);
+    assert.equal(mapped.input.approvedDate, null);
     assert.equal(Number(mapped.input.supplierCommission), 18.5);
     assert.equal(Number(mapped.input.approvedCommission), 18.5);
     assert.equal(mapped.input.metadata.orderValue, 250);
@@ -118,9 +124,14 @@ describe("Optimise Entity → Conversion ingest", () => {
     );
   });
 
-  it("maps pending / rejected statuses correctly", () => {
-    assert.equal(mapEntityToConversionIngest(optimiseEntity({ status: "pending" })).input.status, "PENDING");
-    assert.equal(mapEntityToConversionIngest(optimiseEntity({ status: "rejected" })).input.status, "REJECTED");
+  it("preserves pending / rejected raw statuses without inventing an MBO status", () => {
+    for (const raw of ["pending", "rejected"]) {
+      const mapped = mapEntityToConversionIngest(optimiseEntity({ status: raw }));
+      assert.equal(mapped.ok, true);
+      assert.equal(mapped.input.status, "UNKNOWN");
+      assert.equal(mapped.input._order.networkRawStatus, raw);
+      assert.equal(mapped.input._order.statusMappingExceptionRequired, true);
+    }
   });
 
   it("skips conversionsByPayment dual-promotion", () => {

@@ -24,6 +24,10 @@ import {
   resolveAssignedCampaignType,
 } from "../src/modules/ops/v15FieldContract.js";
 
+function daysFromNow(days) {
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+}
+
 function buildAssignment({
   id = "a1",
   clientId = "client-a",
@@ -36,8 +40,9 @@ function buildAssignment({
   trackingUrl = "https://mborewards.com/t/client123/ubuy",
   couponCode = "SAVE10",
   discountPercentage = "10% off",
-  assignmentStart = new Date("2026-08-01"),
-  assignmentEnd = new Date("2026-08-31"),
+  // Relative window so the fixture never expires as the calendar moves on.
+  assignmentStart = daysFromNow(-30),
+  assignmentEnd = daysFromNow(30),
   couponValidFrom = new Date("2026-07-01"),
   couponValidUntil = new Date("2026-12-31"),
   supplierStart = new Date("2026-07-01"),
@@ -268,9 +273,10 @@ describe("06E Discount / validity / currency / category / type / fields", () => 
     assert.equal(intersected.startDate.toISOString().slice(0, 10), "2026-08-01");
     assert.equal(intersected.endDate.toISOString().slice(0, 10), "2026-08-31");
 
-    const dto = toPartnerCampaignDto(visibility.projectVisibleCampaign(buildAssignment()));
-    assert.equal(dto.campaignValidity.startDate.slice(0, 10), "2026-08-01");
-    assert.equal(dto.campaignValidity.endDate.slice(0, 10), "2026-08-31");
+    const live = buildAssignment();
+    const dto = toPartnerCampaignDto(visibility.projectVisibleCampaign(live));
+    assert.equal(dto.campaignValidity.startDate.slice(0, 10), live.startDate.toISOString().slice(0, 10));
+    assert.equal(dto.campaignValidity.endDate.slice(0, 10), live.endDate.toISOString().slice(0, 10));
 
     // Expired assignment window hidden
     assert.equal(
