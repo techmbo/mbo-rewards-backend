@@ -39,6 +39,13 @@ function rule(overrides = {}) {
     mappingStatus: has("mappingStatus") ? overrides.mappingStatus : null,
     conditions: has("conditions") ? overrides.conditions : [],
     outcomeKey: overrides.outcomeKey ?? null,
+    // Generic fixture rules carry the raw supplier fragment so the GENERIC path is exercised
+    // with trustworthy evidence; legacy tests override rawRuleReference with null.
+    rawRuleReference: has("rawRuleReference")
+      ? overrides.rawRuleReference
+      : (has("ratePercent") ? overrides.ratePercent : 10) != null
+        ? { commission: `${has("ratePercent") ? overrides.ratePercent : 10}%` }
+        : { amount: overrides.fixedAmount ?? null, currency: has("currency") ? overrides.currency : "USD", model: has("basis") ? overrides.basis : "CPA" },
   };
 }
 
@@ -154,9 +161,15 @@ describe("generic supplier commission readiness — assessment", () => {
   });
 
   it("enrichSupplierCommissionRuleRecord no longer maps a bare number by presence alone", () => {
-    const clean = enrichSupplierCommissionRuleRecord({ ratePercent: 12, sourceRuleId: "rule-1" }, { networkSource: "optimise_sea" });
+    const identityOnly = enrichSupplierCommissionRuleRecord({ ratePercent: 12, sourceRuleId: "rule-1" }, { networkSource: "optimise_sea" });
+    assert.equal(identityOnly.mappingStatus, "REVIEW_REQUIRED", "sourceRuleId proves identity, not semantics");
+    assert.equal(identityOnly.metadata.financeReady, false);
+    assert.ok(identityOnly.metadata.reviewReasons.includes("legacy_readiness_evidence_missing"));
+    const clean = enrichSupplierCommissionRuleRecord({ ratePercent: 12, sourceRuleId: "rule-1", rawRuleReference: { commission: "12%" } }, { networkSource: "optimise_sea" });
     assert.equal(clean.mappingStatus, "MAPPED");
     assert.equal(clean.metadata.financeReady, true);
+    const modelled = enrichSupplierCommissionRuleRecord({ ratePercent: 12, sourceRuleId: "rule-1", commissionModel: "cps" });
+    assert.equal(modelled.metadata.financeReady, true, "supplier-provided payout model is trustworthy evidence");
     const upTo = enrichSupplierCommissionRuleRecord({ ratePercent: 12, sourceRuleId: "rule-2" }, { factDisplay: "Up to 12%" });
     assert.equal(upTo.mappingStatus, "REVIEW_REQUIRED");
     assert.equal(upTo.metadata.financeReady, false);
@@ -437,5 +450,196 @@ describe("generic supplier commission readiness — persistence", () => {
     }
     assert.ok(!SUPPLIER_COMMISSION_RULE_FIELDS.some((f) => /^commission_\d+$/.test(f)));
     assert.equal(new Set(SUPPLIER_COMMISSION_RULE_FIELDS).size, SUPPLIER_COMMISSION_RULE_FIELDS.length);
+  });
+});
+
+describe("generic supplier commission readiness — legacy persisted rows", () => {
+  const legacy = (overrides = {}) => ({
+    id: "legacy-1",
+    sourceRuleId: "R1",
+    commissionSequence: 1,
+    supplierRuleType: "PERCENT",
+    commissionType: "PERCENTAGE",
+    basis: "PERCENT_OF_SALE",
+    ratePercent: 10,
+    fixedAmount: null,
+    currency: null,
+    mappingStatus: "MAPPED",
+    metadata: null,
+    rawRuleReference: null,
+    conditions: [],
+    outcomeKey: "123::campaigns::commission::R1::PERCENT::PERCENT_OF_SALE::::slot:1::",
+    ...overrides,
+  });
+
+  it("1. persisted legacy bare percent row with no readiness evidence fails closed", () => {
+    const a = assessSupplierCommissionReadiness(legacy({ mappingStatus: null }));
+    assert.equal(a.financeReady, false);
+    assert.equal(a.mappingStatus, "REVIEW_REQUIRED");
+    assert.equal(a.semanticStatus, "VERIFY_LIVE");
+    assert.ok(a.reviewReasons.includes("legacy_readiness_evidence_missing"));
+    assert.equal(a.decisionSource, "GENERIC");
+    assert.deepEqual(a.evidenceSources, []);
+  });
+
+  it("2. CRITICAL: matcher never calculates from a legacy bare numeric row; network actual preserved", () => {
+    const result = matchSupplierCommissionRule({
+      rules: [legacy()],
+      facts: { orderValue: 100, currency: "USD" },
+      actualCommission: 9.5,
+      actualCurrency: "USD",
+    });
+    assert.equal(result.status, "REVIEW_REQUIRED");
+    assert.equal(result.reason, "unverified_supplier_rule_applicable");
+    assert.equal(result.expectedSupplierCommission, null);
+    assert.equal(result.matchedSupplierCommissionRuleId, null);
+    assert.ok(result.reviewReasons.includes("legacy_readiness_evidence_missing"));
+    assert.equal(result.networkActualCommission, 9.5);
+    assert.equal(result.actualCurrency, "USD");
+    // a legacy specific row also blocks a verified default instead of falling through
+    const blocked = matchSupplierCommissionRule({
+      rules: [
+        rule({ id: "default-5", ratePercent: 5, metadata: { financeReady: true } }),
+        legacy({ id: "legacy-new", conditions: [{ conditionType: "CUSTOMER_TYPE", operator: "EQ", value: "NEW" }] }),
+      ],
+      facts: { customerType: "NEW", orderValue: 100, currency: "USD" },
+    });
+    assert.equal(blocked.status, "REVIEW_REQUIRED");
+    assert.equal(blocked.expectedSupplierCommission, null);
+  });
+
+  it("3. legacy MAPPED status alone does not prove readiness", () => {
+    const a = assessSupplierCommissionReadiness(legacy({ mappingStatus: "MAPPED" }));
+    assert.equal(a.financeReady, false);
+    assert.ok(a.reviewReasons.includes("legacy_readiness_evidence_missing"));
+  });
+
+  it("4. sourceRuleId / sourceGroupId / outcomeKey / basis are lineage or derived, not semantics", () => {
+    const a = assessSupplierCommissionReadiness(legacy({ sourceRuleId: "R1", sourceGroupId: "G1", supplierRuleType: "PERCENT", commissionType: "PERCENTAGE" }));
+    assert.equal(a.financeReady, false);
+    assert.ok(a.reviewReasons.includes("legacy_readiness_evidence_missing"));
+  });
+
+  it("5. legacy row with explicit raw percent evidence becomes finance-ready", () => {
+    const a = assessSupplierCommissionReadiness(legacy({ rawRuleReference: { commission: "10%" } }));
+    assert.equal(a.financeReady, true);
+    assert.equal(a.mappingStatus, "MAPPED");
+    assert.deepEqual(a.evidenceSources, ["raw_rule_reference"]);
+    const m = matchSupplierCommissionRule({ rules: [legacy({ rawRuleReference: { commission: "10%" } })], facts: { orderValue: 100, currency: "USD" } });
+    assert.equal(m.status, "MATCHED");
+    assert.equal(m.expectedSupplierCommission, 10);
+  });
+
+  it("6. legacy row whose raw fragment is a bare number stays REVIEW_REQUIRED", () => {
+    const a = assessSupplierCommissionReadiness(legacy({ rawRuleReference: { commission: 10 } }));
+    assert.equal(a.financeReady, false);
+    assert.ok(a.reviewReasons.includes("commission_unit_not_explicit"));
+    assert.ok(!a.reviewReasons.includes("legacy_readiness_evidence_missing"));
+    // a normalized "10%" display never substitutes for source unit evidence
+    const displayOnly = assessSupplierCommissionReadiness(legacy({ rawRuleReference: { commission: 10 }, metadata: { factDisplay: "10%" } }));
+    assert.equal(displayOnly.financeReady, false);
+  });
+
+  it("7. legacy fixed row is ready only with explicit raw currency/model evidence", () => {
+    const base = legacy({ ratePercent: null, fixedAmount: 20, currency: "USD", basis: "CPA", supplierRuleType: "FIXED", commissionType: "FIXED" });
+    const bare = assessSupplierCommissionReadiness(base);
+    assert.equal(bare.financeReady, false);
+    assert.equal(bare.mappingStatus, "REVIEW_REQUIRED");
+    assert.ok(bare.reviewReasons.includes("legacy_readiness_evidence_missing"));
+    const explicit = assessSupplierCommissionReadiness({ ...base, rawRuleReference: { commission: "USD 20", model: "CPA" } });
+    assert.equal(explicit.financeReady, true);
+    const modelOnly = assessSupplierCommissionReadiness({ ...base, commissionModel: "cpa" });
+    assert.equal(modelOnly.financeReady, true, "supplier-provided model column is source evidence");
+    const numberOnly = assessSupplierCommissionReadiness({ ...base, rawRuleReference: { amount: 20 } });
+    assert.equal(numberOnly.financeReady, false);
+    assert.ok(numberOnly.reviewReasons.includes("commission_unit_not_explicit"));
+  });
+
+  it("8. new fan-out rows are unaffected", () => {
+    const rows = fanOut([
+      { id: "A", commission: "10%" },
+      { id: "B", commission: "0%" },
+      { id: "C", commission: "Up to 10%" },
+      { id: "D", value: 10 },
+      { id: "E", value: 10, model: "cps" },
+      { id: "F", commission: "USD 20", currency: "USD" },
+      { id: "G", value: 20, model: "cpa" },
+    ]);
+    const byId = Object.fromEntries(rows.map((r) => [r.sourceRuleId, r]));
+    assert.equal(byId.A.metadata.financeReady, true);
+    assert.equal(byId.B.metadata.financeReady, true);
+    assert.equal(byId.B.ratePercent, 0);
+    assert.equal(byId.C.metadata.financeReady, false);
+    assert.equal(byId.D.metadata.financeReady, false);
+    assert.ok(byId.D.metadata.reviewReasons.includes("commission_unit_not_explicit"));
+    assert.equal(byId.E.metadata.financeReady, true);
+    assert.equal(byId.F.metadata.financeReady, true);
+    assert.equal(byId.G.metadata.financeReady, false, "fixed without currency");
+    assert.ok(byId.G.metadata.reviewReasons.includes("fixed_payout_currency_missing"));
+    assert.ok(rows.every((r) => r.metadata.readinessEvidenceSources.includes("source_text")));
+    // persisted shape of a new row (metadata carried) is still assessed by its explicit decision
+    assert.equal(assessSupplierCommissionReadiness({ ...byId.A, rawRuleReference: null }).financeReady, true);
+    assert.equal(assessSupplierCommissionReadiness({ ...byId.A, rawRuleReference: null }).decisionSource, "NETWORK_SPECIFIC");
+  });
+
+  it("9. network-specific explicit decisions remain authoritative", () => {
+    const facts = { orderValue: 100, currency: "USD" };
+    for (const network of ["optimise_sea", "rakuten", "cj"]) {
+      const ready = legacy({ id: `${network}-ready`, networkSource: network, mappingStatus: "VERIFIED", metadata: { financeReady: true } });
+      const blocked = legacy({ id: `${network}-blocked`, networkSource: network, mappingStatus: "REVIEW_REQUIRED", metadata: { financeReady: false, reviewReasons: ["network_specific_reason"] } });
+      assert.equal(assessSupplierCommissionReadiness(ready).financeReady, true, network);
+      assert.equal(matchSupplierCommissionRule({ rules: [ready], facts }).expectedSupplierCommission, 10, network);
+      const b = matchSupplierCommissionRule({ rules: [blocked], facts });
+      assert.equal(b.status, "REVIEW_REQUIRED", network);
+      assert.equal(b.expectedSupplierCommission, null);
+      assert.ok(b.reviewReasons.includes("network_specific_reason"));
+    }
+  });
+
+  it("10. re-sync enriches a legacy open row with readiness metadata without a false rate version", async () => {
+    const { rows, db } = createRuleDb();
+    const [candidate] = fanOut([{ id: "R1", name: "Standard", commission: "10%" }], "123");
+    // legacy persisted row: same economics and logical identity, no readiness metadata
+    rows.push({
+      id: "legacy-open",
+      supplier: "IMPACT",
+      sourceAccountLabel: "default",
+      outcomeKey: candidate.outcomeKey,
+      supplierRuleType: "PERCENT",
+      basis: "PERCENT_OF_SALE",
+      ratePercent: 10,
+      fixedAmount: null,
+      currency: null,
+      commissionModel: null,
+      commissionType: "PERCENTAGE",
+      actionType: null,
+      mappingStatus: "MAPPED",
+      metadata: null,
+      rawRuleReference: null,
+      effectiveFrom: new Date("2026-08-01T00:00:00.000Z"),
+      effectiveUntil: null,
+      conditions: [],
+    });
+    assert.equal(assessSupplierCommissionReadiness(rows[0]).financeReady, false, "legacy row blocked before re-sync");
+
+    const service = new SupplierCommissionRuleService({ prisma: db });
+    const updated = await service.upsertNormalizedFact({
+      ...candidate,
+      supplier: "IMPACT",
+      sourceAccountLabel: "default",
+      sourceEvidenceAt: new Date("2026-09-10T00:00:00.000Z"),
+    });
+
+    assert.equal(updated.id, "legacy-open", "same economic version reused");
+    assert.equal(rows.length, 1, "no false rate-history version");
+    assert.equal(rows[0].effectiveUntil, null);
+    assert.equal(rows[0].ratePercent, 10);
+    assert.equal(rows[0].metadata.financeReady, true);
+    assert.equal(rows[0].metadata.semanticStatus, "VERIFIED");
+    assert.deepEqual(rows[0].rawRuleReference, { id: "R1", name: "Standard", commission: "10%" });
+    assert.equal(assessSupplierCommissionReadiness(rows[0]).financeReady, true, "matcher observes the enriched decision");
+    const m = matchSupplierCommissionRule({ rules: [rows[0]], facts: { orderValue: 100, currency: "USD" } });
+    assert.equal(m.status, "MATCHED");
+    assert.equal(m.expectedSupplierCommission, 10);
   });
 });

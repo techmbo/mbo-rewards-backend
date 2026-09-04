@@ -20,7 +20,7 @@
 import { createHash } from "node:crypto";
 import { explicitNumber } from "../ops/campaignCommissions.js";
 
-export const SUPPLIER_COMMISSION_READINESS_VERSION = "SCR-READINESS-1";
+export const SUPPLIER_COMMISSION_READINESS_VERSION = "SCR-READINESS-2";
 
 export const RULE_MAPPING_STATUS = Object.freeze({
   MAPPED: "MAPPED",
@@ -249,12 +249,59 @@ function metadataOf(rule) {
   return rule?.metadata && typeof rule.metadata === "object" ? rule.metadata : {};
 }
 
+/**
+ * Trustworthy commission-semantics evidence for a rule.
+ *
+ * Only source-level evidence counts: an explicit caller-supplied source text, the
+ * persisted raw supplier fragment (rawRuleReference), source text kept in metadata, or
+ * the supplier-provided payout model (commissionModel is only ever copied from the
+ * supplier's model/pricing fields). Normalized columns — ratePercent, fixedAmount, basis,
+ * currency, supplierRuleType, commissionType (derived from the fact kind), outcomeKey,
+ * sourceRuleId/sourceGroupId (lineage) and an old MAPPED status — may all have been
+ * produced by an older normalizer and prove nothing about semantics.
+ * The fact display is used only to detect ceilings ("Up to"), never as unit evidence,
+ * because a bare source number is displayed as "10%" after normalization.
+ */
+export function resolveReadinessEvidence(rule = {}, { sourceText = null, factDisplay = null } = {}) {
+  const metadata = metadataOf(rule);
+  const sources = [];
+  const parts = [];
+
+  const explicit = text(sourceText);
+  if (explicit) {
+    parts.push(explicit);
+    sources.push("source_text");
+  }
+  const raw = rule?.rawRuleReference;
+  const rawText = raw != null ? text(sourceCommissionText(raw)) : null;
+  if (rawText) {
+    parts.push(rawText);
+    sources.push("raw_rule_reference");
+  }
+  const metaText = text(metadata.sourceCommissionText);
+  if (metaText) {
+    parts.push(metaText);
+    sources.push("metadata_source_commission_text");
+  }
+  const model = text(rule?.commissionModel);
+  if (model) {
+    parts.push(model);
+    sources.push("supplier_commission_model");
+  }
+
+  return {
+    evidenceText: parts.length ? parts.join(" ") : null,
+    evidenceSources: sources,
+    factDisplay: text(factDisplay) ?? text(metadata.factDisplay) ?? null,
+  };
+}
+
 function conditionVerified(condition) {
   const meta = condition?.metadata && typeof condition.metadata === "object" ? condition.metadata : {};
   return meta.matcherReady === true || meta.semanticsVerified === true;
 }
 
-function buildResult({ financeReady, reviewReasons, hasNumericOutcome, mappingStatus = null, decisionSource }) {
+function buildResult({ financeReady, reviewReasons, hasNumericOutcome, mappingStatus = null, decisionSource, evidenceSources = [] }) {
   const reasons = [...new Set(reviewReasons)];
   let status = mappingStatus;
   if (!status) {
@@ -276,6 +323,7 @@ function buildResult({ financeReady, reviewReasons, hasNumericOutcome, mappingSt
     mappingStatus: status,
     fieldMappingOutcome: financeReady ? "MAPPED" : "REVIEW_REQUIRED",
     decisionSource,
+    evidenceSources,
     readinessVersion: SUPPLIER_COMMISSION_READINESS_VERSION,
   };
 }
@@ -338,8 +386,13 @@ export function assessSupplierCommissionReadiness(rule = {}, { sourceText = null
     if (!text(rule?.currency)) reasons.push("fixed_payout_currency_missing");
   }
 
-  const display = text(factDisplay) ?? "";
-  const source = text(sourceText) ?? "";
+  // Numeric commission alone is never verified semantics. Readiness needs trustworthy
+  // source evidence (raw fragment / source text / supplier model); legacy rows without
+  // any such evidence fail closed until a re-sync attaches it.
+  const evidence = resolveReadinessEvidence(rule, { sourceText, factDisplay });
+  const display = evidence.factDisplay ?? "";
+  const source = evidence.evidenceText ?? "";
+  if (hasNumericOutcome && !source) reasons.push("legacy_readiness_evidence_missing");
   if (/^\s*up\s*to/i.test(display) || commissionTextIsAmbiguous(source)) reasons.push("up_to_ceiling_not_exact_rate");
   if (source && !commissionUnitIsExplicit(source)) reasons.push("commission_unit_not_explicit");
 
@@ -368,6 +421,7 @@ export function assessSupplierCommissionReadiness(rule = {}, { sourceText = null
     reviewReasons: reasons,
     hasNumericOutcome,
     decisionSource: "GENERIC",
+    evidenceSources: evidence.evidenceSources,
   });
 }
 
@@ -379,6 +433,7 @@ export function readinessMetadata(assessment, extra = {}) {
     semanticStatus: assessment.semanticStatus,
     readinessVersion: assessment.readinessVersion,
     readinessDecisionSource: assessment.decisionSource,
+    readinessEvidenceSources: assessment.evidenceSources ?? [],
     ...extra,
   };
 }

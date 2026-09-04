@@ -20,7 +20,13 @@ function rule(overrides = {}) {
     currency: has("currency") ? overrides.currency : "USD",
     priority: has("priority") ? overrides.priority : null,
     rank: has("rank") ? overrides.rank : null,
-    metadata: has("metadata") ? overrides.metadata : null,
+    // Fixture rules are verified: readiness is declared explicitly (a numeric rate alone
+    // is never finance-ready); tests that pass metadata keep it merged with that decision.
+    metadata: has("metadata")
+      ? overrides.metadata && typeof overrides.metadata === "object"
+        ? { financeReady: true, ...overrides.metadata }
+        : overrides.metadata
+      : { financeReady: true },
     conditions: has("conditions") ? overrides.conditions : [],
   };
 }

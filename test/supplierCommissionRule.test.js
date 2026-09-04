@@ -85,14 +85,25 @@ describe("supplier commission rules (pointer 12)", () => {
     assert.equal(all.length, 2);
   });
 
-  it("enriches supplier commission rule records with mapping metadata", () => {
+  it("enriches supplier commission rule records with mapping metadata (readiness needs source evidence)", () => {
     const enriched = enrichSupplierCommissionRuleRecord(
-      { ratePercent: 12, sourceRuleId: "rule-1" },
+      { ratePercent: 12, sourceRuleId: "rule-1", rawRuleReference: { commission: "12%" } },
       { networkSource: "optimise_sea", sourcePath: "commissionGroups.0" },
     );
     assert.equal(enriched.networkSource, "optimise_sea");
     assert.equal(enriched.mappingStatus, "MAPPED");
     assert.equal(enriched.fieldMappingOutcome, "MAPPED");
+    assert.equal(enriched.metadata.financeReady, true);
+
+    // sourceRuleId proves lineage only: a numeric rate with no trustworthy source evidence is not finance-ready.
+    const legacy = enrichSupplierCommissionRuleRecord(
+      { ratePercent: 12, sourceRuleId: "rule-1" },
+      { networkSource: "optimise_sea", sourcePath: "commissionGroups.0" },
+    );
+    assert.equal(legacy.mappingStatus, "REVIEW_REQUIRED");
+    assert.equal(legacy.fieldMappingOutcome, "REVIEW_REQUIRED");
+    assert.equal(legacy.metadata.financeReady, false);
+    assert.ok(legacy.metadata.reviewReasons.includes("legacy_readiness_evidence_missing"));
   });
 
   it("toSupplierCommissionRuleDto exposes rule fields separately from order facts", () => {
