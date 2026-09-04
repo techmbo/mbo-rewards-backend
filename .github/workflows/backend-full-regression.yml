@@ -18,6 +18,20 @@ on:
 jobs:
   full-regression:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: mbo_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci -d mbo_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     env:
       DATABASE_URL: postgresql://ci:ci@localhost:5432/mbo_ci
       DIRECT_URL: postgresql://ci:ci@localhost:5432/mbo_ci
@@ -39,6 +53,8 @@ jobs:
         run: npx prisma generate
       - name: Validate Prisma schema
         run: npx prisma validate
+      - name: Apply Prisma migrations to the CI database
+        run: npx prisma migrate deploy
       - name: Assert no legacy finance calculation call sites
         shell: bash
         run: |

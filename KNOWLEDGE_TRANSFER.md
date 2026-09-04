@@ -966,6 +966,27 @@ VITE_API_BASE_URL="http://localhost:4000/api"
 5. Connect a marketplace account on **Integrations**, run sync, then **Ad Promo** if auto-promote is off.
 6. Create a client via **Clients** → complete wizard → open portal as CLIENT user.
 
+### Running the backend test suite
+
+`npm test` runs every `test/*.test.js` file with the Node test runner. Most suites use in-memory
+fakes, but a few integration suites (catalog, client assignment, commercial service, global
+search, tracking-link/logo repair scripts) exercise the real Prisma client and need a reachable
+PostgreSQL. The CI workflow `.github/workflows/backend-full-regression.yml` provisions a
+`postgres:16` service with the same settings, applies the migrations, then runs the suite. To
+reproduce locally:
+
+```bash
+# an empty database; the tests create the rows they need
+export DATABASE_URL=postgresql://ci:ci@localhost:5432/mbo_ci
+export DIRECT_URL=$DATABASE_URL
+export BACKEND_URL=http://127.0.0.1:3001 FRONTEND_URL=http://127.0.0.1:3000
+export JWT_SECRET=ci-jwt-secret-only OAUTH_TOKEN_ENCRYPTION_KEY=0123456789abcdef0123456789abcdef
+npx prisma generate && npx prisma migrate deploy
+npm test
+```
+
+Never point the test database at a production or shared environment.
+
 ---
 
 ## 18. Deployment & Operations
