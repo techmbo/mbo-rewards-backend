@@ -912,3 +912,137 @@ describe("Optimise commission groups — anonymous group identity (P1)", () => {
     assert.ok(rule.outcomeKey.includes("::G9::"));
   });
 });
+
+describe("Optimise commission groups — array-order-independent band and condition identity", () => {
+  const bandsA = [
+    { from: 1, to: 10, commission: "5%" },
+    { from: 11, to: 50, commission: "7%" },
+  ];
+  const groupWith = (bands, extra = {}) => [{ id: "G7", name: "Volume tiers", bandType: "sales_count", bands, ...extra }];
+  const keyByLabel = (rules) => Object.fromEntries(rules.map((r) => [r.couponOrTier, r.outcomeKey]));
+
+  it("1. band reorder with stable boundaries keeps the same logical outcomeKeys and creates no new versions", async () => {
+    const run1 = mapOptimiseCommissionGroupCandidates(groupWith(bandsA), CONTEXT);
+    const run2 = mapOptimiseCommissionGroupCandidates(groupWith([bandsA[1], bandsA[0]]), CONTEXT);
+    assert.deepEqual(keyByLabel(run1), keyByLabel(run2));
+    assert.ok(run1.every((r) => !/band-index|bandIndex/.test(r.outcomeKey)), "no positional band identity");
+    for (const rule of run1) {
+      const band = rule.conditions.find((c) => c.conditionType === "COMMISSION_TIER");
+      assert.ok(!band.value.includes("bandIndex"), "bandIndex must not be in the identity-bearing condition value");
+      assert.equal(typeof band.metadata.bandIndex, "number", "bandIndex kept as evidence only");
+      assert.equal(rule.metadata.bandIdentityStrategy, "BAND_SEMANTIC_FINGERPRINT");
+    }
+    // sourcePath / evidence may still carry the position
+    assert.equal(run2.find((r) => r.couponOrTier === "band:1-10").sourcePath, "commission-groups[0].bands[1]");
+
+    const { rows, db } = createRuleDb();
+    const service = new OptimiseCommissionGroupPersistenceService({ prisma: db });
+    await service.persistFetchedGroups({ networkSource: "optimise_sea", byCampaign: byCampaign(groupWith(bandsA)) });
+    await service.persistFetchedGroups({
+      networkSource: "optimise_sea",
+      byCampaign: byCampaign(groupWith([bandsA[1], bandsA[0]]), { fetchedAt: new Date("2026-09-10T00:00:00.000Z") }),
+    });
+    assert.equal(rows.length, 2, "no new historical versions solely due to ordering");
+    assert.ok(rows.every((r) => r.effectiveUntil == null));
+  });
+
+  it("2. band reorder with supplier band ids follows the id, not the array position", () => {
+    const withIds = [
+      { id: "B-A", name: "Tier A", commission: "5%" },
+      { id: "B-B", name: "Tier B", commission: "7%" },
+    ];
+    const run1 = mapOptimiseCommissionGroupCandidates(groupWith(withIds), CONTEXT);
+    const run2 = mapOptimiseCommissionGroupCandidates(groupWith([withIds[1], withIds[0]]), CONTEXT);
+    const byId = (rules) => Object.fromEntries(rules.map((r) => [r.metadata.bandIdentityInputs.bandId, r.outcomeKey]));
+    assert.deepEqual(byId(run1), byId(run2));
+    assert.deepEqual(run1.map((r) => r.couponOrTier), ["band:id:B-A", "band:id:B-B"]);
+    assert.deepEqual(run2.map((r) => r.couponOrTier), ["band:id:B-B", "band:id:B-A"]);
+    assert.notEqual(byId(run1)["B-A"], byId(run1)["B-B"]);
+  });
+
+  it("3. source-condition reorder keeps the same outcomeKey and does not version the rule", async () => {
+    const forward = [{ type: "country", value: "AE" }, { type: "customer_type", value: "NEW" }];
+    const reversed = [forward[1], forward[0]];
+    const g = (conditions) => [{ id: "G-AE", name: "UAE new customers", commission: "12%", conditions }];
+    const [a] = mapOptimiseCommissionGroupCandidates(g(forward), CONTEXT);
+    const [b] = mapOptimiseCommissionGroupCandidates(g(reversed), CONTEXT);
+    assert.equal(a.outcomeKey, b.outcomeKey);
+    // persisted condition arrays keep source order (identity is canonical, matching is unchanged)
+    assert.deepEqual(a.conditions.slice(0, 2).map((c) => c.conditionType), ["COUNTRY", "CUSTOMER_TYPE"]);
+    assert.deepEqual(b.conditions.slice(0, 2).map((c) => c.conditionType), ["CUSTOMER_TYPE", "COUNTRY"]);
+
+    const { rows, db } = createRuleDb();
+    const service = new OptimiseCommissionGroupPersistenceService({ prisma: db });
+    await service.persistFetchedGroups({ networkSource: "optimise_sea", byCampaign: byCampaign(g(forward)) });
+    await service.persistFetchedGroups({ networkSource: "optimise_sea", byCampaign: byCampaign(g(reversed), { fetchedAt: new Date("2026-09-10T00:00:00.000Z") }) });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].effectiveUntil, null);
+  });
+
+  it("3b. canonical condition signature preserves matcher grouping semantics (same-dimension alternatives stay alternatives)", () => {
+    const rules = mapOptimiseCommissionGroupCandidates(
+      [{ id: "G-MULTI", commission: "9%", conditions: [{ type: "country", value: "SA" }, { type: "country", value: "AE" }] }],
+      CONTEXT,
+    );
+    const reordered = mapOptimiseCommissionGroupCandidates(
+      [{ id: "G-MULTI", commission: "9%", conditions: [{ type: "country", value: "AE" }, { type: "country", value: "SA" }] }],
+      CONTEXT,
+    );
+    assert.equal(rules[0].outcomeKey, reordered[0].outcomeKey);
+    const supplierConditions = rules[0].conditions.filter((c) => c.conditionType === "COUNTRY");
+    assert.equal(supplierConditions.length, 2, "both alternatives persisted as separate same-dimension conditions");
+    const evaluated = matchSupplierCommissionRule({
+      rules: [{ ...rules[0], id: "r1", conditions: supplierConditions }],
+      facts: { country: "AE", orderValue: 100, currency: "USD" },
+    });
+    assert.equal(evaluated.status, "MATCHED", "AE OR SA still matches AE — grouping was not turned into AND");
+  });
+
+  it("4. rate change plus reorder versions the same logical band rule", async () => {
+    const { rows, db } = createRuleDb();
+    const service = new OptimiseCommissionGroupPersistenceService({ prisma: db });
+    await service.persistFetchedGroups({ networkSource: "optimise_sea", byCampaign: byCampaign(groupWith(bandsA)) });
+    const changedAt = new Date("2026-09-11T00:00:00.000Z");
+    await service.persistFetchedGroups({
+      networkSource: "optimise_sea",
+      byCampaign: byCampaign(groupWith([{ from: 11, to: 50, commission: "7%" }, { from: 1, to: 10, commission: "6%" }]), { fetchedAt: changedAt }),
+    });
+
+    const band1to10 = rows.filter((r) => r.couponOrTier === "band:1-10");
+    assert.equal(band1to10.length, 2, "one logical rule, two economic versions");
+    assert.equal(band1to10[0].outcomeKey, band1to10[1].outcomeKey);
+    assert.equal(band1to10[0].ratePercent, 5);
+    assert.equal(new Date(band1to10[0].effectiveUntil).toISOString(), changedAt.toISOString());
+    assert.equal(band1to10[1].ratePercent, 6);
+    assert.equal(band1to10[1].effectiveUntil, null);
+    const band11to50 = rows.filter((r) => r.couponOrTier === "band:11-50");
+    assert.equal(band11to50.length, 1, "unchanged band not versioned by reordering");
+    assert.equal(band11to50[0].effectiveUntil, null);
+  });
+
+  it("5. a totally unidentified band is REVIEW_REQUIRED / VERIFY_LIVE, not finance-ready, with no positional identity", () => {
+    const rules = mapOptimiseCommissionGroupCandidates(
+      [{ id: "G-X", name: "Mystery", bandType: null, bands: [{ commission: "5%" }, { commission: "7%" }] }],
+      CONTEXT,
+    );
+    assert.equal(rules.length, 2);
+    for (const rule of rules) {
+      assert.equal(rule.mappingStatus, "REVIEW_REQUIRED");
+      assert.equal(rule.metadata.semanticStatus, "VERIFY_LIVE");
+      assert.equal(rule.metadata.financeReady, false);
+      assert.ok(rule.metadata.reviewReasons.includes("band_identity_insufficient"));
+      assert.equal(rule.metadata.bandIdentityStrategy, "BAND_INSUFFICIENT");
+      assert.ok(rule.outcomeKey.includes("::band:unidentified:"));
+      assert.ok(!/band-index|band:\d+$/.test(rule.outcomeKey));
+      assert.equal(rule.couponOrTier, "band:unidentified");
+      assert.ok(rule.conditions.some((c) => c.sourceConditionType === OPTIMISE_VERIFY_LIVE_GATE.sourceConditionType));
+    }
+    assert.deepEqual(rules.map((r) => r.rawRuleReference.band), [{ commission: "5%" }, { commission: "7%" }]);
+    // two indistinguishable anonymous bands collapse (fail closed) instead of fabricating lineage
+    const collapsed = mapOptimiseCommissionGroupCandidates(
+      [{ id: "G-Y", bands: [{ commission: "5%" }, { commission: "5%" }] }],
+      CONTEXT,
+    );
+    assert.equal(collapsed.length, 1);
+  });
+});

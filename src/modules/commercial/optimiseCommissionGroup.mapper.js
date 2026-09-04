@@ -213,17 +213,31 @@ function factsFor(commissionValue, currency) {
   return listCampaignCommissionFacts({ groups: [entry], currency, raw: {} }).facts;
 }
 
+function bandSupplierId(band = {}) {
+  return text(firstPresent(band?.id, band?.bandId, band?.band_id, band?.commissionBandId));
+}
+
+function bandName(band = {}) {
+  return text(firstPresent(band?.name, band?.bandName, band?.band_name, band?.label, band?.title));
+}
+
+/**
+ * Band condition kept as evidence for the matcher. The identity-bearing `value` holds
+ * only stable semantics (band type + bounds); the array position lives in metadata as
+ * evidence/debug data and never reaches conditionSignature() / outcomeKey.
+ */
 function bandCondition(band, bandIndex, bandType) {
   const lower = bandLower(band);
   const upper = bandUpper(band);
   return {
     conditionType: "COMMISSION_TIER",
     operator: "SOURCE_RANGE",
-    value: JSON.stringify({
+    value: canonicalJson({
       bandType: bandType ?? null,
       lower: lower ?? null,
       upper: upper ?? null,
-      bandIndex,
+      bandId: bandSupplierId(band),
+      bandName: bandName(band),
     }),
     sourceConditionType: bandType ? `OPTIMISE_BAND:${bandType}` : "OPTIMISE_BAND",
     sourceConditionValue: band,
@@ -233,6 +247,7 @@ function bandCondition(band, bandIndex, bandType) {
       upperBound: boundNumber(upper),
       lowerBoundRaw: lower ?? null,
       upperBoundRaw: upper ?? null,
+      bandIndex,
       matcherReady: false,
       semanticStatus: "VERIFY_LIVE",
       reason: "optimise_band_boundary_semantics_not_verified_live",
@@ -240,14 +255,45 @@ function bandCondition(band, bandIndex, bandType) {
   };
 }
 
-function bandIdentity(band, bandIndex) {
+/**
+ * Durable band identity. Never the array position: a band is identified by a canonical
+ * fingerprint of its stable non-economic semantics — supplier band id, band name, band
+ * type, lower/upper boundary. Rates, amounts, index and timestamps are excluded so a
+ * payout change versions the same logical band. A band with none of those is
+ * INSUFFICIENT: it is kept with its raw evidence (fingerprint of the whole canonical
+ * band, so two indistinguishable bands collapse instead of fabricating lineage) and is
+ * flagged `band_identity_insufficient`.
+ *
+ * @returns {{ key: string, label: string, sufficient: boolean, inputs: object }}
+ */
+export function bandIdentity(band = {}, bandType = null) {
   const lower = bandLower(band);
   const upper = bandUpper(band);
-  if (present(lower) || present(upper)) {
-    return `band:${present(lower) ? String(lower).trim() : ""}-${present(upper) ? String(upper).trim() : ""}`;
+  const id = bandSupplierId(band);
+  const name = bandName(band);
+  const inputs = {
+    bandId: id,
+    bandName: name ? name.toLowerCase().replace(/\s+/g, " ") : null,
+    bandType: bandType ? String(bandType).toLowerCase() : null,
+    lower: present(lower) ? String(lower).trim() : null,
+    upper: present(upper) ? String(upper).trim() : null,
+  };
+  const label = id
+    ? `band:id:${id}`
+    : present(lower) || present(upper)
+      ? `band:${inputs.lower ?? ""}-${inputs.upper ?? ""}`
+      : name
+        ? `band:name:${name}`
+        : "band:unidentified";
+  if (id || name || present(lower) || present(upper)) {
+    return { key: `band:${fingerprint(inputs)}`, label, sufficient: true, inputs };
   }
-  const id = text(firstPresent(band?.id, band?.bandId, band?.band_id, band?.name));
-  return id ? `band:${id}` : `band-index:${bandIndex + 1}`;
+  return {
+    key: `band:unidentified:${fingerprint({ ...inputs, band })}`,
+    label,
+    sufficient: false,
+    inputs,
+  };
 }
 
 function isUnboundedSingleBand(bands) {
@@ -257,9 +303,25 @@ function isUnboundedSingleBand(bands) {
   return (lower == null || lower === 0) && !present(upper);
 }
 
-function conditionSignature(conditions = []) {
-  return conditions
-    .map((condition) => `${condition.conditionType}:${condition.operator ?? ""}:${condition.value}`)
+/**
+ * Order-independent condition identity. Mirrors the matcher's grouping: conditions are a
+ * multiset grouped by dimension (conditionType, plus sourceConditionType only for
+ * OTHER_SOURCE_CONDITION / CUSTOM_FIELD), so sorting atomic conditions loses no AND/OR
+ * semantics — same-dimension values remain alternatives, different dimensions remain
+ * conjunctive, exactly as evaluated. Used for identity only; persisted condition arrays
+ * keep their source order.
+ */
+export function conditionSignature(conditions = []) {
+  return (conditions || [])
+    .map((condition) => {
+      const type = String(condition.conditionType ?? "OTHER_SOURCE_CONDITION");
+      const dimension =
+        type === "OTHER_SOURCE_CONDITION" || type === "CUSTOM_FIELD"
+          ? `${type}:${condition.sourceConditionType ?? "UNKNOWN"}`
+          : type;
+      return `${dimension}:${condition.operator ?? ""}:${condition.value}`;
+    })
+    .sort()
     .join("|");
 }
 
@@ -412,14 +474,19 @@ export function mapOptimiseCommissionGroupCandidates(groups = [], context = {}) 
     // Bands are the authoritative distinct outcomes when present; the group-level
     // commission is then summary evidence only (never a second rule).
     const outcomes = bands.length
-      ? bands.map((band, bandIndex) => ({
-          band,
-          bandIndex,
-          commissionValue: optimiseBandCommission(band),
-          currency: currencyCode(band?.currency ?? band?.currencyCode) ?? groupCurrency,
-          bandKey: bandIdentity(band, bandIndex),
-          sourcePath: `commission-groups[${groupIndex}].bands[${bandIndex}]`,
-        }))
+      ? bands.map((band, bandIndex) => {
+          const identity = bandIdentity(band, bandType);
+          return {
+            band,
+            bandIndex,
+            commissionValue: optimiseBandCommission(band),
+            currency: currencyCode(band?.currency ?? band?.currencyCode) ?? groupCurrency,
+            bandKey: identity.key,
+            bandLabel: identity.label,
+            bandIdentity: identity,
+            sourcePath: `commission-groups[${groupIndex}].bands[${bandIndex}]`,
+          };
+        })
       : [
           {
             band: null,
@@ -427,6 +494,8 @@ export function mapOptimiseCommissionGroupCandidates(groups = [], context = {}) 
             commissionValue: groupCommission,
             currency: groupCurrency,
             bandKey: null,
+            bandLabel: null,
+            bandIdentity: null,
             sourcePath: `commission-groups[${groupIndex}]`,
           },
         ];
@@ -458,6 +527,7 @@ export function mapOptimiseCommissionGroupCandidates(groups = [], context = {}) 
         const reviewReasons = [];
         if (!groupId) reviewReasons.push("supplier_group_id_missing");
         if (!groupId && !identity.sufficient) reviewReasons.push("anonymous_group_identity_insufficient");
+        if (outcome.bandIdentity && !outcome.bandIdentity.sufficient) reviewReasons.push("band_identity_insufficient");
         if (!unitExplicit) reviewReasons.push("commission_unit_not_explicit");
         if (bandRestricted) reviewReasons.push("band_selection_semantics_not_verified_live");
         if (sourceConditions.length) reviewReasons.push("optimise_condition_semantics_not_verified_live");
@@ -514,7 +584,7 @@ export function mapOptimiseCommissionGroupCandidates(groups = [], context = {}) 
           customerType: null,
           country: null,
           categoryProductGoal: null,
-          couponOrTier: outcome.bandKey,
+          couponOrTier: outcome.bandLabel,
           conditions,
           effectiveFrom: window.effectiveFrom,
           effectiveUntil: window.effectiveUntil,
@@ -545,6 +615,13 @@ export function mapOptimiseCommissionGroupCandidates(groups = [], context = {}) 
             bandType,
             bandCount: bands.length,
             bandIndex: outcome.bandIndex,
+            bandIdentityStrategy: outcome.bandIdentity
+              ? outcome.bandIdentity.sufficient
+                ? "BAND_SEMANTIC_FINGERPRINT"
+                : "BAND_INSUFFICIENT"
+              : null,
+            bandIdentityInputs: outcome.bandIdentity?.inputs ?? null,
+            bandIdentityKey: outcome.bandKey,
             band: outcome.band
               ? {
                   lower: bandLower(outcome.band) ?? null,
