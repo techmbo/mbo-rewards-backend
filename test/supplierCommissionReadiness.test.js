@@ -678,7 +678,7 @@ describe("generic supplier commission readiness — source economics must agree 
     assert.equal(a.mappingStatus, "REVIEW_REQUIRED");
     assert.equal(a.semanticStatus, "VERIFY_LIVE");
     assert.ok(a.reviewReasons.includes("source_economics_mismatch"));
-    assert.deepEqual(a.sourceEconomics, { reconciled: false, compared: { kind: "PERCENT", sourceValue: 10, sourceCurrency: null, ruleValue: 20, ruleCurrency: null } });
+    assert.deepEqual(a.sourceEconomics, { reconciled: false, compared: { kind: "PERCENT", evidenceSources: ["raw_rule_reference"], sourceValue: 10, sourceCurrency: null, ruleValue: 20, ruleCurrency: null } });
   });
 
   it("3. explicit zero agreement is ready", () => {
@@ -871,5 +871,188 @@ describe("generic supplier commission readiness — source economics must agree 
       assert.equal(b.status, "REVIEW_REQUIRED");
       assert.equal(b.expectedSupplierCommission, null);
     }
+  });
+});
+
+describe("generic supplier commission readiness — metadata.sourceCommissionText is reconciled, not merely trusted", () => {
+  // Legacy persisted row whose only trustworthy evidence lives in metadata.sourceCommissionText
+  // (no raw fragment, no caller source text).
+  const metaLegacy = (overrides = {}) => ({
+    id: "legacy-meta",
+    sourceRuleId: "R1",
+    commissionSequence: 1,
+    basis: "PERCENT_OF_SALE",
+    ratePercent: 10,
+    fixedAmount: null,
+    currency: null,
+    mappingStatus: "MAPPED",
+    rawRuleReference: null,
+    conditions: [],
+    outcomeKey: "123::campaigns::commission::R1::PERCENT::PERCENT_OF_SALE::::slot:1::",
+    ...overrides,
+    metadata: { sourceCommissionText: "10%", ...(overrides.metadata ?? {}) },
+  });
+  const fixedMetaLegacy = (overrides = {}) =>
+    metaLegacy({ basis: "CPA", ratePercent: null, fixedAmount: 20, currency: "USD", ...overrides, metadata: { sourceCommissionText: "USD 20 CPA", ...(overrides.metadata ?? {}) } });
+
+  it("1. metadata exact agreement (10% vs row 10) is ready through the metadata source", () => {
+    const a = assessSupplierCommissionReadiness(metaLegacy());
+    assert.equal(a.financeReady, true);
+    assert.equal(a.mappingStatus, "MAPPED");
+    assert.deepEqual(a.evidenceSources, ["metadata_source_commission_text"]);
+    assert.equal(a.sourceEconomics.reconciled, true);
+    assert.deepEqual(a.sourceEconomics.compared.evidenceSources, ["metadata_source_commission_text"]);
+    assert.equal(a.sourceEconomics.compared.sourceValue, 10);
+  });
+
+  it("2. CRITICAL: metadata says 10% but row says 20% fails closed and the matcher never calculates 20%", () => {
+    const row = metaLegacy({ ratePercent: 20 });
+    const a = assessSupplierCommissionReadiness(row);
+    assert.equal(a.financeReady, false);
+    assert.equal(a.mappingStatus, "REVIEW_REQUIRED");
+    assert.equal(a.semanticStatus, "VERIFY_LIVE");
+    assert.ok(a.reviewReasons.includes("source_economics_mismatch"));
+    assert.deepEqual(a.sourceEconomics, {
+      reconciled: false,
+      compared: { kind: "PERCENT", evidenceSources: ["metadata_source_commission_text"], sourceValue: 10, sourceCurrency: null, ruleValue: 20, ruleCurrency: null },
+    });
+    const m = matchSupplierCommissionRule({
+      rules: [row],
+      facts: { orderValue: 100, currency: "USD" },
+      actualCommission: 11,
+      actualCurrency: "USD",
+    });
+    assert.equal(m.status, "REVIEW_REQUIRED");
+    assert.equal(m.expectedSupplierCommission, null);
+    assert.ok(m.reviewReasons.includes("source_economics_mismatch"));
+    assert.deepEqual(m.readinessBlockedRuleIds, ["legacy-meta"]);
+    assert.equal(m.networkActualCommission, 11, "network actual is preserved, never overwritten");
+    assert.equal(m.actualCurrency, "USD");
+  });
+
+  it("3. metadata explicit zero agrees with a zero row; zero row vs metadata 10% fails closed", () => {
+    const zero = assessSupplierCommissionReadiness(metaLegacy({ ratePercent: 0, metadata: { sourceCommissionText: "0%" } }));
+    assert.equal(zero.financeReady, true);
+    assert.equal(zero.sourceEconomics.compared.sourceValue, 0);
+    const wrong = assessSupplierCommissionReadiness(metaLegacy({ ratePercent: 0 }));
+    assert.equal(wrong.financeReady, false);
+    assert.ok(wrong.reviewReasons.includes("source_economics_mismatch"));
+  });
+
+  it("4. metadata fixed agreement (USD 20 CPA vs fixedAmount 20 USD CPA) is ready", () => {
+    const a = assessSupplierCommissionReadiness(fixedMetaLegacy());
+    assert.equal(a.financeReady, true);
+    assert.deepEqual(a.sourceEconomics.compared, { kind: "FIXED", evidenceSources: ["metadata_source_commission_text"], sourceValue: 20, sourceCurrency: "USD", ruleValue: 20, ruleCurrency: "USD" });
+  });
+
+  it("5. metadata fixed mismatch (USD 20 vs fixedAmount 30) fails closed", () => {
+    const a = assessSupplierCommissionReadiness(fixedMetaLegacy({ fixedAmount: 30 }));
+    assert.equal(a.financeReady, false);
+    assert.equal(a.mappingStatus, "REVIEW_REQUIRED");
+    assert.ok(a.reviewReasons.includes("source_economics_mismatch"));
+    const currency = assessSupplierCommissionReadiness(fixedMetaLegacy({ currency: "AED" }));
+    assert.ok(currency.reviewReasons.includes("source_economics_currency_mismatch"));
+  });
+
+  it("6. unparseable raw fragment + metadata text: the metadata evidence is actually reconciled", () => {
+    const raw = { supplierInternalNote: "legacy" };
+    const agree = assessSupplierCommissionReadiness(metaLegacy({ rawRuleReference: raw }));
+    assert.equal(agree.financeReady, true);
+    assert.deepEqual(agree.sourceEconomics.compared.evidenceSources, ["metadata_source_commission_text"]);
+    const disagree = assessSupplierCommissionReadiness(metaLegacy({ ratePercent: 20, rawRuleReference: raw }));
+    assert.equal(disagree.financeReady, false, "raw yields no facts, metadata 10% still contradicts the 20% row");
+    assert.ok(disagree.reviewReasons.includes("source_economics_mismatch"));
+    // the raw fragment is still part of the resolved evidence model, it simply yields no facts
+    const facts = sourceEconomicsFacts({ rawRuleReference: raw, metadataSourceCommissionText: "10%" });
+    assert.deepEqual(facts.map((f) => [f.kind, f.value, f.evidenceSources]), [["PERCENT", 10, ["metadata_source_commission_text"]]]);
+  });
+
+  it("7. raw and metadata agree: one deduplicated fact, ready, no ambiguity", () => {
+    const sameText = assessSupplierCommissionReadiness(metaLegacy({ rawRuleReference: { commission: "10%" } }));
+    assert.equal(sameText.financeReady, true);
+    assert.deepEqual(sameText.reviewReasons, []);
+    assert.deepEqual(sameText.evidenceSources, ["raw_rule_reference", "metadata_source_commission_text"]);
+    // differently written but equivalent evidence is parsed from BOTH sources and collapses to one fact
+    const equivalent = assessSupplierCommissionReadiness(metaLegacy({ rawRuleReference: { commission: "10 %" } }));
+    assert.equal(equivalent.financeReady, true);
+    assert.deepEqual(equivalent.reviewReasons, []);
+    assert.deepEqual(equivalent.sourceEconomics.compared.evidenceSources, ["raw_rule_reference", "metadata_source_commission_text"]);
+    const facts = sourceEconomicsFacts({ rawRuleReference: { commission: "10 %" }, sourceText: "10%", metadataSourceCommissionText: "10%" });
+    assert.deepEqual(facts.map((f) => [f.kind, f.value, f.evidenceSources]), [["PERCENT", 10, ["raw_rule_reference", "source_text"]]]);
+    assert.equal(reconcileSourceEconomics({ ratePercent: 10 }, facts).reconciled, true);
+  });
+
+  it("8. raw and metadata conflict: no source is chosen silently, the row fails closed", () => {
+    const a = assessSupplierCommissionReadiness(metaLegacy({ rawRuleReference: { commission: "10%" }, metadata: { sourceCommissionText: "12%" } }));
+    assert.equal(a.financeReady, false);
+    assert.equal(a.mappingStatus, "REVIEW_REQUIRED");
+    assert.ok(a.reviewReasons.includes("source_economics_evidence_conflict"));
+    assert.deepEqual(a.sourceEconomics.compared, {
+      kind: "PERCENT",
+      evidenceSources: ["raw_rule_reference", "metadata_source_commission_text"],
+      sourceValuesBySource: { raw_rule_reference: ["10%"], metadata_source_commission_text: ["12%"] },
+    });
+    // the row matching EITHER source is still not ready: the evidence itself disagrees
+    const matchesMetadata = assessSupplierCommissionReadiness(metaLegacy({ ratePercent: 12, rawRuleReference: { commission: "10%" }, metadata: { sourceCommissionText: "12%" } }));
+    assert.equal(matchesMetadata.financeReady, false);
+    assert.ok(matchesMetadata.reviewReasons.includes("source_economics_evidence_conflict"));
+    // kind-level disagreement between sources is a conflict too (raw fixed vs metadata percent)
+    const kindConflict = assessSupplierCommissionReadiness(
+      fixedMetaLegacy({ rawRuleReference: { value: 20, model: "cpa", currency: "USD" }, metadata: { sourceCommissionText: "20%" } }),
+    );
+    assert.equal(kindConflict.financeReady, false);
+    assert.ok(kindConflict.reviewReasons.includes("source_economics_evidence_conflict"));
+    // caller source text that differs from the raw fragment is an independent source as well
+    const callerConflict = assessSupplierCommissionReadiness({ ...metaLegacy(), metadata: null, rawRuleReference: { commission: "10%" } }, { sourceText: "12%" });
+    assert.ok(callerConflict.reviewReasons.includes("source_economics_evidence_conflict"));
+    const m = matchSupplierCommissionRule({ rules: [metaLegacy({ rawRuleReference: { commission: "10%" }, metadata: { sourceCommissionText: "12%" } })], facts: { orderValue: 100, currency: "USD" } });
+    assert.equal(m.status, "REVIEW_REQUIRED");
+    assert.equal(m.expectedSupplierCommission, null);
+  });
+
+  it("9. fresh fan-out never manufactures ambiguity or conflict from its own raw fragment + flattened text", () => {
+    const rows = fanOut([
+      { id: "P", name: "Percent", commission: "10%" },
+      { id: "Z", name: "Zero", commission: "0%" },
+      { id: "F", name: "Fixed", commission: "USD 20", model: "CPA" },
+      { id: "OR", name: "Or", commission: { type: "Percentage - Individual Transaction Value Or Fixed Cost - Individual Transaction Value", value: "8% Or USD 20" } },
+      { id: "M", name: "Model", value: 20, model: "cpa", currency: "USD" },
+      { id: "S", name: "Cps", commission: "5%", model: "cps" },
+    ]);
+    assert.equal(rows.length, 7);
+    for (const r of rows) {
+      assert.equal(r.metadata.financeReady, true, `${r.sourceRuleId} ${JSON.stringify(r.metadata.reviewReasons)}`);
+      assert.ok(!r.metadata.reviewReasons.includes("source_economics_ambiguous"));
+      assert.ok(!r.metadata.reviewReasons.includes("source_economics_evidence_conflict"));
+      assert.ok(r.metadata.readinessEvidenceSources.includes("source_text"));
+      assert.ok(r.metadata.readinessEvidenceSources.includes("raw_rule_reference"));
+    }
+    const model = rows.find((r) => r.sourceRuleId === "M");
+    assert.equal(model.fixedAmount, 20, "structured model semantics win over the flattened text");
+    assert.equal(model.ratePercent, null);
+  });
+
+  it("10. model-only evidence (cps, no amount text) still relies on modelShapeConflict only", () => {
+    const consistent = assessSupplierCommissionReadiness({ ...metaLegacy(), metadata: null, commissionModel: "cps" });
+    assert.equal(consistent.financeReady, true);
+    assert.deepEqual(consistent.evidenceSources, ["supplier_commission_model"]);
+    assert.deepEqual(consistent.sourceEconomics, { reconciled: true, compared: null });
+    const conflicting = assessSupplierCommissionReadiness({ ...metaLegacy(), metadata: null, commissionModel: "cpa" });
+    assert.equal(conflicting.financeReady, false);
+    assert.deepEqual(conflicting.reviewReasons, ["source_model_shape_mismatch"]);
+    assert.deepEqual(sourceEconomicsFacts({ rawRuleReference: null, sourceText: null, metadataSourceCommissionText: null }), []);
+  });
+
+  it("11. network-specific explicit readiness is not re-reconciled against metadata text", () => {
+    const optimise = assessSupplierCommissionReadiness(metaLegacy({ ratePercent: 20, mappingStatus: "VERIFIED", metadata: { financeReady: true, reviewReasons: [], semanticStatus: "VERIFIED", sourceCommissionText: "10%" } }));
+    assert.equal(optimise.decisionSource, "NETWORK_SPECIFIC");
+    assert.equal(optimise.financeReady, true);
+    assert.equal(optimise.sourceEconomics, null);
+    const rakuten = assessSupplierCommissionReadiness(metaLegacy({ ratePercent: 3, mappingStatus: "VERIFIED", metadata: { financeReady: true, promotionGate: "VERIFIED_FINANCE_READY_ONLY", sourceCommissionText: "3%" } }));
+    assert.equal(rakuten.financeReady, true);
+    const cjBlocked = assessSupplierCommissionReadiness(metaLegacy({ mappingStatus: "REVIEW_REQUIRED", metadata: { financeReady: false, reviewReasons: ["cj_situation_requires_review"], sourceCommissionText: "10%" } }));
+    assert.equal(cjBlocked.financeReady, false);
+    assert.deepEqual(cjBlocked.reviewReasons, ["cj_situation_requires_review"]);
+    assert.equal(cjBlocked.decisionSource, "NETWORK_SPECIFIC");
   });
 });

@@ -20,7 +20,7 @@
 import { createHash } from "node:crypto";
 import { explicitNumber, listCampaignCommissionFacts, looksPercent } from "../ops/campaignCommissions.js";
 
-export const SUPPLIER_COMMISSION_READINESS_VERSION = "SCR-READINESS-3";
+export const SUPPLIER_COMMISSION_READINESS_VERSION = "SCR-READINESS-4";
 
 export const RULE_MAPPING_STATUS = Object.freeze({
   MAPPED: "MAPPED",
@@ -259,27 +259,73 @@ function currencyOf(value) {
   return code && /^[A-Z]{3}$/.test(code) ? code : null;
 }
 
+/** Stable identity of one parsed source fact (kind + value + currency); the row's payout key. */
+function factKey(fact) {
+  const kind = String(fact?.kind ?? "").toUpperCase();
+  return `${kind}|${explicitNumber(fact?.value)}|${kind === "FIXED" ? currencyOf(fact?.currency) ?? "" : ""}`;
+}
+
 /**
- * Supplier commission facts parsed from trusted source evidence with the SAME parser the
- * fan-out uses (listCampaignCommissionFacts) — never a second parser. Accepts the raw
- * supplier fragment (object or string) and/or caller-supplied source text.
+ * Parse ONE trusted numeric-bearing evidence source with the SAME parser the fan-out uses
+ * (listCampaignCommissionFacts) — never a second parser.
  */
-export function sourceEconomicsFacts({ rawRuleReference = null, sourceText = null } = {}) {
+function parseEvidenceSource(input) {
+  if (input == null || input === "") return [];
+  try {
+    return [...(listCampaignCommissionFacts({ groups: [input], raw: {} }).allFacts ?? [])];
+  } catch {
+    /* unparseable evidence yields no facts; readiness then relies on the other gates */
+    return [];
+  }
+}
+
+/**
+ * Supplier commission facts parsed from EVERY applicable trusted numeric-bearing evidence
+ * source of a rule — the persisted raw supplier fragment, the caller-supplied source text
+ * and metadata.sourceCommissionText — never first-source-wins. Equivalent facts from
+ * different sources are deduplicated (raw "10%" + metadata "10%" is ONE fact); each fact
+ * carries the evidence sources that produced it so reconciliation can detect sources that
+ * disagree with each other. commissionModel is deliberately not a numeric source: it is
+ * model-only evidence handled by modelShapeConflict().
+ *
+ * Accepts either the resolved evidence (`numericEvidence` from resolveReadinessEvidence)
+ * or the individual inputs.
+ */
+export function sourceEconomicsFacts({
+  rawRuleReference = null,
+  sourceText = null,
+  metadataSourceCommissionText = null,
+  numericEvidence = null,
+} = {}) {
+  const sources = Array.isArray(numericEvidence)
+    ? numericEvidence
+    : numericEvidenceSources({ rawRuleReference, metadata: { sourceCommissionText: metadataSourceCommissionText } }, { sourceText });
   const facts = [];
-  const push = (entry) => {
-    if (entry == null || entry === "") return;
-    try {
-      for (const fact of listCampaignCommissionFacts({ groups: [entry], raw: {} }).allFacts ?? []) facts.push(fact);
-    } catch {
-      /* unparseable evidence yields no facts; readiness then relies on the other gates */
+  for (const { source, input } of sources) {
+    for (const fact of parseEvidenceSource(input)) {
+      const key = factKey(fact);
+      const existing = facts.find((item) => factKey(item) === key);
+      if (existing) {
+        if (!existing.evidenceSources.includes(source)) existing.evidenceSources.push(source);
+      } else {
+        facts.push({ ...fact, evidenceSources: [source] });
+      }
     }
-  };
-  if (rawRuleReference != null && (typeof rawRuleReference === "object" || typeof rawRuleReference === "string")) {
-    push(rawRuleReference);
-  } else if (present(sourceText)) {
-    push(String(sourceText));
   }
   return facts;
+}
+
+/** Same-kind fact keys claimed by each fact-bearing evidence source. */
+function claimsBySource(facts, kind) {
+  const claims = new Map();
+  for (const fact of facts) {
+    const sources = Array.isArray(fact.evidenceSources) && fact.evidenceSources.length ? fact.evidenceSources : ["evidence"];
+    for (const source of sources) {
+      if (!claims.has(source)) claims.set(source, new Map());
+      if (String(fact.kind ?? "").toUpperCase() === kind) claims.get(source).set(factKey(fact), fact);
+    }
+  }
+  return claims;
 }
 
 /**
@@ -287,7 +333,10 @@ export function sourceEconomicsFacts({ rawRuleReference = null, sourceText = nul
  * Percentage outcomes must equal the compatible percentage fact; fixed outcomes must equal
  * the compatible fixed fact in amount and currency. A source with both a percent and a
  * fixed fact ("8% Or USD 20") reconciles each sibling outcome to its own kind. Several
- * distinct same-kind facts that cannot be tied to the row safely are ambiguous.
+ * distinct same-kind facts that cannot be tied to the row safely are ambiguous. When the
+ * trusted evidence sources disagree with EACH OTHER about the row's kind (raw "10%" vs
+ * metadata "12%", or one source claiming a percent where another claims a fixed amount)
+ * no source is chosen silently: the row fails closed with source_economics_evidence_conflict.
  *
  * @returns {{ reconciled: boolean, reasons: string[], compared: object|null }}
  */
@@ -300,26 +349,42 @@ export function reconcileSourceEconomics(rule = {}, facts = []) {
   }
 
   const kind = ratePercent != null ? "PERCENT" : "FIXED";
-  const sameKind = list.filter((fact) => fact.kind === kind);
+  const claims = claimsBySource(list, kind);
+  const evidenceSources = [...claims.keys()];
+  const sameKind = list.filter((fact) => String(fact.kind ?? "").toUpperCase() === kind);
   if (!sameKind.length) {
     return {
       reconciled: false,
       reasons: ["source_economics_kind_mismatch"],
-      compared: { kind, sourceKinds: [...new Set(list.map((fact) => fact.kind))] },
+      compared: { kind, evidenceSources, sourceKinds: [...new Set(list.map((fact) => fact.kind))] },
+    };
+  }
+
+  // Trusted sources must agree with each other before any of them can vouch for the row.
+  const signatures = evidenceSources.map((source) => [...claims.get(source).keys()].sort().join(","));
+  if (new Set(signatures).size > 1) {
+    const sourceValuesBySource = {};
+    for (const source of evidenceSources) {
+      sourceValuesBySource[source] = [...claims.get(source).values()].map((fact) => fact.display);
+    }
+    return {
+      reconciled: false,
+      reasons: ["source_economics_evidence_conflict"],
+      compared: { kind, evidenceSources, sourceValuesBySource },
     };
   }
 
   const ruleCurrency = currencyOf(rule?.currency);
   const distinct = [];
   for (const fact of sameKind) {
-    const key = `${explicitNumber(fact.value)}|${kind === "FIXED" ? currencyOf(fact.currency) ?? "" : ""}`;
+    const key = factKey(fact);
     if (!distinct.some((item) => item.key === key)) distinct.push({ key, fact });
   }
   if (distinct.length > 1) {
     return {
       reconciled: false,
       reasons: ["source_economics_ambiguous"],
-      compared: { kind, sourceValues: distinct.map((item) => item.fact.display) },
+      compared: { kind, evidenceSources, sourceValues: distinct.map((item) => item.fact.display) },
     };
   }
 
@@ -334,7 +399,7 @@ export function reconcileSourceEconomics(rule = {}, facts = []) {
   return {
     reconciled: reasons.length === 0,
     reasons,
-    compared: { kind, sourceValue: fact.value, sourceCurrency: fact.currency ?? null, ruleValue, ruleCurrency },
+    compared: { kind, evidenceSources, sourceValue: fact.value, sourceCurrency: fact.currency ?? null, ruleValue, ruleCurrency },
   };
 }
 
@@ -359,7 +424,38 @@ function metadataOf(rule) {
 }
 
 /**
- * Trustworthy commission-semantics evidence for a rule.
+ * Trusted NUMERIC-bearing evidence sources of a rule, in a form the parser accepts:
+ * the raw supplier fragment (structured object or string), the caller-supplied source
+ * text and metadata.sourceCommissionText. The supplier model is model-only evidence and is
+ * handled by modelShapeConflict(), never parsed for amounts.
+ *
+ * The same piece of evidence is never parsed twice: callers (fan-out, listing projection)
+ * pass the raw fragment AND its own flattened commission text, and a flattening loses the
+ * structured model semantics ({ value: 20, model: "cpa" } is a fixed payout, while the text
+ * "20 cpa" reads as a percentage). The structured fragment is kept and the identical
+ * flattened text is treated as the same evidence, not as a second independent source.
+ * Distinct texts ARE independent sources and are all parsed.
+ */
+export function numericEvidenceSources(rule = {}, { sourceText = null } = {}) {
+  const metadata = metadataOf(rule);
+  const raw = rule?.rawRuleReference;
+  const rawUsable = raw != null && (typeof raw === "object" || typeof raw === "string");
+  const rawText = rawUsable ? text(sourceCommissionText(raw)) : null;
+  const explicit = text(sourceText);
+  const metaText = text(metadata.sourceCommissionText);
+  const sources = [];
+  if (rawUsable) sources.push({ source: "raw_rule_reference", input: raw });
+  if (explicit && explicit !== rawText) sources.push({ source: "source_text", input: explicit });
+  if (metaText && metaText !== rawText && metaText !== explicit) {
+    sources.push({ source: "metadata_source_commission_text", input: metaText });
+  }
+  return sources;
+}
+
+/**
+ * Trustworthy commission-semantics evidence for a rule — the ONE resolved evidence model
+ * used both as proof that source semantics exist and as the input of source-economics
+ * reconciliation (every source that proves semantics is also reconciled).
  *
  * Only source-level evidence counts: an explicit caller-supplied source text, the
  * persisted raw supplier fragment (rawRuleReference), source text kept in metadata, or
@@ -401,6 +497,7 @@ export function resolveReadinessEvidence(rule = {}, { sourceText = null, factDis
   return {
     evidenceText: parts.length ? parts.join(" ") : null,
     evidenceSources: sources,
+    numericEvidence: numericEvidenceSources(rule, { sourceText }),
     factDisplay: text(factDisplay) ?? text(metadata.factDisplay) ?? null,
   };
 }
@@ -499,8 +596,9 @@ export function assessSupplierCommissionReadiness(rule = {}, { sourceText = null
   }
 
   // Numeric commission alone is never verified semantics. Readiness needs trustworthy
-  // source evidence (raw fragment / source text / supplier model); legacy rows without
-  // any such evidence fail closed until a re-sync attaches it.
+  // source evidence (raw fragment / source text / metadata source text / supplier model);
+  // legacy rows without any such evidence fail closed until a re-sync attaches it. The
+  // same resolved evidence feeds source-economics reconciliation below.
   const evidence = resolveReadinessEvidence(rule, { sourceText, factDisplay });
   const display = evidence.factDisplay ?? "";
   const source = evidence.evidenceText ?? "";
@@ -511,7 +609,7 @@ export function assessSupplierCommissionReadiness(rule = {}, { sourceText = null
   // Explicit source economics must AGREE with the normalized row, not merely exist.
   let reconciliation = null;
   if (hasNumericOutcome && source) {
-    const facts = sourceEconomicsFacts({ rawRuleReference: rule?.rawRuleReference ?? null, sourceText });
+    const facts = sourceEconomicsFacts({ numericEvidence: evidence.numericEvidence });
     reconciliation = reconcileSourceEconomics(rule, facts);
     reasons.push(...reconciliation.reasons);
     const modelConflict = modelShapeConflict(rule);
