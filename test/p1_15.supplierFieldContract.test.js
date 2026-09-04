@@ -311,6 +311,8 @@ describe("P1.15 Optimise commission lineage", () => {
     assert.equal(input.confirmedCommission, 5);
     assert.equal(input.pendingCommission, 2);
     assert.equal(input.rejectedCommission, 1);
-    assert.equal(input.grossCommission, 5);
+    // grossCommission is the total network commission across statuses (validated + pending +
+    // rejected); payable/confirmed amounts always derive from confirmedCommission.
+    assert.equal(input.grossCommission, 8);
   });
 });

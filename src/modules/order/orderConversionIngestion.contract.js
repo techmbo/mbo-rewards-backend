@@ -56,7 +56,10 @@ export function extractNetworkConversionId(rawInput = {}, entity = {}) {
     return String(rawId).trim();
   }
 
-  const { localExternalId } = parseSourceAccountLabel(entity?.externalId);
+  // Callers may pass the entity itself as the only argument: read its externalId as well so
+  // the documented "<network>-conversion-<id>" fallback applies (e.g. Impact Actions expose "Id").
+  const externalId = entity?.externalId ?? rawInput?.externalId ?? null;
+  const { localExternalId } = parseSourceAccountLabel(externalId);
   const match = String(localExternalId || "").match(/(?:^|-)conversion(?:-by-payment)?-(.+)$/i);
   if (match?.[1] && !match[1].startsWith("campaign-") && !match[1].includes("summary")) {
     return match[1];

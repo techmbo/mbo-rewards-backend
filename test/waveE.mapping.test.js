@@ -293,7 +293,10 @@ test("Wave E — Impact / Partnerize normalization", async (t) => {
     assert.equal(ingest.ok, true);
     assert.equal(ingest.input.supplierConversionId, "act-1");
     assert.equal(Number(ingest.input.supplierCommission), 25);
-    assert.equal(ingest.input.status, "APPROVED");
+    // Raw network state is preserved and stays UNKNOWN until a verified status mapping exists.
+    assert.equal(ingest.input.status, "UNKNOWN");
+    assert.equal(ingest.input._order.networkRawStatus, "APPROVED");
+    assert.equal(ingest.input._order.statusMappingExceptionRequired, true);
   });
 
   await t.test("Partnerize conversion maps into conversion ingest", () => {

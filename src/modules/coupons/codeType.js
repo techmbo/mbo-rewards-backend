@@ -15,9 +15,20 @@ export function isCouponUrlValue(value) {
   return false;
 }
 
-/** Real voucher/promo codes only — never URLs or blank strings. */
+function scalarCode(value) {
+  // A code is a string or number; nested objects (e.g. Partnerize voucher_code.{voucher_code,...})
+  // are resolved by the network mapper and must never be stringified into "[object Object]".
+  return typeof value === "string" || typeof value === "number" ? value : undefined;
+}
+
+/** Real voucher/promo codes only — never URLs, blank strings or nested objects. */
 export function resolveCouponCode(rawData = {}) {
-  const code = first(rawData?.coupon, rawData?.code, rawData?.voucherCode, rawData?.voucher_code);
+  const code = first(
+    scalarCode(rawData?.coupon),
+    scalarCode(rawData?.code),
+    scalarCode(rawData?.voucherCode),
+    scalarCode(rawData?.voucher_code),
+  );
   if (!hasText(code) || isCouponUrlValue(code)) return null;
   return String(code).trim();
 }
