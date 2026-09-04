@@ -87,27 +87,51 @@ function canonicalRule(overrides = {}) {
   };
 }
 
+/**
+ * In-memory stand-in for the two bounded queries. Honours supplier filter, `take`, counts
+ * and the relation predicates (`supplierCommissionRules: { none: {} }` and
+ * `campaignSources: { none: { supplierCommissionRules: { some: {} } } }`) so that fallback
+ * eligibility is evaluated against ALL rules, exactly like the database.
+ */
 function fakeDb({ rules = [], campaigns = [] } = {}) {
-  const calls = { ruleWhere: [], campaignWhere: [] };
+  const calls = { ruleFindMany: 0, ruleCount: 0, campaignFindMany: 0, campaignCount: 0, campaignWhere: [] };
+  const ruleMatches = (r, where) => !where?.supplier || r.supplier === where.supplier;
+  const campaignMatches = (c, where) => {
+    if (where?.supplier && c.supplier !== where.supplier) return false;
+    if (!(c.defaultCommissionValue != null || c.commissionGroups != null)) return false;
+    if (where?.supplierCommissionRules?.none) {
+      if (rules.some((r) => r.supplierCampaignId === c.id)) return false;
+    }
+    if (where?.campaignSources?.none?.supplierCommissionRules?.some) {
+      if (rules.some((r) => r.supplierCampaignId == null && r.campaignSource?.supplierCampaignId === c.id)) return false;
+    }
+    const excluded = new Set(where?.id?.notIn ?? []);
+    return !excluded.has(c.id);
+  };
   return {
     calls,
     db: {
       supplierCommissionRule: {
-        async findMany({ where }) {
-          calls.ruleWhere.push(where);
-          return rules.filter((r) => !where?.supplier || r.supplier === where.supplier);
+        async findMany({ where, take }) {
+          calls.ruleFindMany += 1;
+          const rows = rules.filter((r) => ruleMatches(r, where));
+          return take != null ? rows.slice(0, take) : rows;
+        },
+        async count({ where }) {
+          calls.ruleCount += 1;
+          return rules.filter((r) => ruleMatches(r, where)).length;
         },
       },
       supplierCampaign: {
-        async findMany({ where }) {
+        async findMany({ where, take }) {
+          calls.campaignFindMany += 1;
           calls.campaignWhere.push(where);
-          const excluded = new Set(where?.id?.notIn ?? []);
-          return campaigns.filter(
-            (c) =>
-              !excluded.has(c.id) &&
-              (!where?.supplier || c.supplier === where.supplier) &&
-              (c.defaultCommissionValue != null || c.commissionGroups != null),
-          );
+          const rows = campaigns.filter((c) => campaignMatches(c, where));
+          return take != null ? rows.slice(0, take) : rows;
+        },
+        async count({ where }) {
+          calls.campaignCount += 1;
+          return campaigns.filter((c) => campaignMatches(c, where)).length;
         },
       },
     },
@@ -370,5 +394,150 @@ describe("Network Ops supplier commission listing — Commission 1...N projectio
     assert.ok(rows.every((r) => r.projected && r.outcomeKey.startsWith("123::campaigns::commission::")));
     assert.deepEqual(rows.map((r) => [r.sourceRuleId, r.ratePercent, r.fixedAmount, r.currency]), [["p1", 5, null, null], ["p2", null, 10, "AED"]]);
     assert.equal(projectedMappingStatus({ ratePercent: 10, conditions: [{ conditionType: "COMMISSION_TIER" }], rawRuleReference: { commission: "10%" } }).mappingStatus, "REVIEW_REQUIRED");
+  });
+});
+
+describe("Network Ops supplier commission listing — cap boundary precedence and completeness", () => {
+  const withGroups = (id, name, extra = {}) =>
+    campaign({
+      id,
+      campaignName: name,
+      merchantNameRaw: name,
+      supplierCampaignId: `${id}-src`,
+      rawPayload: { id: `${id}-src`, commissionGroups: [{ id: "g1", commission: "7%" }, { id: "g2", commission: "3%" }] },
+      ...extra,
+    });
+  const ruleFor = (sc, n, extra = {}) =>
+    canonicalRule({
+      id: `${sc.id}-rule-${n}`,
+      supplierCampaignId: sc.id,
+      supplierCampaign: sc,
+      sourceGroupId: `G${n}`,
+      sourceRuleId: `G${n}`,
+      outcomeKey: `optimise::commission_groups::${sc.supplierCampaignId}::G${n}::base::slot:1::`,
+      updatedAt: new Date(Date.UTC(2026, 0, 1) + n * 1000),
+      ...extra,
+    });
+
+  it("CRITICAL: a campaign whose canonical rule sits outside the capped canonical result is never projected", async () => {
+    // 12 canonical rules exist for "filler" campaigns; the cap is 5. Campaign X's only canonical
+    // rule is ordered last, so it is outside the capped result — yet it must not fall back.
+    const fillers = Array.from({ length: 4 }, (_, i) => campaign({ id: `sc-f${i}`, campaignName: `Filler ${i}`, merchantNameRaw: `Filler ${i}`, supplierCampaignId: `F${i}` }));
+    const rules = fillers.flatMap((sc) => [1, 2, 3].map((n) => ruleFor(sc, n)));
+    const x = withGroups("sc-X", "Campaign X", { defaultCommissionValue: "8", commissionUnit: "PERCENT" });
+    rules.push(ruleFor(x, 1, { updatedAt: new Date("2020-01-01T00:00:00.000Z") })); // last after updatedAt desc
+    const y = withGroups("sc-Y", "Campaign Y"); // genuinely without canonical rules
+    const { db, calls } = fakeDb({ rules, campaigns: [...fillers, x, y] });
+    const service = new NetworkPortalService({ prisma: db });
+
+    const result = await service.listSupplierCommissionRules({ take: 100, limits: { maxRules: 5, maxFallbackCampaigns: 100 } });
+
+    const xRows = result.items.filter((i) => i.campaignName === "Campaign X");
+    assert.equal(xRows.length, 0, "Campaign X has a canonical rule in the DB: no projected rows and (capped) no canonical rows either");
+    assert.ok(result.items.every((i) => !(i.campaignName === "Campaign X" && i.projected)));
+    const yRows = result.items.filter((i) => i.campaignName === "Campaign Y");
+    assert.deepEqual(yRows.map((i) => [i.projected, i.commissionSequence]), [[true, 1], [true, 2]], "campaign without canonical rules still projects");
+    assert.equal(result.meta.canonicalRules, 5);
+    assert.equal(result.meta.canonicalRulesTotal, 13);
+    assert.equal(result.meta.canonicalTruncated, true);
+    assert.equal(result.meta.truncated, true);
+    assert.equal(result.meta.resultSetComplete, false);
+    assert.equal(result.meta.totalIsPartial, true);
+    assert.equal(result.meta.fallbackCampaignsTotal, 1, "DB-side eligibility counts only Campaign Y");
+    // fallback eligibility came from the database predicate, not from the capped ids
+    const where = calls.campaignWhere[0];
+    assert.deepEqual(where.supplierCommissionRules, { none: {} });
+    assert.deepEqual(where.campaignSources, { none: { supplierCommissionRules: { some: {} } } });
+    assert.equal(where.id, undefined, "no capped-id exclusion list");
+    // proof of no N+1: one rule query + one rule count + one campaign query + one campaign count
+    assert.deepEqual([calls.ruleFindMany, calls.ruleCount, calls.campaignFindMany, calls.campaignCount], [1, 1, 1, 1]);
+  });
+
+  it("1. canonical rule inside the cap → no projection", async () => {
+    const x = withGroups("sc-X", "Campaign X");
+    const result = await new NetworkPortalService({ prisma: fakeDb({ rules: [ruleFor(x, 1)], campaigns: [x] }).db }).listSupplierCommissionRules({ limits: { maxRules: 50, maxFallbackCampaigns: 50 } });
+    assert.equal(result.total, 1);
+    assert.equal(result.items[0].projected, false);
+    assert.equal(result.meta.projectedRules, 0);
+    assert.equal(result.meta.resultSetComplete, true);
+  });
+
+  it("2. canonical rule linked only through a campaign source (outside the cap) → still no projection", async () => {
+    const fillers = Array.from({ length: 3 }, (_, i) => campaign({ id: `sc-f${i}`, campaignName: `Filler ${i}`, merchantNameRaw: `Filler ${i}`, supplierCampaignId: `F${i}` }));
+    const rules = fillers.map((sc) => ruleFor(sc, 1));
+    const x = withGroups("sc-X", "Campaign X");
+    rules.push({
+      ...canonicalRule({ id: "x-via-source", outcomeKey: "optimise::commission_groups::sc-X-src::G1::base::slot:1::", updatedAt: new Date("2020-01-01T00:00:00.000Z") }),
+      supplierCampaignId: null,
+      supplierCampaign: null,
+      campaignSourceId: "cs-X",
+      campaignSource: { id: "cs-X", supplierCampaignId: "sc-X", supplierCampaign: x },
+    });
+    const result = await new NetworkPortalService({ prisma: fakeDb({ rules, campaigns: [...fillers, x] }).db }).listSupplierCommissionRules({ take: 100, limits: { maxRules: 2, maxFallbackCampaigns: 100 } });
+    assert.equal(result.items.filter((i) => i.campaignName === "Campaign X").length, 0);
+    assert.equal(result.meta.fallbackCampaignsTotal, 0);
+    assert.equal(result.meta.canonicalTruncated, true);
+  });
+
+  it("3. no canonical rules → fallback projection still works and is complete", async () => {
+    const result = await new NetworkPortalService({ prisma: fakeDb({ campaigns: [withGroups("sc-Y", "Campaign Y")] }).db }).listSupplierCommissionRules({ limits: { maxRules: 5, maxFallbackCampaigns: 5 } });
+    assert.deepEqual(result.items.map((i) => [i.projected, i.commissionSequence, i.commissionValue]), [[true, 1, "7%"], [true, 2, "3%"]]);
+    assert.equal(result.meta.resultSetComplete, true);
+    assert.equal(result.meta.totalIsPartial, false);
+  });
+
+  it("4. hybrid canonical + fallback unaffected by the DB-side eligibility predicate", async () => {
+    const a = campaign({ id: "sc-A", campaignName: "Alpha", merchantNameRaw: "Alpha", supplierCampaignId: "A1", defaultCommissionValue: "8", commissionUnit: "PERCENT" });
+    const b = withGroups("sc-B", "Bravo");
+    const result = await new NetworkPortalService({ prisma: fakeDb({ rules: [ruleFor(a, 1), ruleFor(a, 2)], campaigns: [a, b] }).db }).listSupplierCommissionRules({ limits: { maxRules: 50, maxFallbackCampaigns: 50 } });
+    assert.deepEqual(result.items.map((i) => [i.campaignName, i.commissionSequence, i.projected]), [["Alpha", 1, false], ["Alpha", 2, false], ["Bravo", 1, true], ["Bravo", 2, true]]);
+    assert.equal(result.meta.canonicalCampaigns, 1);
+    assert.equal(result.meta.projectedCampaigns, 1);
+  });
+
+  it("5 & 6. explicit 0% and percent-OR-fixed fallback unaffected", async () => {
+    const zero = campaign({ id: "sc-Z", campaignName: "Zero", merchantNameRaw: "Zero", supplierCampaignId: "Z1", rawPayload: { id: "Z1", commissionGroups: [{ id: "EX", commission: "0%" }, { id: "STD", commission: "10%" }] } });
+    const orFixed = campaign({ id: "sc-O", campaignName: "OrFixed", merchantNameRaw: "OrFixed", supplierCampaignId: "O1", rawPayload: { id: "O1", commission: { type: "Percentage Or Fixed Cost", value: "8% Or USD 20" } } });
+    const result = await new NetworkPortalService({ prisma: fakeDb({ campaigns: [zero, orFixed] }).db }).listSupplierCommissionRules({ limits: { maxRules: 5, maxFallbackCampaigns: 5 } });
+    assert.deepEqual(result.items.filter((i) => i.campaignName === "Zero").map((i) => i.commissionValue).sort(), ["0%", "10%"]);
+    assert.deepEqual(result.items.filter((i) => i.campaignName === "OrFixed").map((i) => [i.commissionValue, i.currency]), [["8%", null], ["20", "USD"]]);
+  });
+
+  it("7. cap reached → truncation and completeness metadata are truthful (canonical and fallback)", async () => {
+    const campaigns = Array.from({ length: 6 }, (_, i) => withGroups(`sc-${i}`, `Camp ${i}`));
+    const canonical = campaign({ id: "sc-C", campaignName: "Canon", merchantNameRaw: "Canon", supplierCampaignId: "C1" });
+    const rules = [1, 2, 3].map((n) => ruleFor(canonical, n));
+    const result = await new NetworkPortalService({ prisma: fakeDb({ rules, campaigns: [...campaigns, canonical] }).db }).listSupplierCommissionRules({ take: 3, limits: { maxRules: 2, maxFallbackCampaigns: 4 } });
+    assert.equal(result.meta.canonicalRules, 2);
+    assert.equal(result.meta.canonicalRulesTotal, 3);
+    assert.equal(result.meta.fallbackCampaigns, 4);
+    assert.equal(result.meta.fallbackCampaignsTotal, 6);
+    assert.equal(result.meta.canonicalTruncated, true);
+    assert.equal(result.meta.fallbackTruncated, true);
+    assert.equal(result.meta.truncated, true);
+    assert.equal(result.meta.resultSetComplete, false);
+    assert.equal(result.meta.totalIsPartial, true);
+    assert.equal(result.total, 2 + 4 * 2, "total counts loaded rows only");
+    assert.equal(result.meta.loadedRows, result.total);
+    assert.equal(result.meta.returnedRows, 3);
+    assert.deepEqual(result.meta.limits, { maxRules: 2, maxFallbackCampaigns: 4 });
+  });
+
+  it("8. q search on a truncated source set reports partial search state; complete otherwise", async () => {
+    const campaigns = Array.from({ length: 6 }, (_, i) => withGroups(`sc-${i}`, `Camp ${i}`));
+    const service = new NetworkPortalService({ prisma: fakeDb({ campaigns }).db });
+    const truncated = await service.listSupplierCommissionRules({ q: "Camp 5", limits: { maxRules: 5, maxFallbackCampaigns: 3 } });
+    assert.equal(truncated.meta.searchApplied, true);
+    assert.equal(truncated.meta.searchComplete, false);
+    assert.equal(truncated.meta.searchScope, "LOADED_ROWS_ONLY");
+    assert.equal(truncated.meta.totalIsPartial, true);
+    const complete = await service.listSupplierCommissionRules({ q: "Camp 5", limits: { maxRules: 50, maxFallbackCampaigns: 50 } });
+    assert.equal(complete.meta.searchComplete, true);
+    assert.equal(complete.meta.searchScope, "COMPLETE");
+    assert.equal(complete.total, 2);
+    const noSearch = await service.listSupplierCommissionRules({ limits: { maxRules: 50, maxFallbackCampaigns: 50 } });
+    assert.equal(noSearch.meta.searchApplied, false);
+    assert.equal(noSearch.meta.searchComplete, true);
+    assert.equal(noSearch.meta.searchScope, null);
   });
 });

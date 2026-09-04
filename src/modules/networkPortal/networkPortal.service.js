@@ -1169,10 +1169,14 @@ export class NetworkPortalService {
     q = null,
     skip = 0,
     take = 25,
+    /** Safety bounds (tests override); never change commercial precedence. */
+    limits = null,
   } = {}) {
     const supplier = network ? String(network).toUpperCase() : null;
-    const maxRules = Math.max(100, Number(process.env.NETWORK_OPS_COMMISSION_RULES_MAX || 5000));
-    const maxFallbackCampaigns = Math.max(50, Number(process.env.NETWORK_OPS_COMMISSION_FALLBACK_MAX_CAMPAIGNS || 2000));
+    const maxRules = limits?.maxRules ?? Math.max(100, Number(process.env.NETWORK_OPS_COMMISSION_RULES_MAX || 5000));
+    const maxFallbackCampaigns =
+      limits?.maxFallbackCampaigns ??
+      Math.max(50, Number(process.env.NETWORK_OPS_COMMISSION_FALLBACK_MAX_CAMPAIGNS || 2000));
     const campaignSelect = {
       id: true,
       supplier: true,
@@ -1185,60 +1189,84 @@ export class NetworkPortalService {
       categoryName: true,
     };
 
-    const canonicalRules = await this.db.supplierCommissionRule.findMany({
-      where: supplier ? { supplier } : {},
-      orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
-      take: maxRules,
-      include: {
-        conditions: true,
-        supplierCampaign: { select: campaignSelect },
-        campaignSource: { include: { supplierCampaign: { select: campaignSelect } } },
-      },
-    });
-    const canonicalCampaignIds = [
-      ...new Set(
-        canonicalRules
-          .map((rule) => rule.supplierCampaignId ?? rule.campaignSource?.supplierCampaignId ?? null)
-          .filter(Boolean),
-      ),
-    ];
+    const ruleWhere = supplier ? { supplier } : {};
+    // Fallback eligibility is decided by the database, never by the capped canonical
+    // result: a campaign is eligible only when it carries commission evidence AND has zero
+    // persisted SupplierCommissionRule rows (open, expired or historical) linked either
+    // directly or through any of its campaign sources. One bounded query, no per-campaign
+    // lookups; independent of maxRules, ordering and pagination.
+    const fallbackWhere = {
+      archivedAt: null,
+      ...(supplier ? { supplier } : {}),
+      supplierCommissionRules: { none: {} },
+      campaignSources: { none: { supplierCommissionRules: { some: {} } } },
+      OR: [{ defaultCommissionValue: { not: null } }, { commissionGroups: { not: null } }],
+    };
 
-    // Fallback projection only for campaigns lacking persisted canonical rules.
-    const fallbackCampaigns = await this.db.supplierCampaign.findMany({
-      where: {
-        archivedAt: null,
-        ...(supplier ? { supplier } : {}),
-        ...(canonicalCampaignIds.length ? { id: { notIn: canonicalCampaignIds } } : {}),
-        OR: [{ defaultCommissionValue: { not: null } }, { commissionGroups: { not: null } }],
-      },
-      orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
-      take: maxFallbackCampaigns,
-      select: {
-        ...campaignSelect,
-        defaultCommissionValue: true,
-        commissionUnit: true,
-        commissionCurrency: true,
-        currencyCode: true,
-        commissionGroups: true,
-        rawPayload: true,
-        updatedAt: true,
-      },
-    });
+    const [canonicalRulesTotal, canonicalRules, fallbackCampaignsTotal, fallbackCampaigns] = await Promise.all([
+      this.db.supplierCommissionRule.count({ where: ruleWhere }),
+      this.db.supplierCommissionRule.findMany({
+        where: ruleWhere,
+        orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
+        take: maxRules,
+        include: {
+          conditions: true,
+          supplierCampaign: { select: campaignSelect },
+          campaignSource: { include: { supplierCampaign: { select: campaignSelect } } },
+        },
+      }),
+      this.db.supplierCampaign.count({ where: fallbackWhere }),
+      this.db.supplierCampaign.findMany({
+        where: fallbackWhere,
+        orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
+        take: maxFallbackCampaigns,
+        select: {
+          ...campaignSelect,
+          defaultCommissionValue: true,
+          commissionUnit: true,
+          commissionCurrency: true,
+          currencyCode: true,
+          commissionGroups: true,
+          rawPayload: true,
+          updatedAt: true,
+        },
+      }),
+    ]);
 
     const assembled = assembleSupplierCommissionRows({ canonicalRules, fallbackCampaigns });
     const term = q ? String(q).trim() : "";
     const allItems = assembled.rows.map(toListingDto).filter((dto) => matchesCommissionSearch(dto, term));
     const items = allItems.slice(skip, skip + take);
 
+    const canonicalTruncated = canonicalRules.length < canonicalRulesTotal;
+    const fallbackTruncated = fallbackCampaigns.length < fallbackCampaignsTotal;
+    const truncated = canonicalTruncated || fallbackTruncated;
+
     return {
+      // `total` counts the rows of the loaded (possibly truncated) result set. When
+      // meta.totalIsPartial is true the complete dataset is larger; see the *Total fields.
       total: allItems.length,
       items,
       meta: {
+        returnedRows: items.length,
+        loadedRows: allItems.length,
         canonicalRules: canonicalRules.length,
+        canonicalRulesTotal,
         canonicalCampaigns: assembled.canonicalCampaigns,
+        fallbackCampaigns: fallbackCampaigns.length,
+        fallbackCampaignsTotal,
         projectedCampaigns: assembled.projectedCampaigns,
         projectedRules: allItems.filter((item) => item.projected).length,
-        truncated: canonicalRules.length >= maxRules || fallbackCampaigns.length >= maxFallbackCampaigns,
+        limits: { maxRules, maxFallbackCampaigns },
+        truncated,
+        canonicalTruncated,
+        fallbackTruncated,
+        resultSetComplete: !truncated,
+        totalIsPartial: truncated,
+        // Search runs over the loaded rows. It is exhaustive only when nothing was truncated.
+        searchApplied: Boolean(term),
+        searchComplete: term ? !truncated : true,
+        searchScope: term ? (truncated ? "LOADED_ROWS_ONLY" : "COMPLETE") : null,
         note: "Persisted canonical SupplierCommissionRule rows are authoritative per campaign; projected rows are transitional display only.",
       },
     };
