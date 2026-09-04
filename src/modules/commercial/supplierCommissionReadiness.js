@@ -315,17 +315,40 @@ export function sourceEconomicsFacts({
   return facts;
 }
 
-/** Same-kind fact keys claimed by each fact-bearing evidence source. */
-function claimsBySource(facts, kind) {
+/**
+ * COMPLETE normalized economic claim set of each fact-bearing evidence source (every parsed
+ * fact of every kind, keyed by kind|value|currency). Sources that produced no fact are
+ * absent: unparseable evidence establishes nothing and never conflicts.
+ */
+function claimsBySource(facts) {
   const claims = new Map();
   for (const fact of facts) {
     const sources = Array.isArray(fact.evidenceSources) && fact.evidenceSources.length ? fact.evidenceSources : ["evidence"];
     for (const source of sources) {
       if (!claims.has(source)) claims.set(source, new Map());
-      if (String(fact.kind ?? "").toUpperCase() === kind) claims.get(source).set(factKey(fact), fact);
+      claims.get(source).set(factKey(fact), fact);
     }
   }
   return claims;
+}
+
+/**
+ * Independent trusted evidence sources must make the SAME complete economic claim before
+ * any of them can vouch for a row. Compared on the full claim set, not only the claims of
+ * the row's payout kind: raw "8% Or USD 20" vs metadata "8%" disagree even for the percent
+ * sibling, and raw "USD 20" vs metadata "20%" disagree whatever the row's kind. Several
+ * kinds inside ONE source ("8% Or USD 20") are not a conflict.
+ *
+ * @returns {{ conflict: boolean, evidenceSources: string[], claimsBySource: object }}
+ */
+export function sourceClaimAgreement(facts = []) {
+  const list = Array.isArray(facts) ? facts.filter(Boolean) : [];
+  const claims = claimsBySource(list);
+  const evidenceSources = [...claims.keys()];
+  const signatures = evidenceSources.map((source) => [...claims.get(source).keys()].sort().join(","));
+  const claimsOut = {};
+  for (const source of evidenceSources) claimsOut[source] = [...claims.get(source).values()].map((fact) => fact.display);
+  return { conflict: new Set(signatures).size > 1, evidenceSources, claimsBySource: claimsOut };
 }
 
 /**
@@ -334,9 +357,10 @@ function claimsBySource(facts, kind) {
  * the compatible fixed fact in amount and currency. A source with both a percent and a
  * fixed fact ("8% Or USD 20") reconciles each sibling outcome to its own kind. Several
  * distinct same-kind facts that cannot be tied to the row safely are ambiguous. When the
- * trusted evidence sources disagree with EACH OTHER about the row's kind (raw "10%" vs
- * metadata "12%", or one source claiming a percent where another claims a fixed amount)
- * no source is chosen silently: the row fails closed with source_economics_evidence_conflict.
+ * independent trusted evidence sources disagree with EACH OTHER on their complete economic
+ * claim set (raw "10%" vs metadata "12%", raw "USD 20" vs metadata "20%", raw "8% Or USD 20"
+ * vs metadata "8%") no source is chosen silently, whatever the row's kind or value: the row
+ * fails closed with source_economics_evidence_conflict before any row-level comparison.
  *
  * @returns {{ reconciled: boolean, reasons: string[], compared: object|null }}
  */
@@ -349,28 +373,25 @@ export function reconcileSourceEconomics(rule = {}, facts = []) {
   }
 
   const kind = ratePercent != null ? "PERCENT" : "FIXED";
-  const claims = claimsBySource(list, kind);
-  const evidenceSources = [...claims.keys()];
+
+  // 1. Source-level agreement on the COMPLETE claim sets, before any row-level comparison.
+  const agreement = sourceClaimAgreement(list);
+  const evidenceSources = agreement.evidenceSources;
+  if (agreement.conflict) {
+    return {
+      reconciled: false,
+      reasons: ["source_economics_evidence_conflict"],
+      compared: { kind, evidenceSources, sourceValuesBySource: agreement.claimsBySource },
+    };
+  }
+
+  // 2. Row-level reconciliation against the agreed claims of the row's payout kind.
   const sameKind = list.filter((fact) => String(fact.kind ?? "").toUpperCase() === kind);
   if (!sameKind.length) {
     return {
       reconciled: false,
       reasons: ["source_economics_kind_mismatch"],
       compared: { kind, evidenceSources, sourceKinds: [...new Set(list.map((fact) => fact.kind))] },
-    };
-  }
-
-  // Trusted sources must agree with each other before any of them can vouch for the row.
-  const signatures = evidenceSources.map((source) => [...claims.get(source).keys()].sort().join(","));
-  if (new Set(signatures).size > 1) {
-    const sourceValuesBySource = {};
-    for (const source of evidenceSources) {
-      sourceValuesBySource[source] = [...claims.get(source).values()].map((fact) => fact.display);
-    }
-    return {
-      reconciled: false,
-      reasons: ["source_economics_evidence_conflict"],
-      compared: { kind, evidenceSources, sourceValuesBySource },
     };
   }
 

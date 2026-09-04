@@ -11,6 +11,7 @@ import {
   assessSupplierCommissionReadiness,
   canonicalConditionSignature,
   reconcileSourceEconomics,
+  sourceClaimAgreement,
   sourceEconomicsFacts,
 } from "../src/modules/commercial/supplierCommissionReadiness.js";
 import {
@@ -1054,5 +1055,207 @@ describe("generic supplier commission readiness — metadata.sourceCommissionTex
     assert.equal(cjBlocked.financeReady, false);
     assert.deepEqual(cjBlocked.reviewReasons, ["cj_situation_requires_review"]);
     assert.equal(cjBlocked.decisionSource, "NETWORK_SPECIFIC");
+  });
+});
+
+
+describe("generic supplier commission readiness — cross-source evidence agreement on complete claim sets", () => {
+  const OR_TEXT = "8% Or USD 20";
+  const OR_RAW = { commission: { type: "Percentage - Individual Transaction Value Or Fixed Cost - Individual Transaction Value", value: OR_TEXT } };
+  const percentRow = (overrides = {}) => ({
+    id: "xsrc",
+    sourceRuleId: "R1",
+    commissionSequence: 1,
+    basis: "PERCENT_OF_SALE",
+    ratePercent: 10,
+    fixedAmount: null,
+    currency: null,
+    mappingStatus: "MAPPED",
+    metadata: null,
+    rawRuleReference: { commission: "10%" },
+    conditions: [],
+    outcomeKey: "123::campaigns::commission::R1::PERCENT::PERCENT_OF_SALE::::slot:1::",
+    ...overrides,
+  });
+  const fixedRow = (overrides = {}) =>
+    percentRow({ basis: "CPA", ratePercent: null, fixedAmount: 20, currency: "USD", rawRuleReference: { value: 20, model: "cpa", currency: "USD" }, ...overrides });
+  const meta = (sourceCommissionText) => ({ sourceCommissionText });
+  const conflict = (a) => {
+    assert.equal(a.financeReady, false);
+    assert.equal(a.mappingStatus, "REVIEW_REQUIRED");
+    assert.ok(a.reviewReasons.includes("source_economics_evidence_conflict"), JSON.stringify(a.reviewReasons));
+    assert.equal(a.sourceEconomics.reconciled, false);
+    return a;
+  };
+
+  it("1. raw FIXED vs metadata PERCENT conflicts on the complete claim sets", () => {
+    const a = conflict(assessSupplierCommissionReadiness(fixedRow({ metadata: meta("20%") })));
+    assert.deepEqual(a.sourceEconomics.compared, {
+      kind: "FIXED",
+      evidenceSources: ["raw_rule_reference", "metadata_source_commission_text"],
+      sourceValuesBySource: { raw_rule_reference: ["USD 20"], metadata_source_commission_text: ["20%"] },
+    });
+    const facts = sourceEconomicsFacts({ rawRuleReference: fixedRow().rawRuleReference, metadataSourceCommissionText: "20%" });
+    assert.deepEqual(sourceClaimAgreement(facts), {
+      conflict: true,
+      evidenceSources: ["raw_rule_reference", "metadata_source_commission_text"],
+      claimsBySource: { raw_rule_reference: ["USD 20"], metadata_source_commission_text: ["20%"] },
+    });
+  });
+
+  it("2. raw PERCENT vs metadata FIXED conflicts", () => {
+    const a = conflict(assessSupplierCommissionReadiness(percentRow({ metadata: meta("USD 10 CPA") })));
+    assert.deepEqual(a.sourceEconomics.compared.sourceValuesBySource, { raw_rule_reference: ["10%"], metadata_source_commission_text: ["USD 10"] });
+  });
+
+  it("3. raw 10% vs metadata 12% conflicts", () => {
+    conflict(assessSupplierCommissionReadiness(percentRow({ metadata: meta("12%") })));
+  });
+
+  it("4. row matching raw while metadata disagrees is still a conflict", () => {
+    conflict(assessSupplierCommissionReadiness(percentRow({ ratePercent: 10, metadata: meta("12%") })));
+    conflict(assessSupplierCommissionReadiness(fixedRow({ fixedAmount: 20, metadata: meta("USD 30 CPA") })));
+  });
+
+  it("5. row matching metadata while raw disagrees is still a conflict", () => {
+    conflict(assessSupplierCommissionReadiness(percentRow({ ratePercent: 12, metadata: meta("12%") })));
+    conflict(assessSupplierCommissionReadiness(fixedRow({ fixedAmount: 30, metadata: meta("USD 30 CPA") })));
+  });
+
+  it("6. raw and metadata identical percent is ready", () => {
+    const a = assessSupplierCommissionReadiness(percentRow({ metadata: meta("10%") }));
+    assert.equal(a.financeReady, true);
+    assert.deepEqual(a.reviewReasons, []);
+    const written = assessSupplierCommissionReadiness(percentRow({ rawRuleReference: { commission: "10 %" }, metadata: meta("10%") }));
+    assert.equal(written.financeReady, true);
+    assert.deepEqual(written.sourceEconomics.compared.evidenceSources, ["raw_rule_reference", "metadata_source_commission_text"]);
+  });
+
+  it("7. raw and metadata equivalent fixed is ready", () => {
+    const a = assessSupplierCommissionReadiness(fixedRow({ metadata: meta("USD 20 CPA") }));
+    assert.equal(a.financeReady, true);
+    assert.deepEqual(a.reviewReasons, []);
+    assert.deepEqual(a.sourceEconomics.compared, {
+      kind: "FIXED",
+      evidenceSources: ["raw_rule_reference", "metadata_source_commission_text"],
+      sourceValue: 20,
+      sourceCurrency: "USD",
+      ruleValue: 20,
+      ruleCurrency: "USD",
+    });
+  });
+
+  it("8. raw and metadata both '8% Or USD 20': both sibling outcomes are ready", () => {
+    const percent = assessSupplierCommissionReadiness(percentRow({ ratePercent: 8, rawRuleReference: OR_RAW, metadata: meta(OR_TEXT) }));
+    const fixed = assessSupplierCommissionReadiness(fixedRow({ basis: "FIXED_AMOUNT", rawRuleReference: OR_RAW, metadata: meta(OR_TEXT) }));
+    assert.equal(percent.financeReady, true, JSON.stringify(percent.reviewReasons));
+    assert.equal(percent.sourceEconomics.compared.sourceValue, 8);
+    assert.equal(fixed.financeReady, true, JSON.stringify(fixed.reviewReasons));
+    assert.equal(fixed.sourceEconomics.compared.sourceValue, 20);
+    assert.equal(fixed.sourceEconomics.compared.sourceCurrency, "USD");
+    const facts = sourceEconomicsFacts({ rawRuleReference: OR_RAW, metadataSourceCommissionText: OR_TEXT });
+    assert.deepEqual(facts.map((f) => [f.kind, f.value, f.evidenceSources]), [
+      ["PERCENT", 8, ["raw_rule_reference", "metadata_source_commission_text"]],
+      ["FIXED", 20, ["raw_rule_reference", "metadata_source_commission_text"]],
+    ]);
+    assert.equal(sourceClaimAgreement(facts).conflict, false);
+  });
+
+  it("9. raw '8% Or USD 20' + metadata '8%' conflicts for BOTH siblings (partial source is not assumed)", () => {
+    const percent = conflict(assessSupplierCommissionReadiness(percentRow({ ratePercent: 8, rawRuleReference: OR_RAW, metadata: meta("8%") })));
+    assert.deepEqual(percent.sourceEconomics.compared.sourceValuesBySource, { raw_rule_reference: ["8%", "USD 20"], metadata_source_commission_text: ["8%"] });
+    conflict(assessSupplierCommissionReadiness(fixedRow({ basis: "FIXED_AMOUNT", rawRuleReference: OR_RAW, metadata: meta("8%") })));
+  });
+
+  it("10. unparseable raw + usable metadata reconciles the metadata without a false conflict", () => {
+    const raw = { supplierInternalNote: "legacy" };
+    const ready = assessSupplierCommissionReadiness(percentRow({ rawRuleReference: raw, metadata: meta("10%") }));
+    assert.equal(ready.financeReady, true);
+    assert.deepEqual(ready.sourceEconomics.compared.evidenceSources, ["metadata_source_commission_text"]);
+    const mismatch = assessSupplierCommissionReadiness(percentRow({ ratePercent: 20, rawRuleReference: raw, metadata: meta("10%") }));
+    assert.equal(mismatch.financeReady, false);
+    assert.deepEqual(mismatch.reviewReasons, ["source_economics_mismatch"]);
+    assert.equal(sourceClaimAgreement(sourceEconomicsFacts({ rawRuleReference: raw, metadataSourceCommissionText: "10%" })).conflict, false);
+  });
+
+  it("11. identical facts from raw, caller text and metadata dedupe to one fact", () => {
+    const facts = sourceEconomicsFacts({ rawRuleReference: { commission: "10 %" }, sourceText: "10.0%", metadataSourceCommissionText: "10%" });
+    assert.deepEqual(facts.map((f) => [f.kind, f.value, f.evidenceSources]), [["PERCENT", 10, ["raw_rule_reference", "source_text", "metadata_source_commission_text"]]]);
+    assert.equal(sourceClaimAgreement(facts).conflict, false);
+    assert.equal(reconcileSourceEconomics({ ratePercent: 10 }, facts).reconciled, true);
+    const a = assessSupplierCommissionReadiness(percentRow({ rawRuleReference: { commission: "10 %" }, metadata: meta("10%") }), { sourceText: "10.0%" });
+    assert.equal(a.financeReady, true);
+    assert.deepEqual(a.reviewReasons, []);
+  });
+
+  it("12. several values inside ONE source stay ambiguous, not an evidence conflict", () => {
+    const a = assessSupplierCommissionReadiness(percentRow({ rawRuleReference: { commission: "10% Or 12%" } }));
+    assert.equal(a.financeReady, false);
+    assert.deepEqual(a.reviewReasons, ["source_economics_ambiguous"]);
+    const agreeing = assessSupplierCommissionReadiness(percentRow({ rawRuleReference: { commission: "10% Or 12%" }, metadata: meta("10% Or 12%") }));
+    assert.deepEqual(agreeing.reviewReasons, ["source_economics_ambiguous"], "two sources making the same ambiguous claim agree with each other");
+    const partial = assessSupplierCommissionReadiness(percentRow({ rawRuleReference: { commission: "10% Or 12%" }, metadata: meta("10%") }));
+    assert.deepEqual(partial.reviewReasons, ["source_economics_evidence_conflict"]);
+  });
+
+  it("13. explicit zero remains correct across sources", () => {
+    const ready = assessSupplierCommissionReadiness(percentRow({ ratePercent: 0, rawRuleReference: { commission: "0%" }, metadata: meta("0%") }));
+    assert.equal(ready.financeReady, true);
+    assert.equal(ready.sourceEconomics.compared.sourceValue, 0);
+    conflict(assessSupplierCommissionReadiness(percentRow({ ratePercent: 0, rawRuleReference: { commission: "0%" }, metadata: meta("10%") })));
+    const mismatch = assessSupplierCommissionReadiness(percentRow({ ratePercent: 0, rawRuleReference: null, metadata: meta("10%") }));
+    assert.deepEqual(mismatch.reviewReasons, ["source_economics_mismatch"]);
+  });
+
+  it("14. CRITICAL: matcher fails closed on a cross-kind source conflict and preserves the network actual", () => {
+    const row = fixedRow({ id: "xkind", metadata: meta("20%") });
+    const m = matchSupplierCommissionRule({
+      rules: [row],
+      facts: { orderValue: 100, currency: "USD" },
+      actualCommission: 17.5,
+      actualCurrency: "USD",
+    });
+    assert.equal(m.status, "REVIEW_REQUIRED");
+    assert.equal(m.expectedSupplierCommission, null);
+    assert.ok(m.reviewReasons.includes("source_economics_evidence_conflict"));
+    assert.deepEqual(m.readinessBlockedRuleIds, ["xkind"]);
+    assert.equal(m.networkActualCommission, 17.5);
+    assert.equal(m.actualCurrency, "USD");
+    const blocked = matchSupplierCommissionRule({
+      rules: [rule({ id: "default-5", ratePercent: 5, metadata: { financeReady: true } }), fixedRow({ id: "xkind-new", metadata: meta("20%"), conditions: [{ conditionType: "CUSTOMER_TYPE", operator: "EQ", value: "NEW" }] })],
+      facts: { customerType: "NEW", orderValue: 100, currency: "USD" },
+    });
+    assert.equal(blocked.status, "REVIEW_REQUIRED");
+    assert.equal(blocked.expectedSupplierCommission, null);
+  });
+
+  it("15. Optimise/Rakuten/CJ explicit metadata.financeReady stays untouched by cross-source evidence", () => {
+    const optimise = assessSupplierCommissionReadiness(fixedRow({ mappingStatus: "VERIFIED", metadata: { financeReady: true, reviewReasons: [], semanticStatus: "VERIFIED", sourceCommissionText: "20%" } }));
+    assert.equal(optimise.decisionSource, "NETWORK_SPECIFIC");
+    assert.equal(optimise.financeReady, true);
+    assert.equal(optimise.sourceEconomics, null);
+    const rakuten = assessSupplierCommissionReadiness(percentRow({ ratePercent: 3, mappingStatus: "VERIFIED", metadata: { financeReady: true, promotionGate: "VERIFIED_FINANCE_READY_ONLY", sourceCommissionText: "USD 3 CPA" } }));
+    assert.equal(rakuten.financeReady, true);
+    const cj = assessSupplierCommissionReadiness(percentRow({ mappingStatus: "REVIEW_REQUIRED", metadata: { financeReady: false, reviewReasons: ["cj_situation_requires_review"], sourceCommissionText: "10%" } }));
+    assert.equal(cj.financeReady, false);
+    assert.deepEqual(cj.reviewReasons, ["cj_situation_requires_review"]);
+    assert.equal(cj.decisionSource, "NETWORK_SPECIFIC");
+  });
+
+  it("16. fresh fan-out is unchanged: no manufactured conflict or ambiguity", () => {
+    const rows = fanOut([
+      { id: "P", name: "Percent", commission: "10%" },
+      { id: "Z", name: "Zero", commission: "0%" },
+      { id: "F", name: "Fixed", commission: "USD 20", model: "CPA" },
+      { id: "OR", name: "Or", ...OR_RAW },
+      { id: "M", name: "Model", value: 20, model: "cpa", currency: "USD" },
+      { id: "S", name: "Cps", commission: "5%", model: "cps" },
+    ]);
+    assert.equal(rows.length, 7);
+    for (const r of rows) {
+      assert.equal(r.metadata.financeReady, true, `${r.sourceRuleId} ${JSON.stringify(r.metadata.reviewReasons)}`);
+      assert.deepEqual(r.metadata.reviewReasons, []);
+    }
+    assert.deepEqual(rows.filter((r) => r.sourceRuleId === "OR").map((r) => [r.ratePercent, r.fixedAmount]), [[8, null], [null, 20]]);
   });
 });
