@@ -10,6 +10,7 @@ import {
   anonymousRuleIdentity,
   assessSupplierCommissionReadiness,
   canonicalConditionSignature,
+  establishedFactBasis,
   reconcileSourceEconomics,
   sourceClaimAgreement,
   sourceEconomicsFacts,
@@ -679,7 +680,7 @@ describe("generic supplier commission readiness — source economics must agree 
     assert.equal(a.mappingStatus, "REVIEW_REQUIRED");
     assert.equal(a.semanticStatus, "VERIFY_LIVE");
     assert.ok(a.reviewReasons.includes("source_economics_mismatch"));
-    assert.deepEqual(a.sourceEconomics, { reconciled: false, compared: { kind: "PERCENT", evidenceSources: ["raw_rule_reference"], sourceValue: 10, sourceCurrency: null, ruleValue: 20, ruleCurrency: null } });
+    assert.deepEqual(a.sourceEconomics, { reconciled: false, compared: { kind: "PERCENT", evidenceSources: ["raw_rule_reference"], sourceValue: 10, sourceCurrency: null, sourceBasis: null, ruleValue: 20, ruleCurrency: null, ruleBasis: null } });
   });
 
   it("3. explicit zero agreement is ready", () => {
@@ -915,7 +916,7 @@ describe("generic supplier commission readiness — metadata.sourceCommissionTex
     assert.ok(a.reviewReasons.includes("source_economics_mismatch"));
     assert.deepEqual(a.sourceEconomics, {
       reconciled: false,
-      compared: { kind: "PERCENT", evidenceSources: ["metadata_source_commission_text"], sourceValue: 10, sourceCurrency: null, ruleValue: 20, ruleCurrency: null },
+      compared: { kind: "PERCENT", evidenceSources: ["metadata_source_commission_text"], sourceValue: 10, sourceCurrency: null, sourceBasis: null, ruleValue: 20, ruleCurrency: null, ruleBasis: null },
     });
     const m = matchSupplierCommissionRule({
       rules: [row],
@@ -943,7 +944,7 @@ describe("generic supplier commission readiness — metadata.sourceCommissionTex
   it("4. metadata fixed agreement (USD 20 CPA vs fixedAmount 20 USD CPA) is ready", () => {
     const a = assessSupplierCommissionReadiness(fixedMetaLegacy());
     assert.equal(a.financeReady, true);
-    assert.deepEqual(a.sourceEconomics.compared, { kind: "FIXED", evidenceSources: ["metadata_source_commission_text"], sourceValue: 20, sourceCurrency: "USD", ruleValue: 20, ruleCurrency: "USD" });
+    assert.deepEqual(a.sourceEconomics.compared, { kind: "FIXED", evidenceSources: ["metadata_source_commission_text"], sourceValue: 20, sourceCurrency: "USD", sourceBasis: "CPA", ruleValue: 20, ruleCurrency: "USD", ruleBasis: "CPA" });
   });
 
   it("5. metadata fixed mismatch (USD 20 vs fixedAmount 30) fails closed", () => {
@@ -1093,19 +1094,19 @@ describe("generic supplier commission readiness — cross-source evidence agreem
     assert.deepEqual(a.sourceEconomics.compared, {
       kind: "FIXED",
       evidenceSources: ["raw_rule_reference", "metadata_source_commission_text"],
-      sourceValuesBySource: { raw_rule_reference: ["USD 20"], metadata_source_commission_text: ["20%"] },
+      sourceValuesBySource: { raw_rule_reference: ["USD 20 CPA"], metadata_source_commission_text: ["20%"] },
     });
     const facts = sourceEconomicsFacts({ rawRuleReference: fixedRow().rawRuleReference, metadataSourceCommissionText: "20%" });
     assert.deepEqual(sourceClaimAgreement(facts), {
       conflict: true,
       evidenceSources: ["raw_rule_reference", "metadata_source_commission_text"],
-      claimsBySource: { raw_rule_reference: ["USD 20"], metadata_source_commission_text: ["20%"] },
+      claimsBySource: { raw_rule_reference: ["USD 20 CPA"], metadata_source_commission_text: ["20%"] },
     });
   });
 
   it("2. raw PERCENT vs metadata FIXED conflicts", () => {
     const a = conflict(assessSupplierCommissionReadiness(percentRow({ metadata: meta("USD 10 CPA") })));
-    assert.deepEqual(a.sourceEconomics.compared.sourceValuesBySource, { raw_rule_reference: ["10%"], metadata_source_commission_text: ["USD 10"] });
+    assert.deepEqual(a.sourceEconomics.compared.sourceValuesBySource, { raw_rule_reference: ["10%"], metadata_source_commission_text: ["USD 10 CPA"] });
   });
 
   it("3. raw 10% vs metadata 12% conflicts", () => {
@@ -1140,8 +1141,10 @@ describe("generic supplier commission readiness — cross-source evidence agreem
       evidenceSources: ["raw_rule_reference", "metadata_source_commission_text"],
       sourceValue: 20,
       sourceCurrency: "USD",
+      sourceBasis: "CPA",
       ruleValue: 20,
       ruleCurrency: "USD",
+      ruleBasis: "CPA",
     });
   });
 
@@ -1257,5 +1260,248 @@ describe("generic supplier commission readiness — cross-source evidence agreem
       assert.deepEqual(r.metadata.reviewReasons, []);
     }
     assert.deepEqual(rows.filter((r) => r.sourceRuleId === "OR").map((r) => [r.ratePercent, r.fixedAmount]), [[8, null], [null, 20]]);
+  });
+});
+
+describe("generic supplier commission readiness — source payout basis must agree with the row", () => {
+  const fixedRow = (overrides = {}) => ({
+    id: "basis-row",
+    sourceRuleId: "R1",
+    commissionSequence: 1,
+    basis: "CPA",
+    ratePercent: null,
+    fixedAmount: 20,
+    currency: "USD",
+    mappingStatus: "MAPPED",
+    metadata: null,
+    rawRuleReference: null,
+    conditions: [],
+    outcomeKey: "123::campaigns::commission::R1::FIXED::CPA::USD::slot:1::",
+    ...overrides,
+  });
+  const meta = (sourceCommissionText) => ({ sourceCommissionText });
+  const CPA_RAW = { value: 20, model: "cpa", currency: "USD" };
+  const ITEM_RAW = { value: 20, model: "fixed per item", currency: "USD" };
+  const blocked = (a, reason) => {
+    assert.equal(a.financeReady, false);
+    assert.equal(a.mappingStatus, "REVIEW_REQUIRED");
+    assert.ok(a.reviewReasons.includes(reason), JSON.stringify(a.reviewReasons));
+    return a;
+  };
+  const ready = (a) => {
+    assert.equal(a.financeReady, true, JSON.stringify(a.reviewReasons));
+    assert.deepEqual(a.reviewReasons, []);
+    return a;
+  };
+
+  it("1. CPA source / CPA row is ready (structured and textual evidence)", () => {
+    const structured = ready(assessSupplierCommissionReadiness(fixedRow({ rawRuleReference: CPA_RAW })));
+    assert.equal(structured.sourceEconomics.compared.sourceBasis, "CPA");
+    assert.equal(structured.sourceEconomics.compared.ruleBasis, "CPA");
+    const textual = ready(assessSupplierCommissionReadiness(fixedRow({ metadata: meta("USD 20 CPA") })));
+    assert.equal(textual.sourceEconomics.compared.sourceBasis, "CPA");
+  });
+
+  it("2. FIXED_PER_ITEM source / FIXED_PER_ITEM row is ready", () => {
+    const structured = ready(assessSupplierCommissionReadiness(fixedRow({ basis: "FIXED_PER_ITEM", rawRuleReference: ITEM_RAW })));
+    assert.equal(structured.sourceEconomics.compared.sourceBasis, "FIXED_PER_ITEM");
+    const textual = ready(assessSupplierCommissionReadiness(fixedRow({ basis: "FIXED_PER_ITEM", metadata: meta("USD 20 fixed per item") })));
+    assert.equal(textual.sourceEconomics.compared.sourceBasis, "FIXED_PER_ITEM");
+  });
+
+  it("3. CPA source / FIXED_PER_ITEM row is blocked", () => {
+    const a = blocked(assessSupplierCommissionReadiness(fixedRow({ basis: "FIXED_PER_ITEM", rawRuleReference: CPA_RAW })), "source_economics_basis_mismatch");
+    assert.equal(a.sourceEconomics.compared.sourceBasis, "CPA");
+    assert.equal(a.sourceEconomics.compared.ruleBasis, "FIXED_PER_ITEM");
+    blocked(assessSupplierCommissionReadiness(fixedRow({ basis: "FIXED_PER_ITEM", metadata: meta("USD 20 CPA") })), "source_economics_basis_mismatch");
+  });
+
+  it("4. FIXED_PER_ITEM source / CPA row is blocked", () => {
+    blocked(assessSupplierCommissionReadiness(fixedRow({ rawRuleReference: ITEM_RAW })), "source_economics_basis_mismatch");
+    blocked(assessSupplierCommissionReadiness(fixedRow({ metadata: meta("USD 20 fixed per item") })), "source_economics_basis_mismatch");
+  });
+
+  it("5. CPC source / CPA row is blocked", () => {
+    blocked(assessSupplierCommissionReadiness(fixedRow({ rawRuleReference: { value: 20, model: "CPC", currency: "USD" } })), "source_economics_basis_mismatch");
+    blocked(assessSupplierCommissionReadiness(fixedRow({ basis: "CPC", rawRuleReference: CPA_RAW })), "source_economics_basis_mismatch");
+  });
+
+  it("6. CPM source / FIXED_PER_ORDER row is blocked", () => {
+    blocked(assessSupplierCommissionReadiness(fixedRow({ basis: "FIXED_PER_ORDER", rawRuleReference: { value: 20, model: "CPM", currency: "USD" } })), "source_economics_basis_mismatch");
+    blocked(assessSupplierCommissionReadiness(fixedRow({ basis: "FIXED_AMOUNT", metadata: meta("USD 20 CPM") })), "source_economics_basis_mismatch");
+  });
+
+  it("7. raw CPA vs metadata FIXED_PER_ITEM is a cross-source evidence conflict", () => {
+    const a = blocked(assessSupplierCommissionReadiness(fixedRow({ rawRuleReference: CPA_RAW, metadata: meta("USD 20 fixed per item") })), "source_economics_evidence_conflict");
+    assert.deepEqual(a.sourceEconomics.compared.sourceValuesBySource, { raw_rule_reference: ["USD 20 CPA"], metadata_source_commission_text: ["USD 20 FIXED_PER_ITEM"] });
+    assert.equal(sourceClaimAgreement(sourceEconomicsFacts({ rawRuleReference: CPA_RAW, metadataSourceCommissionText: "USD 20 fixed per item" })).conflict, true);
+  });
+
+  it("8. raw CPC vs metadata CPA is a cross-source evidence conflict", () => {
+    const row = fixedRow({ basis: "CPC", fixedAmount: 1, rawRuleReference: { value: 1, model: "CPC", currency: "USD" }, metadata: meta("USD 1 CPA") });
+    blocked(assessSupplierCommissionReadiness(row), "source_economics_evidence_conflict");
+    blocked(assessSupplierCommissionReadiness({ ...row, basis: "CPA" }), "source_economics_evidence_conflict");
+  });
+
+  it("9. neutral 'USD 20' proves the amount but never a basis-sensitive row basis", () => {
+    for (const basis of ["CPA", "CPC", "CPM", "FIXED_PER_ITEM", "FIXED_PER_ORDER"]) {
+      const a = blocked(assessSupplierCommissionReadiness(fixedRow({ basis, metadata: meta("USD 20") })), "source_payout_basis_unverified");
+      assert.equal(a.sourceEconomics.compared.sourceBasis, null);
+      assert.ok(!a.reviewReasons.includes("source_economics_mismatch"), "amount itself agrees");
+    }
+    // a neutral row basis needs no basis proof
+    ready(assessSupplierCommissionReadiness(fixedRow({ basis: "FIXED_AMOUNT", metadata: meta("USD 20") })));
+    // the trusted supplier model may establish the basis the neutral text lacks
+    const viaModel = ready(assessSupplierCommissionReadiness(fixedRow({ commissionModel: "cpa", metadata: meta("USD 20") })));
+    assert.equal(viaModel.sourceEconomics.compared.sourceBasis, "CPA");
+    blocked(assessSupplierCommissionReadiness(fixedRow({ basis: "FIXED_PER_ITEM", commissionModel: "cpa", metadata: meta("USD 20") })), "source_economics_basis_mismatch");
+    // neutral evidence does not contradict an established one from another source
+    const agree = ready(assessSupplierCommissionReadiness(fixedRow({ rawRuleReference: CPA_RAW, metadata: meta("USD 20") })));
+    assert.deepEqual(agree.sourceEconomics.compared.evidenceSources, ["raw_rule_reference", "metadata_source_commission_text"]);
+    assert.equal(agree.sourceEconomics.compared.sourceBasis, "CPA");
+    assert.equal(sourceClaimAgreement(sourceEconomicsFacts({ rawRuleReference: CPA_RAW, metadataSourceCommissionText: "USD 20" })).conflict, false);
+  });
+
+  it("10. structured { value: 20, model: 'cpa' } retains CPA", () => {
+    const facts = sourceEconomicsFacts({ rawRuleReference: CPA_RAW });
+    assert.deepEqual(facts.map((f) => [f.kind, f.value, f.currency, f.basis, establishedFactBasis(f)]), [["FIXED", 20, "USD", "CPA", "CPA"]]);
+    const [row] = fanOut([{ id: "C", name: "Cpa", ...CPA_RAW }]);
+    assert.equal(row.basis, "CPA");
+    assert.equal(row.metadata.financeReady, true);
+  });
+
+  it("11. structured per-item source retains FIXED_PER_ITEM", () => {
+    const facts = sourceEconomicsFacts({ rawRuleReference: ITEM_RAW });
+    assert.deepEqual(facts.map((f) => [f.kind, f.value, f.currency, f.basis]), [["FIXED", 20, "USD", "FIXED_PER_ITEM"]]);
+    const textual = sourceEconomicsFacts({ metadataSourceCommissionText: "USD 20 fixed per item" });
+    assert.deepEqual(textual.map((f) => [f.kind, f.value, f.currency, f.basis]), [["FIXED", 20, "USD", "FIXED_PER_ITEM"]]);
+    const neutral = sourceEconomicsFacts({ metadataSourceCommissionText: "USD 20" });
+    assert.deepEqual(neutral.map((f) => [f.basis, establishedFactBasis(f)]), [["FIXED_AMOUNT", null]]);
+    const [row] = fanOut([{ id: "I", name: "Item", ...ITEM_RAW }]);
+    assert.equal(row.basis, "FIXED_PER_ITEM");
+    assert.equal(row.metadata.financeReady, true);
+  });
+
+  it("12. percent rules are unchanged: no basis identity is manufactured for percentages", () => {
+    const percent = (overrides = {}) => fixedRow({ basis: "PERCENT_OF_SALE", ratePercent: 10, fixedAmount: null, currency: null, rawRuleReference: { commission: "10%" }, ...overrides });
+    const a = ready(assessSupplierCommissionReadiness(percent()));
+    assert.equal(a.sourceEconomics.compared.sourceBasis, null);
+    ready(assessSupplierCommissionReadiness(percent({ metadata: meta("10%") })));
+    ready(assessSupplierCommissionReadiness(percent({ basis: "CPS", rawRuleReference: { value: "10%", model: "cps" } })));
+    assert.deepEqual(sourceEconomicsFacts({ rawRuleReference: { value: "10%", model: "cps" } }).map((f) => [f.kind, f.basis, establishedFactBasis(f)]), [["PERCENT", "PERCENT_OF_SALE", null]]);
+    blocked(assessSupplierCommissionReadiness(percent({ ratePercent: 12 })), "source_economics_mismatch");
+    blocked(assessSupplierCommissionReadiness(percent({ metadata: meta("12%") })), "source_economics_evidence_conflict");
+  });
+
+  it("13. explicit zero fixed-per-item survives", () => {
+    const zero = ready(assessSupplierCommissionReadiness(fixedRow({ basis: "FIXED_PER_ITEM", fixedAmount: 0, rawRuleReference: { value: 0, model: "fixed per item", currency: "USD" } })));
+    assert.equal(zero.sourceEconomics.compared.sourceValue, 0);
+    assert.equal(zero.sourceEconomics.compared.sourceBasis, "FIXED_PER_ITEM");
+    blocked(assessSupplierCommissionReadiness(fixedRow({ basis: "FIXED_PER_ITEM", fixedAmount: 0, rawRuleReference: { value: 0, model: "cpa", currency: "USD" } })), "source_economics_basis_mismatch");
+    const m = matchSupplierCommissionRule({ rules: [fixedRow({ basis: "FIXED_PER_ITEM", fixedAmount: 0, rawRuleReference: { value: 0, model: "fixed per item", currency: "USD" } })], facts: { orderValue: 100, currency: "USD", quantity: 3 } });
+    assert.equal(m.status, "MATCHED");
+    assert.equal(m.expectedSupplierCommission, 0);
+  });
+
+  it("14. percent OR fixed remains correct: the neutral fixed sibling keeps its neutral row basis", () => {
+    const raw = { commission: { type: "Percentage - Individual Transaction Value Or Fixed Cost - Individual Transaction Value", value: "8% Or USD 20" } };
+    ready(assessSupplierCommissionReadiness(fixedRow({ basis: "PERCENT_OF_SALE", ratePercent: 8, fixedAmount: null, currency: null, rawRuleReference: raw })));
+    ready(assessSupplierCommissionReadiness(fixedRow({ basis: "FIXED_AMOUNT", rawRuleReference: raw })));
+    ready(assessSupplierCommissionReadiness(fixedRow({ basis: "FIXED_AMOUNT", rawRuleReference: raw, metadata: meta("8% Or USD 20") })));
+    blocked(assessSupplierCommissionReadiness(fixedRow({ basis: "CPA", rawRuleReference: raw })), "source_payout_basis_unverified");
+    const rows = fanOut([{ id: "OR", ...raw }]);
+    assert.deepEqual(rows.map((r) => [r.ratePercent, r.fixedAmount, r.basis, r.metadata.financeReady]), [[8, null, "PERCENT_OF_SALE", true], [null, 20, "FIXED_AMOUNT", true]]);
+  });
+
+  it("15/16. CRITICAL: matcher basis mismatch is REVIEW_REQUIRED with expected null and the network actual preserved", () => {
+    const perItemSourceCpaRow = fixedRow({ id: "a-row", metadata: meta("USD 20 fixed per item") });
+    const a = matchSupplierCommissionRule({
+      rules: [perItemSourceCpaRow],
+      facts: { orderValue: 100, currency: "USD", quantity: 3 },
+      actualCommission: 42.5,
+      actualCurrency: "USD",
+    });
+    assert.equal(a.status, "REVIEW_REQUIRED");
+    assert.equal(a.expectedSupplierCommission, null);
+    assert.ok(a.reviewReasons.includes("source_economics_basis_mismatch"));
+    assert.deepEqual(a.readinessBlockedRuleIds, ["a-row"]);
+    assert.equal(a.networkActualCommission, 42.5);
+    assert.equal(a.actualCurrency, "USD");
+
+    const cpaSourcePerItemRow = fixedRow({ id: "b-row", basis: "FIXED_PER_ITEM", rawRuleReference: CPA_RAW });
+    const b = matchSupplierCommissionRule({
+      rules: [cpaSourcePerItemRow],
+      facts: { orderValue: 100, currency: "USD", quantity: 3 },
+      actualCommission: 42.5,
+      actualCurrency: "USD",
+    });
+    assert.equal(b.status, "REVIEW_REQUIRED");
+    assert.equal(b.expectedSupplierCommission, null);
+    assert.equal(b.networkActualCommission, 42.5);
+
+    // an unready basis-mismatched specific rule still blocks a verified default
+    const blockedDefault = matchSupplierCommissionRule({
+      rules: [rule({ id: "default-5", ratePercent: 5, metadata: { financeReady: true } }), fixedRow({ id: "c-row", rawRuleReference: ITEM_RAW, conditions: [{ conditionType: "CUSTOMER_TYPE", operator: "EQ", value: "NEW" }] })],
+      facts: { customerType: "NEW", orderValue: 100, currency: "USD", quantity: 3 },
+    });
+    assert.equal(blockedDefault.status, "REVIEW_REQUIRED");
+    assert.equal(blockedDefault.expectedSupplierCommission, null);
+  });
+
+  it("17. valid FIXED_PER_ITEM calculates amount × quantity (USD 20 × 3 = 60)", () => {
+    const m = matchSupplierCommissionRule({
+      rules: [fixedRow({ basis: "FIXED_PER_ITEM", rawRuleReference: ITEM_RAW })],
+      facts: { orderValue: 100, currency: "USD", quantity: 3 },
+      actualCommission: 60,
+      actualCurrency: "USD",
+    });
+    assert.equal(m.status, "MATCHED");
+    assert.equal(m.expectedSupplierCommission, 60);
+    assert.equal(m.expectedBasis, "FIXED_PER_ITEM");
+    assert.equal(m.networkActualCommission, 60);
+  });
+
+  it("18. valid CPA calculates the amount once regardless of quantity (USD 20)", () => {
+    const m = matchSupplierCommissionRule({
+      rules: [fixedRow({ rawRuleReference: CPA_RAW })],
+      facts: { orderValue: 100, currency: "USD", quantity: 3 },
+      actualCommission: 20,
+      actualCurrency: "USD",
+    });
+    assert.equal(m.status, "MATCHED");
+    assert.equal(m.expectedSupplierCommission, 20);
+    assert.equal(m.expectedBasis, "CPA");
+  });
+
+  it("19. Optimise/Rakuten/CJ explicit metadata.financeReady stays authoritative over basis evidence", () => {
+    const optimise = assessSupplierCommissionReadiness(fixedRow({ basis: "FIXED_PER_ITEM", mappingStatus: "VERIFIED", metadata: { financeReady: true, reviewReasons: [], semanticStatus: "VERIFIED", sourceCommissionText: "USD 20 CPA" } }));
+    assert.equal(optimise.decisionSource, "NETWORK_SPECIFIC");
+    assert.equal(optimise.financeReady, true);
+    assert.equal(optimise.sourceEconomics, null);
+    const rakuten = assessSupplierCommissionReadiness(fixedRow({ basis: "FIXED_PER_ACTION_OR_ITEM", mappingStatus: "VERIFIED", metadata: { financeReady: true, promotionGate: "VERIFIED_FINANCE_READY_ONLY", sourceCommissionText: "USD 20" } }));
+    assert.equal(rakuten.financeReady, true);
+    const cj = assessSupplierCommissionReadiness(fixedRow({ mappingStatus: "REVIEW_REQUIRED", metadata: { financeReady: false, reviewReasons: ["cj_situation_requires_review"], sourceCommissionText: "USD 20 CPA" } }));
+    assert.equal(cj.financeReady, false);
+    assert.deepEqual(cj.reviewReasons, ["cj_situation_requires_review"]);
+    assert.equal(cj.decisionSource, "NETWORK_SPECIFIC");
+  });
+
+  it("20. fresh fan-out remains unchanged", () => {
+    const rows = fanOut([
+      { id: "P", name: "Percent", commission: "10%" },
+      { id: "Z", name: "Zero", commission: "0%" },
+      { id: "F", name: "Fixed", commission: "USD 20", model: "CPA" },
+      { id: "OR", name: "Or", commission: { type: "Percentage - Individual Transaction Value Or Fixed Cost - Individual Transaction Value", value: "8% Or USD 20" } },
+      { id: "M", name: "Model", ...CPA_RAW },
+      { id: "I", name: "Item", ...ITEM_RAW },
+      { id: "N", name: "Neutral", commission: "USD 20" },
+      { id: "S", name: "Cps", commission: "5%", model: "cps" },
+    ]);
+    assert.equal(rows.length, 9);
+    for (const r of rows) {
+      assert.equal(r.metadata.financeReady, true, `${r.sourceRuleId} ${JSON.stringify(r.metadata.reviewReasons)}`);
+      assert.deepEqual(r.metadata.reviewReasons, []);
+    }
+    assert.deepEqual(rows.filter((r) => r.fixedAmount != null).map((r) => [r.sourceRuleId, r.basis]), [["F", "CPA"], ["OR", "FIXED_AMOUNT"], ["M", "CPA"], ["I", "FIXED_PER_ITEM"], ["N", "FIXED_AMOUNT"]]);
   });
 });

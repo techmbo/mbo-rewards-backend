@@ -141,6 +141,17 @@ function payoutBasisFrom(entry = {}, fallbackUnit = null, kind = null) {
   return "UNKNOWN";
 }
 
+/**
+ * Payout basis established by a plain commission text ("USD 20 CPA", "USD 20 fixed per item"),
+ * using the SAME interpretation generic normalization applies to structured model/type
+ * fields (payoutBasisFrom). Neutral wording yields the canonical fallback for the kind
+ * (FIXED_AMOUNT / PERCENT_OF_SALE); nothing else is inferred.
+ */
+export function payoutBasisFromText(text, kind = null) {
+  if (text == null || text === "") return payoutBasisFrom({}, null, kind);
+  return payoutBasisFrom({ basis: String(text) }, null, kind);
+}
+
 function firstDefined(...values) {
   return values.find((value) => value != null && value !== "");
 }

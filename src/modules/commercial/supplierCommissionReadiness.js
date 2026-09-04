@@ -18,9 +18,9 @@
  */
 
 import { createHash } from "node:crypto";
-import { explicitNumber, listCampaignCommissionFacts, looksPercent } from "../ops/campaignCommissions.js";
+import { explicitNumber, listCampaignCommissionFacts, looksPercent, payoutBasisFromText } from "../ops/campaignCommissions.js";
 
-export const SUPPLIER_COMMISSION_READINESS_VERSION = "SCR-READINESS-4";
+export const SUPPLIER_COMMISSION_READINESS_VERSION = "SCR-READINESS-5";
 
 export const RULE_MAPPING_STATUS = Object.freeze({
   MAPPED: "MAPPED",
@@ -259,20 +259,51 @@ function currencyOf(value) {
   return code && /^[A-Z]{3}$/.test(code) ? code : null;
 }
 
-/** Stable identity of one parsed source fact (kind + value + currency); the row's payout key. */
-function factKey(fact) {
+/**
+ * Fixed payout bases whose financial behaviour differs from a plain once-per-event amount
+ * or that the matcher multiplies by transaction facts (quantity, clicks, impressions).
+ * FIXED_AMOUNT is the neutral canonical basis the parser falls back to when the source
+ * states none; UNKNOWN is already blocked by payout_basis_unknown.
+ */
+const NEUTRAL_FIXED_BASES = new Set(["FIXED_AMOUNT", "UNKNOWN", ""]);
+
+/**
+ * Payout basis a fact ESTABLISHES, or null when the source only stated a neutral amount.
+ * Only fixed outcomes carry a basis identity: percentage facts keep the parser's existing
+ * PERCENT_OF_SALE / CPS canonicalisation and the existing percent-basis gates.
+ */
+export function establishedFactBasis(fact) {
+  if (String(fact?.kind ?? "").toUpperCase() !== "FIXED") return null;
+  const basis = text(fact?.basis)?.toUpperCase() ?? "";
+  return NEUTRAL_FIXED_BASES.has(basis) ? null : basis;
+}
+
+/** Economic identity of one parsed source fact without basis (kind + value + currency). */
+function baseFactKey(fact) {
   const kind = String(fact?.kind ?? "").toUpperCase();
   return `${kind}|${explicitNumber(fact?.value)}|${kind === "FIXED" ? currencyOf(fact?.currency) ?? "" : ""}`;
 }
 
+/** Stable identity of one parsed source fact: kind + value + currency + established basis. */
+function factKey(fact) {
+  return `${baseFactKey(fact)}|${establishedFactBasis(fact) ?? ""}`;
+}
+
 /**
  * Parse ONE trusted numeric-bearing evidence source with the SAME parser the fan-out uses
- * (listCampaignCommissionFacts) — never a second parser.
+ * (listCampaignCommissionFacts) — never a second parser. Structured entries already carry
+ * the basis the parser derived from their model/type fields; for plain text the same
+ * interpreter (payoutBasisFromText) is applied to the text so "USD 20 CPA" establishes CPA
+ * instead of the generic FIXED_AMOUNT fallback of the amount parser.
  */
 function parseEvidenceSource(input) {
   if (input == null || input === "") return [];
   try {
-    return [...(listCampaignCommissionFacts({ groups: [input], raw: {} }).allFacts ?? [])];
+    const facts = [...(listCampaignCommissionFacts({ groups: [input], raw: {} }).allFacts ?? [])];
+    if (typeof input !== "string") return facts;
+    return facts.map((fact) =>
+      String(fact?.kind ?? "").toUpperCase() === "FIXED" ? { ...fact, basis: payoutBasisFromText(input, "FIXED") } : fact,
+    );
   } catch {
     /* unparseable evidence yields no facts; readiness then relies on the other gates */
     return [];
@@ -317,8 +348,9 @@ export function sourceEconomicsFacts({
 
 /**
  * COMPLETE normalized economic claim set of each fact-bearing evidence source (every parsed
- * fact of every kind, keyed by kind|value|currency). Sources that produced no fact are
- * absent: unparseable evidence establishes nothing and never conflicts.
+ * fact of every kind, keyed by kind|value|currency, with the payout basis each source
+ * established for it). Sources that produced no fact are absent: unparseable evidence
+ * establishes nothing and never conflicts.
  */
 function claimsBySource(facts) {
   const claims = new Map();
@@ -326,10 +358,19 @@ function claimsBySource(facts) {
     const sources = Array.isArray(fact.evidenceSources) && fact.evidenceSources.length ? fact.evidenceSources : ["evidence"];
     for (const source of sources) {
       if (!claims.has(source)) claims.set(source, new Map());
-      claims.get(source).set(factKey(fact), fact);
+      const byBase = claims.get(source);
+      const base = baseFactKey(fact);
+      if (!byBase.has(base)) byBase.set(base, { fact, bases: new Set() });
+      const established = establishedFactBasis(fact);
+      if (established) byBase.get(base).bases.add(established);
     }
   }
   return claims;
+}
+
+function claimDisplay(claim) {
+  const bases = [...claim.bases];
+  return bases.length ? `${claim.fact.display} ${bases.join("/")}` : claim.fact.display;
 }
 
 /**
@@ -339,6 +380,11 @@ function claimsBySource(facts) {
  * sibling, and raw "USD 20" vs metadata "20%" disagree whatever the row's kind. Several
  * kinds inside ONE source ("8% Or USD 20") are not a conflict.
  *
+ * The payout basis participates when a source ESTABLISHES it: "USD 20 CPA" vs "USD 20
+ * fixed per item" (or CPC vs CPA) conflict although kind, value and currency agree. A
+ * source that only states a neutral "USD 20" does not contradict CPA — it merely does not
+ * prove the basis — so neutral and established claims agree.
+ *
  * @returns {{ conflict: boolean, evidenceSources: string[], claimsBySource: object }}
  */
 export function sourceClaimAgreement(facts = []) {
@@ -346,15 +392,28 @@ export function sourceClaimAgreement(facts = []) {
   const claims = claimsBySource(list);
   const evidenceSources = [...claims.keys()];
   const signatures = evidenceSources.map((source) => [...claims.get(source).keys()].sort().join(","));
+  let conflict = new Set(signatures).size > 1;
+  if (!conflict) {
+    const basesByClaim = new Map();
+    for (const source of evidenceSources) {
+      for (const [base, claim] of claims.get(source)) {
+        if (!basesByClaim.has(base)) basesByClaim.set(base, new Set());
+        for (const basis of claim.bases) basesByClaim.get(base).add(basis);
+      }
+    }
+    conflict = [...basesByClaim.values()].some((bases) => bases.size > 1);
+  }
   const claimsOut = {};
-  for (const source of evidenceSources) claimsOut[source] = [...claims.get(source).values()].map((fact) => fact.display);
-  return { conflict: new Set(signatures).size > 1, evidenceSources, claimsBySource: claimsOut };
+  for (const source of evidenceSources) claimsOut[source] = [...claims.get(source).values()].map(claimDisplay);
+  return { conflict, evidenceSources, claimsBySource: claimsOut };
 }
 
 /**
  * Reconcile explicit source economics with the persisted normalized economics.
  * Percentage outcomes must equal the compatible percentage fact; fixed outcomes must equal
- * the compatible fixed fact in amount and currency. A source with both a percent and a
+ * the compatible fixed fact in amount and currency, and the payout basis the row will be
+ * calculated on (CPA once per action, FIXED_PER_ITEM × quantity, CPC × clicks, CPM per
+ * thousand impressions) must be established by trusted evidence and equal rule.basis. A source with both a percent and a
  * fixed fact ("8% Or USD 20") reconciles each sibling outcome to its own kind. Several
  * distinct same-kind facts that cannot be tied to the row safely are ambiguous. When the
  * independent trusted evidence sources disagree with EACH OTHER on their complete economic
@@ -398,7 +457,7 @@ export function reconcileSourceEconomics(rule = {}, facts = []) {
   const ruleCurrency = currencyOf(rule?.currency);
   const distinct = [];
   for (const fact of sameKind) {
-    const key = factKey(fact);
+    const key = baseFactKey(fact);
     if (!distinct.some((item) => item.key === key)) distinct.push({ key, fact });
   }
   if (distinct.length > 1) {
@@ -413,14 +472,35 @@ export function reconcileSourceEconomics(rule = {}, facts = []) {
   const reasons = [];
   const ruleValue = kind === "PERCENT" ? ratePercent : fixedAmount;
   if (!sameAmount(fact.value, ruleValue)) reasons.push("source_economics_mismatch");
+  let sourceBasis = null;
+  let ruleBasis = null;
   if (kind === "FIXED") {
     const factCurrency = currencyOf(fact.currency);
     if (factCurrency && ruleCurrency && factCurrency !== ruleCurrency) reasons.push("source_economics_currency_mismatch");
+
+    // 3. Payout basis: the source must establish the basis the row will be calculated on.
+    // Bases established by the agreed source facts (all sources agree by now), else by the
+    // trusted supplier model; a neutral "USD 20" proves the amount, never the basis.
+    ruleBasis = text(rule?.basis)?.toUpperCase() ?? null;
+    const established = new Set(sameKind.filter((item) => baseFactKey(item) === distinct[0].key).map(establishedFactBasis).filter(Boolean));
+    if (established.size > 1) {
+      reasons.push("source_economics_ambiguous");
+    } else if (established.size === 1) {
+      sourceBasis = [...established][0];
+    } else {
+      const modelBasis = text(rule?.commissionModel) ? payoutBasisFromText(rule.commissionModel, "FIXED") : null;
+      sourceBasis = modelBasis && !NEUTRAL_FIXED_BASES.has(modelBasis) ? modelBasis : null;
+    }
+    if (sourceBasis) {
+      if (ruleBasis !== sourceBasis) reasons.push("source_economics_basis_mismatch");
+    } else if (ruleBasis && !NEUTRAL_FIXED_BASES.has(ruleBasis)) {
+      reasons.push("source_payout_basis_unverified");
+    }
   }
   return {
     reconciled: reasons.length === 0,
     reasons,
-    compared: { kind, evidenceSources, sourceValue: fact.value, sourceCurrency: fact.currency ?? null, ruleValue, ruleCurrency },
+    compared: { kind, evidenceSources, sourceValue: fact.value, sourceCurrency: fact.currency ?? null, sourceBasis, ruleValue, ruleCurrency, ruleBasis },
   };
 }
 
