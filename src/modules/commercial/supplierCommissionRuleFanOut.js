@@ -374,6 +374,9 @@ function normalizeRuleEntry(entry, {
       currency: fact.currency ?? null,
       conditions,
       outcomeKey,
+      // The structured source entry: source-economics reconciliation parses it with the
+      // same structured interpretation (model/type/currency) this fact came from.
+      rawRuleReference: entry,
     },
     { sourceText: sourceCommissionText(entry), factDisplay: fact.display, identity },
   );

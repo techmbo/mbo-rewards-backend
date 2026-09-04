@@ -10,6 +10,8 @@ import {
   anonymousRuleIdentity,
   assessSupplierCommissionReadiness,
   canonicalConditionSignature,
+  reconcileSourceEconomics,
+  sourceEconomicsFacts,
 } from "../src/modules/commercial/supplierCommissionReadiness.js";
 import {
   calculateExpectedSupplierCommission,
@@ -641,5 +643,233 @@ describe("generic supplier commission readiness — legacy persisted rows", () =
     const m = matchSupplierCommissionRule({ rules: [rows[0]], facts: { orderValue: 100, currency: "USD" } });
     assert.equal(m.status, "MATCHED");
     assert.equal(m.expectedSupplierCommission, 10);
+  });
+});
+
+describe("generic supplier commission readiness — source economics must agree with the row", () => {
+  const legacy = (overrides = {}) => ({
+    id: "legacy-econ",
+    sourceRuleId: "R1",
+    commissionSequence: 1,
+    basis: "PERCENT_OF_SALE",
+    ratePercent: 10,
+    fixedAmount: null,
+    currency: null,
+    mappingStatus: "MAPPED",
+    metadata: null,
+    rawRuleReference: { commission: "10%" },
+    conditions: [],
+    outcomeKey: "123::campaigns::commission::R1::PERCENT::PERCENT_OF_SALE::::slot:1::",
+    ...overrides,
+  });
+  const fixedLegacy = (overrides = {}) =>
+    legacy({ basis: "CPA", ratePercent: null, fixedAmount: 20, currency: "USD", rawRuleReference: { commission: "USD 20", model: "CPA" }, ...overrides });
+
+  it("1. legacy percentage exact agreement is ready", () => {
+    const a = assessSupplierCommissionReadiness(legacy());
+    assert.equal(a.financeReady, true);
+    assert.equal(a.sourceEconomics.reconciled, true);
+    assert.equal(a.sourceEconomics.compared.sourceValue, 10);
+  });
+
+  it("2. legacy percentage mismatch fails closed", () => {
+    const a = assessSupplierCommissionReadiness(legacy({ ratePercent: 20 }));
+    assert.equal(a.financeReady, false);
+    assert.equal(a.mappingStatus, "REVIEW_REQUIRED");
+    assert.equal(a.semanticStatus, "VERIFY_LIVE");
+    assert.ok(a.reviewReasons.includes("source_economics_mismatch"));
+    assert.deepEqual(a.sourceEconomics, { reconciled: false, compared: { kind: "PERCENT", sourceValue: 10, sourceCurrency: null, ruleValue: 20, ruleCurrency: null } });
+  });
+
+  it("3. explicit zero agreement is ready", () => {
+    const a = assessSupplierCommissionReadiness(legacy({ ratePercent: 0, rawRuleReference: { commission: "0%" } }));
+    assert.equal(a.financeReady, true);
+    const mismatch = assessSupplierCommissionReadiness(legacy({ ratePercent: 0, rawRuleReference: { commission: "10%" } }));
+    assert.equal(mismatch.financeReady, false);
+    assert.ok(mismatch.reviewReasons.includes("source_economics_mismatch"));
+  });
+
+  it("4. fixed exact agreement (amount + currency + model) is ready", () => {
+    const a = assessSupplierCommissionReadiness(fixedLegacy());
+    assert.equal(a.financeReady, true);
+    assert.equal(a.sourceEconomics.compared.sourceCurrency, "USD");
+  });
+
+  it("5. fixed amount mismatch fails closed", () => {
+    const a = assessSupplierCommissionReadiness(fixedLegacy({ fixedAmount: 30 }));
+    assert.equal(a.financeReady, false);
+    assert.ok(a.reviewReasons.includes("source_economics_mismatch"));
+  });
+
+  it("6. fixed currency mismatch fails closed", () => {
+    const a = assessSupplierCommissionReadiness(fixedLegacy({ currency: "AED" }));
+    assert.equal(a.financeReady, false);
+    assert.ok(a.reviewReasons.includes("source_economics_currency_mismatch"));
+  });
+
+  it("7. kind mismatch: source 10% vs fixed row fails closed", () => {
+    const a = assessSupplierCommissionReadiness(legacy({ basis: "CPA", ratePercent: null, fixedAmount: 10, currency: "USD", rawRuleReference: { commission: "10%" } }));
+    assert.equal(a.financeReady, false);
+    assert.ok(a.reviewReasons.includes("source_economics_kind_mismatch"));
+  });
+
+  it("8. reverse kind mismatch: source USD 10 vs percent row fails closed", () => {
+    const a = assessSupplierCommissionReadiness(legacy({ ratePercent: 10, rawRuleReference: { commission: "USD 10" } }));
+    assert.equal(a.financeReady, false);
+    assert.ok(a.reviewReasons.includes("source_economics_kind_mismatch"));
+  });
+
+  it("9. percent OR fixed: each sibling outcome reconciles to its own kind", () => {
+    const raw = { commission: { type: "Percentage - Individual Transaction Value Or Fixed Cost - Individual Transaction Value", value: "8% Or USD 20" } };
+    const percent = assessSupplierCommissionReadiness(legacy({ ratePercent: 8, rawRuleReference: raw }));
+    const fixed = assessSupplierCommissionReadiness(legacy({ basis: "FIXED_AMOUNT", ratePercent: null, fixedAmount: 20, currency: "USD", rawRuleReference: raw }));
+    assert.equal(percent.financeReady, true);
+    assert.equal(fixed.financeReady, true);
+    const wrongPercent = assessSupplierCommissionReadiness(legacy({ ratePercent: 9, rawRuleReference: raw }));
+    assert.ok(wrongPercent.reviewReasons.includes("source_economics_mismatch"));
+    // the fan-out siblings from the same source both stay ready
+    const rows = fanOut([{ id: "OR", ...raw }]);
+    assert.deepEqual(rows.map((r) => [r.ratePercent, r.fixedAmount, r.metadata.financeReady]), [[8, null, true], [null, 20, true]]);
+  });
+
+  it("10. several distinct same-kind source facts are ambiguous", () => {
+    const a = assessSupplierCommissionReadiness(legacy({ ratePercent: 10, rawRuleReference: { commission: "10% Or 12%" } }));
+    assert.equal(a.financeReady, false);
+    assert.ok(a.reviewReasons.includes("source_economics_ambiguous"));
+    const facts = sourceEconomicsFacts({ rawRuleReference: { commission: "10% Or 12%" } });
+    assert.deepEqual(facts.map((f) => f.value), [10, 12]);
+    assert.deepEqual(reconcileSourceEconomics({ ratePercent: 10 }, facts).reasons, ["source_economics_ambiguous"]);
+    // identical duplicates are not ambiguous
+    assert.equal(reconcileSourceEconomics({ ratePercent: 10 }, [...facts.slice(0, 1), ...facts.slice(0, 1)]).reconciled, true);
+  });
+
+  it("11. trusted supplier model contradicting the payout shape fails closed", () => {
+    const a = assessSupplierCommissionReadiness(legacy({ commissionModel: "cpa", rawRuleReference: null }));
+    assert.equal(a.financeReady, false);
+    assert.ok(a.reviewReasons.includes("source_model_shape_mismatch"));
+    const consistent = assessSupplierCommissionReadiness(legacy({ commissionModel: "cps", rawRuleReference: null }));
+    assert.equal(consistent.financeReady, true);
+    const fixedConsistent = assessSupplierCommissionReadiness(fixedLegacy({ commissionModel: "cpa", rawRuleReference: null }));
+    assert.equal(fixedConsistent.financeReady, true);
+    const rawModelConflict = assessSupplierCommissionReadiness(legacy({ rawRuleReference: { commission: 10, model: "cpa" } }));
+    assert.ok(rawModelConflict.reviewReasons.includes("source_economics_kind_mismatch"), "parser interprets a cpa model as fixed");
+    const unknownModel = assessSupplierCommissionReadiness(legacy({ commissionModel: "mystery-model" }));
+    assert.equal(unknownModel.financeReady, true, "unknown models establish nothing and are not invented");
+  });
+
+  it("12. CRITICAL: matcher never calculates from a row whose source says 10% but row says 20%", () => {
+    const result = matchSupplierCommissionRule({
+      rules: [legacy({ ratePercent: 20 })],
+      facts: { orderValue: 100, currency: "USD" },
+      actualCommission: 11,
+      actualCurrency: "USD",
+    });
+    assert.equal(result.status, "REVIEW_REQUIRED");
+    assert.equal(result.expectedSupplierCommission, null);
+    assert.ok(result.reviewReasons.includes("source_economics_mismatch"));
+    assert.equal(result.networkActualCommission, 11);
+    assert.equal(result.actualCurrency, "USD");
+    // a conflicting specific row still blocks a verified default
+    const blocked = matchSupplierCommissionRule({
+      rules: [rule({ id: "default-5", ratePercent: 5, metadata: { financeReady: true } }), legacy({ id: "conflict-new", ratePercent: 20, conditions: [{ conditionType: "CUSTOMER_TYPE", operator: "EQ", value: "NEW" }] })],
+      facts: { customerType: "NEW", orderValue: 100, currency: "USD" },
+    });
+    assert.equal(blocked.status, "REVIEW_REQUIRED");
+    assert.equal(blocked.expectedSupplierCommission, null);
+  });
+
+  it("13. re-sync repair: changed economics version; identical economics only enrich", async () => {
+    const [candidate] = fanOut([{ id: "R1", name: "Standard", commission: "10%" }], "123");
+    const legacyRow = (overrides = {}) => ({
+      id: "legacy-open",
+      supplier: "IMPACT",
+      sourceAccountLabel: "default",
+      outcomeKey: candidate.outcomeKey,
+      supplierRuleType: "PERCENT",
+      basis: "PERCENT_OF_SALE",
+      ratePercent: 20,
+      fixedAmount: null,
+      currency: null,
+      commissionModel: null,
+      commissionType: "PERCENTAGE",
+      actionType: null,
+      mappingStatus: "MAPPED",
+      metadata: null,
+      rawRuleReference: { commission: "10%" },
+      effectiveFrom: new Date("2026-08-01T00:00:00.000Z"),
+      effectiveUntil: null,
+      conditions: [],
+      ...overrides,
+    });
+
+    // (a) conflicting legacy row (row 20%, source 10%): blocked; re-sync with correct 10% economics versions it
+    {
+      const { rows, db } = createRuleDb();
+      rows.push(legacyRow());
+      assert.equal(assessSupplierCommissionReadiness(rows[0]).financeReady, false);
+      const service = new SupplierCommissionRuleService({ prisma: db });
+      const changedAt = new Date("2026-09-10T00:00:00.000Z");
+      const successor = await service.upsertNormalizedFact({ ...candidate, supplier: "IMPACT", sourceAccountLabel: "default", sourceEvidenceAt: changedAt });
+      assert.notEqual(successor.id, "legacy-open", "economics genuinely changed → successor version");
+      assert.equal(rows.length, 2);
+      assert.equal(rows[0].ratePercent, 20);
+      assert.equal(new Date(rows[0].effectiveUntil).toISOString(), changedAt.toISOString(), "predecessor closed, history preserved");
+      assert.equal(rows[1].ratePercent, 10);
+      assert.equal(rows[1].effectiveUntil, null);
+      assert.equal(rows[1].metadata.financeReady, true);
+      assert.equal(matchSupplierCommissionRule({ rules: [rows[1]], facts: { orderValue: 100, currency: "USD" } }).expectedSupplierCommission, 10);
+    }
+
+    // (b) identical economics, only readiness metadata missing: same version reused, no new history
+    {
+      const { rows, db } = createRuleDb();
+      rows.push(legacyRow({ ratePercent: 10 }));
+      const service = new SupplierCommissionRuleService({ prisma: db });
+      const reused = await service.upsertNormalizedFact({ ...candidate, supplier: "IMPACT", sourceAccountLabel: "default", sourceEvidenceAt: new Date("2026-09-10T00:00:00.000Z") });
+      assert.equal(reused.id, "legacy-open");
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].effectiveUntil, null);
+      assert.equal(rows[0].metadata.financeReady, true);
+      assert.equal(rows[0].metadata.readinessVersion, SUPPLIER_COMMISSION_READINESS_VERSION);
+    }
+  });
+
+  it("14. new generic fan-out unchanged (facts reconcile with themselves)", () => {
+    const rows = fanOut([
+      { id: "A", commission: "10%" },
+      { id: "B", commission: "0%" },
+      { id: "C", commission: "Up to 10%" },
+      { id: "D", value: 10 },
+      { id: "E", value: 10, model: "cps" },
+      { id: "F", commission: "USD 20", currency: "USD" },
+      { id: "G", value: 20, model: "cpa" },
+      { id: "H", commission: { type: "Percentage Or Fixed Cost", value: "8.20% Or $17.50" } },
+    ]);
+    const byId = (id) => rows.filter((r) => r.sourceRuleId === id);
+    assert.equal(byId("A")[0].metadata.financeReady, true);
+    assert.equal(byId("B")[0].metadata.financeReady, true);
+    assert.equal(byId("C")[0].metadata.financeReady, false);
+    assert.equal(byId("D")[0].metadata.financeReady, false);
+    assert.equal(byId("E")[0].metadata.financeReady, true);
+    assert.equal(byId("F")[0].metadata.financeReady, true);
+    assert.equal(byId("G")[0].metadata.financeReady, false);
+    assert.deepEqual(byId("H").map((r) => [r.ratePercent, r.fixedAmount, r.currency, r.metadata.financeReady]), [[8.2, null, null, true], [null, 17.5, "USD", true]]);
+    assert.ok(rows.every((r) => !r.metadata.reviewReasons.some((reason) => reason.startsWith("source_economics"))), "no false mismatches on fresh normalization");
+  });
+
+  it("15. Optimise / Rakuten / CJ explicit readiness is not re-interpreted through raw reconciliation", () => {
+    const facts = { orderValue: 100, currency: "USD" };
+    for (const network of ["optimise_sea", "rakuten", "cj"]) {
+      // explicit true with a raw fragment that would generically look mismatched: mapper authority preserved
+      const ready = legacy({ id: `${network}-ready`, networkSource: network, ratePercent: 12, mappingStatus: "VERIFIED", metadata: { financeReady: true }, rawRuleReference: { group: { commission: "10%" }, band: null } });
+      const a = assessSupplierCommissionReadiness(ready);
+      assert.equal(a.financeReady, true, network);
+      assert.equal(a.decisionSource, "NETWORK_SPECIFIC");
+      assert.equal(matchSupplierCommissionRule({ rules: [ready], facts }).expectedSupplierCommission, 12);
+      const blocked = legacy({ id: `${network}-blocked`, networkSource: network, metadata: { financeReady: false, reviewReasons: ["network_specific_reason"] } });
+      const b = matchSupplierCommissionRule({ rules: [blocked], facts });
+      assert.equal(b.status, "REVIEW_REQUIRED");
+      assert.equal(b.expectedSupplierCommission, null);
+    }
   });
 });

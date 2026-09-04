@@ -87,7 +87,12 @@ function isEmptyBag(value) {
   return false;
 }
 
-function looksPercent(entry, valueText, fallbackUnit) {
+/**
+ * Supplier model/type interpretation used by structured commission normalization:
+ * true = percentage, false = fixed/action-based, null = not established by the parser.
+ * Exported so readiness reconciliation reuses the same interpretation (never a second one).
+ */
+export function looksPercent(entry, valueText, fallbackUnit) {
   const model = String(
     entry?.model ??
       entry?.performance_model ??

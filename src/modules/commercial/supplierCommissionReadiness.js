@@ -18,9 +18,9 @@
  */
 
 import { createHash } from "node:crypto";
-import { explicitNumber } from "../ops/campaignCommissions.js";
+import { explicitNumber, listCampaignCommissionFacts, looksPercent } from "../ops/campaignCommissions.js";
 
-export const SUPPLIER_COMMISSION_READINESS_VERSION = "SCR-READINESS-2";
+export const SUPPLIER_COMMISSION_READINESS_VERSION = "SCR-READINESS-3";
 
 export const RULE_MAPPING_STATUS = Object.freeze({
   MAPPED: "MAPPED",
@@ -245,6 +245,115 @@ export function anonymousRuleIdentity({
   };
 }
 
+const VALUE_TOLERANCE = 0.00005;
+
+function sameAmount(a, b) {
+  const left = explicitNumber(a);
+  const right = explicitNumber(b);
+  if (left == null || right == null) return false;
+  return Math.abs(left - right) <= VALUE_TOLERANCE;
+}
+
+function currencyOf(value) {
+  const code = text(value)?.toUpperCase().slice(0, 3) ?? null;
+  return code && /^[A-Z]{3}$/.test(code) ? code : null;
+}
+
+/**
+ * Supplier commission facts parsed from trusted source evidence with the SAME parser the
+ * fan-out uses (listCampaignCommissionFacts) — never a second parser. Accepts the raw
+ * supplier fragment (object or string) and/or caller-supplied source text.
+ */
+export function sourceEconomicsFacts({ rawRuleReference = null, sourceText = null } = {}) {
+  const facts = [];
+  const push = (entry) => {
+    if (entry == null || entry === "") return;
+    try {
+      for (const fact of listCampaignCommissionFacts({ groups: [entry], raw: {} }).allFacts ?? []) facts.push(fact);
+    } catch {
+      /* unparseable evidence yields no facts; readiness then relies on the other gates */
+    }
+  };
+  if (rawRuleReference != null && (typeof rawRuleReference === "object" || typeof rawRuleReference === "string")) {
+    push(rawRuleReference);
+  } else if (present(sourceText)) {
+    push(String(sourceText));
+  }
+  return facts;
+}
+
+/**
+ * Reconcile explicit source economics with the persisted normalized economics.
+ * Percentage outcomes must equal the compatible percentage fact; fixed outcomes must equal
+ * the compatible fixed fact in amount and currency. A source with both a percent and a
+ * fixed fact ("8% Or USD 20") reconciles each sibling outcome to its own kind. Several
+ * distinct same-kind facts that cannot be tied to the row safely are ambiguous.
+ *
+ * @returns {{ reconciled: boolean, reasons: string[], compared: object|null }}
+ */
+export function reconcileSourceEconomics(rule = {}, facts = []) {
+  const ratePercent = explicitNumber(rule?.ratePercent);
+  const fixedAmount = explicitNumber(rule?.fixedAmount);
+  const list = Array.isArray(facts) ? facts.filter(Boolean) : [];
+  if (!list.length || (ratePercent == null && fixedAmount == null)) {
+    return { reconciled: true, reasons: [], compared: null };
+  }
+
+  const kind = ratePercent != null ? "PERCENT" : "FIXED";
+  const sameKind = list.filter((fact) => fact.kind === kind);
+  if (!sameKind.length) {
+    return {
+      reconciled: false,
+      reasons: ["source_economics_kind_mismatch"],
+      compared: { kind, sourceKinds: [...new Set(list.map((fact) => fact.kind))] },
+    };
+  }
+
+  const ruleCurrency = currencyOf(rule?.currency);
+  const distinct = [];
+  for (const fact of sameKind) {
+    const key = `${explicitNumber(fact.value)}|${kind === "FIXED" ? currencyOf(fact.currency) ?? "" : ""}`;
+    if (!distinct.some((item) => item.key === key)) distinct.push({ key, fact });
+  }
+  if (distinct.length > 1) {
+    return {
+      reconciled: false,
+      reasons: ["source_economics_ambiguous"],
+      compared: { kind, sourceValues: distinct.map((item) => item.fact.display) },
+    };
+  }
+
+  const fact = distinct[0].fact;
+  const reasons = [];
+  const ruleValue = kind === "PERCENT" ? ratePercent : fixedAmount;
+  if (!sameAmount(fact.value, ruleValue)) reasons.push("source_economics_mismatch");
+  if (kind === "FIXED") {
+    const factCurrency = currencyOf(fact.currency);
+    if (factCurrency && ruleCurrency && factCurrency !== ruleCurrency) reasons.push("source_economics_currency_mismatch");
+  }
+  return {
+    reconciled: reasons.length === 0,
+    reasons,
+    compared: { kind, sourceValue: fact.value, sourceCurrency: fact.currency ?? null, ruleValue, ruleCurrency },
+  };
+}
+
+/**
+ * Trusted supplier model vs normalized payout shape, using the parser's own model
+ * interpretation (looksPercent). Unknown models establish nothing and are not flagged.
+ */
+export function modelShapeConflict(rule = {}) {
+  const model = text(rule?.commissionModel);
+  if (!model) return null;
+  const interpreted = looksPercent({ model }, "", null);
+  if (interpreted === null) return null;
+  const ratePercent = explicitNumber(rule?.ratePercent);
+  const fixedAmount = explicitNumber(rule?.fixedAmount);
+  if (ratePercent == null && fixedAmount == null) return null;
+  const rowIsPercent = ratePercent != null;
+  return interpreted === rowIsPercent ? null : "source_model_shape_mismatch";
+}
+
 function metadataOf(rule) {
   return rule?.metadata && typeof rule.metadata === "object" ? rule.metadata : {};
 }
@@ -301,7 +410,7 @@ function conditionVerified(condition) {
   return meta.matcherReady === true || meta.semanticsVerified === true;
 }
 
-function buildResult({ financeReady, reviewReasons, hasNumericOutcome, mappingStatus = null, decisionSource, evidenceSources = [] }) {
+function buildResult({ financeReady, reviewReasons, hasNumericOutcome, mappingStatus = null, decisionSource, evidenceSources = [], reconciliation = null }) {
   const reasons = [...new Set(reviewReasons)];
   let status = mappingStatus;
   if (!status) {
@@ -324,6 +433,9 @@ function buildResult({ financeReady, reviewReasons, hasNumericOutcome, mappingSt
     fieldMappingOutcome: financeReady ? "MAPPED" : "REVIEW_REQUIRED",
     decisionSource,
     evidenceSources,
+    sourceEconomics: reconciliation
+      ? { reconciled: reconciliation.reconciled, compared: reconciliation.compared }
+      : null,
     readinessVersion: SUPPLIER_COMMISSION_READINESS_VERSION,
   };
 }
@@ -396,6 +508,16 @@ export function assessSupplierCommissionReadiness(rule = {}, { sourceText = null
   if (/^\s*up\s*to/i.test(display) || commissionTextIsAmbiguous(source)) reasons.push("up_to_ceiling_not_exact_rate");
   if (source && !commissionUnitIsExplicit(source)) reasons.push("commission_unit_not_explicit");
 
+  // Explicit source economics must AGREE with the normalized row, not merely exist.
+  let reconciliation = null;
+  if (hasNumericOutcome && source) {
+    const facts = sourceEconomicsFacts({ rawRuleReference: rule?.rawRuleReference ?? null, sourceText });
+    reconciliation = reconcileSourceEconomics(rule, facts);
+    reasons.push(...reconciliation.reasons);
+    const modelConflict = modelShapeConflict(rule);
+    if (modelConflict) reasons.push(modelConflict);
+  }
+
   for (const condition of Array.isArray(rule?.conditions) ? rule.conditions : []) {
     const type = String(condition?.conditionType ?? "").toUpperCase();
     if (UNVERIFIED_CONDITION_TYPES.has(type) && !conditionVerified(condition)) {
@@ -422,6 +544,7 @@ export function assessSupplierCommissionReadiness(rule = {}, { sourceText = null
     hasNumericOutcome,
     decisionSource: "GENERIC",
     evidenceSources: evidence.evidenceSources,
+    reconciliation,
   });
 }
 
