@@ -13,7 +13,11 @@
 
 import { prisma } from "../../database/prisma.js";
 import { parseNetworkSource } from "../supplier/entityIdentity.js";
-import { mapOptimiseCommissionGroupCandidates } from "./optimiseCommissionGroup.mapper.js";
+import {
+  OPTIMISE_COMMISSION_GROUP_SOURCE_OBJECT,
+  mapOptimiseCommissionGroupCandidates,
+  sourceCampaignIdFromOutcomeKey,
+} from "./optimiseCommissionGroup.mapper.js";
 import { SupplierCommissionRuleService } from "./services/supplierCommissionRule.service.js";
 
 function validDate(value) {
@@ -56,6 +60,90 @@ export class OptimiseCommissionGroupPersistenceService {
       candidatesByCampaign.set(String(campaignId), candidates);
     }
     return candidatesByCampaign;
+  }
+
+  /**
+   * Source campaign ids that currently have OPEN canonical detailed rules
+   * (sourceObject = commission_groups, effectiveUntil = null) for this Optimise
+   * account/region. One bounded query; identity comes from the outcomeKey lineage
+   * (metadata.sourceCampaignId / supplierCampaign.supplierCampaignId as fallbacks).
+   *
+   * @returns {Promise<Set<string>>}
+   */
+  async loadOpenDetailedCampaignIds({ networkSource, sourceAccountLabel = "default" }, client = null) {
+    const db = client ?? this.db;
+    const ids = new Set();
+    if (!db?.supplierCommissionRule?.findMany) return ids;
+    const { supplier } = parseNetworkSource(networkSource);
+    const rows = await db.supplierCommissionRule.findMany({
+      where: {
+        supplier,
+        sourceAccountLabel,
+        networkSource,
+        sourceObject: OPTIMISE_COMMISSION_GROUP_SOURCE_OBJECT,
+        effectiveUntil: null,
+      },
+      select: {
+        outcomeKey: true,
+        metadata: true,
+        supplierCampaign: { select: { supplierCampaignId: true } },
+      },
+    });
+    for (const row of rows) {
+      const campaignId =
+        sourceCampaignIdFromOutcomeKey(row.outcomeKey) ??
+        row.metadata?.sourceCampaignId ??
+        row.supplierCampaign?.supplierCampaignId ??
+        null;
+      if (campaignId != null && campaignId !== "") ids.add(String(campaignId));
+    }
+    return ids;
+  }
+
+  /**
+   * Detailed-rule precedence for one sync run.
+   *
+   * protectedCampaignIds = campaigns whose detailed groups succeeded now (with ≥1 outcome)
+   *                        ∪ campaigns that already have open detailed rules in the DB.
+   * The campaign-summary fan-out is suppressed for every protected campaign, so a
+   * transient /commission-groups failure, a disabled/skipped detailed fetch, or an
+   * unproven empty response can never reactivate campaign-summary economics next to
+   * open detailed rules. First-ever failures (no detailed history) keep the existing
+   * campaign-level fallback behaviour.
+   */
+  async resolveDetailedPrecedence({ networkSource, sourceAccountLabel = "default", byCampaign = new Map() }, client = null) {
+    const candidatesByCampaign = this.planCandidates({ networkSource, sourceAccountLabel, byCampaign });
+    const currentDetailedCampaignIds = new Set();
+    const currentEmptyCampaignIds = new Set();
+    for (const [campaignId, candidates] of candidatesByCampaign) {
+      if (candidates.length) currentDetailedCampaignIds.add(String(campaignId));
+      else currentEmptyCampaignIds.add(String(campaignId));
+    }
+
+    const existingOpenDetailedCampaignIds = await this.loadOpenDetailedCampaignIds(
+      { networkSource, sourceAccountLabel },
+      client,
+    );
+
+    const entries = byCampaign instanceof Map ? [...byCampaign.entries()] : Object.entries(byCampaign ?? {});
+    const failedCampaignIds = new Set(
+      entries.filter(([, outcome]) => outcome && outcome.status !== "SUCCESS").map(([campaignId]) => String(campaignId)),
+    );
+
+    const protectedCampaignIds = new Set([...currentDetailedCampaignIds, ...existingOpenDetailedCampaignIds]);
+    const retryRequiredCampaignIds = [...failedCampaignIds].filter((id) => existingOpenDetailedCampaignIds.has(id));
+    const firstEverFailureCampaignIds = [...failedCampaignIds].filter((id) => !existingOpenDetailedCampaignIds.has(id));
+    const emptyWithOpenRulesCampaignIds = [...currentEmptyCampaignIds].filter((id) => existingOpenDetailedCampaignIds.has(id));
+
+    return {
+      candidatesByCampaign,
+      currentDetailedCampaignIds,
+      existingOpenDetailedCampaignIds,
+      protectedCampaignIds,
+      retryRequiredCampaignIds,
+      firstEverFailureCampaignIds,
+      emptyWithOpenRulesCampaignIds,
+    };
   }
 
   async resolveSupplierCampaign({ networkSource, sourceAccountLabel, sourceCampaignId }, client = null) {
@@ -185,13 +273,27 @@ export class OptimiseCommissionGroupPersistenceService {
    * Persist every successfully fetched campaign. Failed campaigns are reported and
    * left untouched (their existing rules remain effective).
    */
-  async persistFetchedGroups({ networkSource, sourceAccountLabel = "default", byCampaign, fetchedAt = null, syncRunId = null }) {
+  async persistFetchedGroups({
+    networkSource,
+    sourceAccountLabel = "default",
+    byCampaign,
+    fetchedAt = null,
+    syncRunId = null,
+    existingOpenDetailedCampaignIds = null,
+  }) {
     const entries = byCampaign instanceof Map ? [...byCampaign.entries()] : Object.entries(byCampaign ?? {});
+    const previouslyDetailed =
+      existingOpenDetailedCampaignIds ??
+      (await this.loadOpenDetailedCampaignIds({ networkSource, sourceAccountLabel }));
     const summary = {
       campaignsFetched: 0,
       campaignsFailed: 0,
       campaignsWithDetailedRules: 0,
       campaignsUnlinked: 0,
+      /** Previously detailed campaigns whose fetch failed: detail incomplete, retry required. */
+      campaignsDetailRetryRequired: [],
+      /** Successful HTTP response with zero groups while open detailed rules exist: fail closed. */
+      campaignsEmptyResponseVerifyLive: [],
       rulesPersisted: 0,
       financeReady: 0,
       reviewRequired: 0,
@@ -203,9 +305,27 @@ export class OptimiseCommissionGroupPersistenceService {
     for (const [campaignId, outcome] of entries) {
       if (!outcome || outcome.status !== "SUCCESS") {
         summary.campaignsFailed += 1;
+        if (previouslyDetailed.has(String(campaignId))) {
+          summary.campaignsDetailRetryRequired.push(String(campaignId));
+        }
         continue;
       }
       summary.campaignsFetched += 1;
+      const groups = Array.isArray(outcome.groups) ? outcome.groups : [];
+      if (!groups.length && previouslyDetailed.has(String(campaignId))) {
+        // Optimise's meaning of an empty commission-group list is not proven live. Keep the
+        // open detailed rules untouched, record the evidence, and surface VERIFY_LIVE.
+        summary.campaignsEmptyResponseVerifyLive.push(String(campaignId));
+        summary.campaigns.push({
+          sourceCampaignId: String(campaignId),
+          status: "EMPTY_RESPONSE_VERIFY_LIVE",
+          candidateCount: 0,
+          persisted: 0,
+          supersededSummaryRules: 0,
+          reason: "empty_commission_group_response_with_open_detailed_rules",
+        });
+        continue;
+      }
       try {
         // eslint-disable-next-line no-await-in-loop
         const result = await this.persistCampaign({

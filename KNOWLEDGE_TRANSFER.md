@@ -1055,3 +1055,15 @@ Bands and source conditions are preserved as child conditions and marked
 | `OPTIMISE_COMMISSION_GROUPS_ENABLED` | `true` | Fetch detailed commission groups during Optimise campaign refresh |
 | `OPTIMISE_COMMISSION_GROUPS_SCOPE` | `joined` | `joined` = only verified JOINED campaigns; `all` = every campaign with an id |
 | `OPTIMISE_COMMISSION_GROUPS_MAX_CAMPAIGNS` | `200` | Upper bound of per-campaign requests per account per sync |
+
+Precedence protection: on every Optimise campaign refresh the sync unions the campaigns
+whose detailed groups succeeded now with the campaigns that already hold OPEN detailed
+rules (`sourceObject = commission_groups`, `effectiveUntil = null`, one bounded query per
+account) into `protectedCampaignIds`; the campaign-summary fan-out is skipped for all of
+them. A failed, disabled, skipped or empty detailed fetch therefore never reactivates
+campaign-summary economics beside open detailed rules and never closes or versions them
+(`detailRetryRequiredCampaignIds` / `emptyResponseVerifyLiveCampaignIds` in the sync
+report). Campaigns with no detailed history keep the campaign-level fallback. Anonymous
+groups (no supplier id) are keyed by a fingerprint of stable non-economic semantics
+(name, band type, conditions), never by array position, and stay `REVIEW_REQUIRED`
+(`supplier_group_id_missing`).

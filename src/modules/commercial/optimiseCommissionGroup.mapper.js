@@ -16,10 +16,14 @@
  *   condition-bearing rules are persisted as REVIEW_REQUIRED / VERIFY_LIVE and carry an
  *   MBO gate condition that makes the matcher fail closed (REVIEW_REQUIRED) instead of
  *   silently matching or falling back to a broader rule;
+ * - a group without a supplier id never uses array position as identity: it is keyed by a
+ *   fingerprint of stable non-economic semantics (name, band type, conditions) and is
+ *   always REVIEW_REQUIRED (supplier_group_id_missing);
  * - explicit zero (0%, USD 0) is a real supplier outcome and survives normalization;
  * - campaign-level commissionCost / commissionGroupName stay display/fallback evidence.
  */
 
+import { createHash } from "node:crypto";
 import { listCampaignCommissionFacts } from "../ops/campaignCommissions.js";
 import { conditionsFromSourceEntry } from "./supplierCommissionRuleFanOut.js";
 
@@ -259,10 +263,98 @@ function conditionSignature(conditions = []) {
     .join("|");
 }
 
+/** Canonical JSON: object keys sorted recursively, arrays sorted by canonical form. */
+export function canonicalJson(value) {
+  if (value === null || value === undefined) return "null";
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).sort().join(",")}]`;
+  }
+  if (typeof value === "object") {
+    const keys = Object.keys(value)
+      .filter((key) => value[key] !== undefined)
+      .sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(typeof value === "string" ? value.trim() : value);
+}
+
+function fingerprint(value) {
+  return createHash("sha256").update(canonicalJson(value)).digest("hex").slice(0, 16);
+}
+
+const ECONOMIC_GROUP_FIELDS = new Set([
+  "commission",
+  "commissionvalue",
+  "commission_value",
+  "value",
+  "rate",
+  "amount",
+  "payout",
+  "fixed",
+  "fixedamount",
+  "fixed_amount",
+  "bands",
+  "commissionbands",
+  "commission_bands",
+  "band",
+]);
+
+function nonEconomicGroupFields(group = {}) {
+  const out = {};
+  for (const [key, value] of Object.entries(group)) {
+    if (ECONOMIC_GROUP_FIELDS.has(key.toLowerCase())) continue;
+    if (value === undefined) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+/**
+ * Durable identity for a group the supplier returned WITHOUT an id.
+ *
+ * Array position is never identity (a reordered response must not create new
+ * lineage). The identity is a fingerprint of stable, non-economic supplier semantics:
+ * normalized name, band type, canonicalised source conditions, plus payout kind /
+ * basis / currency (the same non-value dimensions the campaign fan-out keys on).
+ * Rates and amounts are excluded so a payout change versions the same logical rule.
+ * When none of name / band type / conditions exist the identity is INSUFFICIENT: the
+ * rule is still preserved with its raw evidence, keyed by a fingerprint of the whole
+ * canonical group, and can never be finance-ready.
+ */
+export function anonymousGroupIdentity(group = {}, { kind = null, basis = null, currency = null } = {}) {
+  const name = optimiseGroupName(group);
+  const bandType = optimiseBandType(group);
+  const conditions = group.conditions ?? group.condition ?? group.rules ?? null;
+  const hasConditions = Array.isArray(conditions) ? conditions.length > 0 : Boolean(conditions && typeof conditions === "object" && Object.keys(conditions).length);
+  const inputs = {
+    supplier: "OPTIMISE",
+    sourceObject: OPTIMISE_COMMISSION_GROUP_SOURCE_OBJECT,
+    name: name ? name.toLowerCase().replace(/\s+/g, " ") : null,
+    bandType: bandType ? bandType.toLowerCase() : null,
+    conditions: hasConditions ? conditions : null,
+    kind: kind ?? null,
+    basis: basis ?? null,
+    currency: currency ?? null,
+  };
+  if (name || bandType || hasConditions) {
+    return {
+      strategy: "ANONYMOUS_SEMANTIC_FINGERPRINT",
+      sufficient: true,
+      key: `ANON:${fingerprint(inputs)}`,
+      inputs,
+    };
+  }
+  return {
+    strategy: "ANONYMOUS_INSUFFICIENT",
+    sufficient: false,
+    key: `ANON_UNIDENTIFIED:${fingerprint({ ...inputs, group: nonEconomicGroupFields(group), whole: group })}`,
+    inputs,
+  };
+}
+
 export function optimiseCommissionGroupOutcomeKey({
   campaignId,
-  groupId,
-  groupIndex,
+  groupKey,
   bandKey,
   outcomeSlot,
   conditions,
@@ -271,11 +363,20 @@ export function optimiseCommissionGroupOutcomeKey({
     "optimise",
     OPTIMISE_COMMISSION_GROUP_SOURCE_OBJECT,
     campaignId ?? "NO_CAMPAIGN_ID",
-    groupId ?? `ANON_GROUP_${groupIndex + 1}`,
+    groupKey ?? "NO_GROUP_KEY",
     bandKey ?? "base",
     `slot:${outcomeSlot}`,
     conditionSignature(conditions),
   ].join("::");
+}
+
+/** Source campaign id encoded in a detailed-rule outcomeKey (null for other keys). */
+export function sourceCampaignIdFromOutcomeKey(outcomeKey) {
+  if (typeof outcomeKey !== "string") return null;
+  const parts = outcomeKey.split("::");
+  if (parts[0] !== "optimise" || parts[1] !== OPTIMISE_COMMISSION_GROUP_SOURCE_OBJECT) return null;
+  const campaignId = parts[2];
+  return campaignId && campaignId !== "NO_CAMPAIGN_ID" ? campaignId : null;
 }
 
 /**
@@ -346,7 +447,17 @@ export function mapOptimiseCommissionGroupCandidates(groups = [], context = {}) 
           conditions.push(bandCondition(outcome.band, outcome.bandIndex, bandType));
         }
 
+        const identity = groupId
+          ? { strategy: "SUPPLIER_ID", sufficient: true, key: groupId, inputs: null }
+          : anonymousGroupIdentity(group, {
+              kind: fact.kind,
+              basis: fact.basis ?? null,
+              currency: fact.kind === "FIXED" ? fact.currency ?? outcome.currency ?? null : null,
+            });
+
         const reviewReasons = [];
+        if (!groupId) reviewReasons.push("supplier_group_id_missing");
+        if (!groupId && !identity.sufficient) reviewReasons.push("anonymous_group_identity_insufficient");
         if (!unitExplicit) reviewReasons.push("commission_unit_not_explicit");
         if (bandRestricted) reviewReasons.push("band_selection_semantics_not_verified_live");
         if (sourceConditions.length) reviewReasons.push("optimise_condition_semantics_not_verified_live");
@@ -369,8 +480,7 @@ export function mapOptimiseCommissionGroupCandidates(groups = [], context = {}) 
 
         const outcomeKey = optimiseCommissionGroupOutcomeKey({
           campaignId,
-          groupId,
-          groupIndex,
+          groupKey: identity.key,
           bandKey: outcome.bandKey,
           outcomeSlot,
           conditions: conditions.filter((c) => c.sourceConditionType !== OPTIMISE_VERIFY_LIVE_GATE.sourceConditionType),
@@ -445,6 +555,9 @@ export function mapOptimiseCommissionGroupCandidates(groups = [], context = {}) 
             groupCommission: groupCommission ?? null,
             factDisplay: fact.display,
             unitExplicit,
+            identityStrategy: identity.strategy,
+            identitySufficient: identity.sufficient,
+            identityInputs: identity.inputs,
             sourceConditionCount: sourceConditions.length,
             unverifiedConditionCount: unverifiedConditions.length,
             reviewReasons,

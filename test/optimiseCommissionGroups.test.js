@@ -71,15 +71,28 @@ function createRuleDb() {
   };
   const model = {
     async findMany({ where }) {
+      if (where.outcomeKey && typeof where.outcomeKey === "string") {
+        return rows
+          .filter(
+            (row) =>
+              row.supplier === where.supplier &&
+              row.sourceAccountLabel === where.sourceAccountLabel &&
+              row.outcomeKey === where.outcomeKey,
+          )
+          .sort((a, b) => new Date(b.effectiveFrom) - new Date(a.effectiveFrom))
+          .map((row) => ({ ...row, conditions: [...(row.conditions || [])] }));
+      }
+      // open detailed-rule lookup (one bounded query per account)
       return rows
         .filter(
           (row) =>
-            row.supplier === where.supplier &&
-            row.sourceAccountLabel === where.sourceAccountLabel &&
-            row.outcomeKey === where.outcomeKey,
+            (where.supplier == null || row.supplier === where.supplier) &&
+            (where.sourceAccountLabel == null || row.sourceAccountLabel === where.sourceAccountLabel) &&
+            (where.networkSource == null || row.networkSource === where.networkSource) &&
+            (where.sourceObject == null || row.sourceObject === where.sourceObject) &&
+            (!("effectiveUntil" in where) || row.effectiveUntil == where.effectiveUntil),
         )
-        .sort((a, b) => new Date(b.effectiveFrom) - new Date(a.effectiveFrom))
-        .map((row) => ({ ...row, conditions: [...(row.conditions || [])] }));
+        .map((row) => ({ outcomeKey: row.outcomeKey, metadata: row.metadata ?? null, supplierCampaign: null }));
     },
     async create({ data }) {
       sequence += 1;
@@ -116,15 +129,19 @@ function createRuleDb() {
   const db = {
     supplierCommissionRule: model,
     supplierCampaign: {
-      async findFirst() {
+      async findFirst({ where } = {}) {
+        const id = where?.supplierCampaignId ?? "123";
         return {
-          id: "sc-db-123",
-          supplierCampaignId: "123",
+          id: `sc-db-${id}`,
+          supplierCampaignId: String(id),
           campaignName: "Zalora",
           merchantNameRaw: "Zalora",
           commissionCurrency: "USD",
-          campaignSources: [{ id: "cs-db-123" }],
+          campaignSources: [{ id: `cs-db-${id}` }],
         };
+      },
+      async findMany() {
+        return [];
       },
     },
     async $transaction(callback) {
@@ -634,5 +651,264 @@ describe("Optimise commission groups — persistence, precedence and versioning"
     assert.deepEqual([...planned.keys()], ["1", "3"]);
     assert.equal(planned.get("1").length, 1);
     assert.equal(planned.get("3").length, 0);
+  });
+});
+
+/**
+ * Mirrors the Optimise sync order for one account:
+ *   precedence lookup → campaign staging (summary fan-out with skip set) → detailed persistence.
+ */
+async function runOptimiseSync({ db, byCampaign, campaigns, fetchedAt = new Date("2026-09-03T10:00:00.000Z") }) {
+  const persistence = new OptimiseCommissionGroupPersistenceService({ prisma: db });
+  const ruleService = new SupplierCommissionRuleService({ prisma: db });
+  const precedence = await persistence.resolveDetailedPrecedence({
+    networkSource: "optimise_sea",
+    sourceAccountLabel: "default",
+    byCampaign,
+  });
+  const fanOut = await upsertCommissionRulesForPreparedCampaigns(
+    {
+      networkSource: "optimise_sea",
+      sourceAccountKey: "default",
+      preparedRecords: campaigns.map((raw) => ({ originalPayload: raw, sourceEvidenceAt: fetchedAt })),
+      skipCampaignIds: precedence.protectedCampaignIds,
+    },
+    { prisma: db, ruleService },
+  );
+  const detailed = await persistence.persistFetchedGroups({
+    networkSource: "optimise_sea",
+    sourceAccountLabel: "default",
+    byCampaign,
+    fetchedAt,
+    existingOpenDetailedCampaignIds: precedence.existingOpenDetailedCampaignIds,
+  });
+  return { precedence, fanOut, detailed };
+}
+
+const openRules = (rows, predicate = () => true) => rows.filter((r) => r.effectiveUntil == null && predicate(r));
+const summaryRules = (rows, campaignId) => rows.filter((r) => r.sourceObject === "campaigns" && String(r.outcomeKey).startsWith(`${campaignId}::`));
+const detailedRules = (rows, campaignId) => rows.filter((r) => r.sourceObject === "commission_groups" && String(r.outcomeKey).includes(`::${campaignId}::`));
+const campaign123 = { id: 123, commissionCost: "8%", publishers: [{ campaignSubStatus: "approved" }] };
+const groups123 = [
+  { id: "G1", name: "Standard", commission: "5%" },
+  { id: "G2", name: "Premium", commission: "10%" },
+];
+const success = (groups, fetchedAt = new Date("2026-09-03T10:00:00.000Z")) => ({ status: "SUCCESS", groups, currency: "USD", fetchedAt });
+const failed503 = { status: "FAILED", groups: [], error: { httpStatus: 503, message: "Service Unavailable" } };
+
+describe("Optimise commission groups — detailed-rule precedence survives failed syncs (P0)", () => {
+  it("successful detailed sync followed by a 503 keeps G1/G2 open and never reactivates the 8% summary rule", async () => {
+    const { rows, db } = createRuleDb();
+
+    // Sync 1: campaign summary 8%, detailed groups G1 5% / G2 10%
+    const sync1 = await runOptimiseSync({ db, byCampaign: new Map([["123", success(groups123)]]), campaigns: [campaign123] });
+    assert.equal(sync1.fanOut.skippedDetailedCampaigns, 1, "summary fan-out suppressed for detailed campaign");
+    assert.equal(sync1.detailed.rulesPersisted, 2);
+    assert.deepEqual(openRules(detailedRules(rows, "123")).map((r) => [r.sourceGroupId, r.ratePercent]).sort(), [["G1", 5], ["G2", 10]]);
+    assert.equal(summaryRules(rows, "123").length, 0, "no summary rule was created");
+    const snapshot = JSON.stringify(detailedRules(rows, "123"));
+
+    // Sync 2: campaign list succeeds, commission-groups for 123 fails with 503
+    const sync2 = await runOptimiseSync({
+      db,
+      byCampaign: new Map([["123", failed503]]),
+      campaigns: [campaign123],
+      fetchedAt: new Date("2026-09-04T10:00:00.000Z"),
+    });
+
+    assert.deepEqual([...sync2.precedence.existingOpenDetailedCampaignIds], ["123"]);
+    assert.deepEqual([...sync2.precedence.protectedCampaignIds], ["123"]);
+    assert.deepEqual(sync2.precedence.retryRequiredCampaignIds, ["123"]);
+    assert.equal(sync2.fanOut.skippedDetailedCampaigns, 1, "summary fan-out still suppressed");
+    assert.equal(sync2.detailed.campaignsFailed, 1);
+    assert.deepEqual(sync2.detailed.campaignsDetailRetryRequired, ["123"]);
+    assert.equal(openRules(detailedRules(rows, "123")).length, 2, "G1 and G2 remain open");
+    assert.equal(openRules(summaryRules(rows, "123")).length, 0, "NO open 8% campaign-summary rule");
+    assert.equal(summaryRules(rows, "123").length, 0);
+    assert.equal(JSON.stringify(detailedRules(rows, "123")), snapshot, "detailed rules untouched: not closed, not versioned, economics unchanged");
+  });
+
+  it("partial failure: 123 refreshes from current data, previously detailed 456 keeps its rules with no summary reactivation", async () => {
+    const { rows, db } = createRuleDb();
+    const campaign456 = { id: 456, commissionCost: "6%", publishers: [{ campaignSubStatus: "approved" }] };
+    await runOptimiseSync({
+      db,
+      byCampaign: new Map([
+        ["123", success(groups123)],
+        ["456", success([{ id: "H1", name: "Base", commission: "7%" }])],
+      ]),
+      campaigns: [campaign123, campaign456],
+    });
+    const snapshot456 = JSON.stringify(detailedRules(rows, "456"));
+
+    const sync2 = await runOptimiseSync({
+      db,
+      byCampaign: new Map([
+        ["123", success([{ id: "G1", name: "Standard", commission: "6%" }, { id: "G2", name: "Premium", commission: "10%" }], new Date("2026-09-05T00:00:00.000Z"))],
+        ["456", failed503],
+      ]),
+      campaigns: [campaign123, campaign456],
+      fetchedAt: new Date("2026-09-05T00:00:00.000Z"),
+    });
+
+    assert.deepEqual([...sync2.precedence.protectedCampaignIds].sort(), ["123", "456"]);
+    assert.deepEqual(sync2.precedence.retryRequiredCampaignIds, ["456"]);
+    assert.deepEqual(sync2.detailed.campaignsDetailRetryRequired, ["456"]);
+    assert.equal(sync2.fanOut.skippedDetailedCampaigns, 2);
+    // 123 uses current detailed data: G1 versioned 5% -> 6%, G2 unchanged
+    const g1 = detailedRules(rows, "123").filter((r) => r.sourceGroupId === "G1");
+    assert.equal(g1.length, 2);
+    assert.equal(openRules(g1)[0].ratePercent, 6);
+    assert.equal(openRules(detailedRules(rows, "123")).length, 2);
+    // 456 retains previous detailed data, no summary economics
+    assert.equal(JSON.stringify(detailedRules(rows, "456")), snapshot456);
+    assert.equal(summaryRules(rows, "456").length, 0);
+    assert.equal(summaryRules(rows, "123").length, 0);
+  });
+
+  it("first-ever failure: a campaign with no detailed history keeps the existing campaign-level fallback", async () => {
+    const { rows, db } = createRuleDb();
+    const campaign789 = { id: 789, commissionCost: "9%", publishers: [{ campaignSubStatus: "approved" }] };
+
+    const sync = await runOptimiseSync({ db, byCampaign: new Map([["789", failed503]]), campaigns: [campaign789] });
+
+    assert.deepEqual(sync.precedence.firstEverFailureCampaignIds, ["789"]);
+    assert.deepEqual(sync.precedence.retryRequiredCampaignIds, []);
+    assert.equal(sync.precedence.protectedCampaignIds.size, 0);
+    assert.equal(sync.fanOut.skippedDetailedCampaigns, 0);
+    assert.equal(sync.fanOut.upserted, 1, "campaign-level summary fallback still fans out");
+    assert.equal(openRules(summaryRules(rows, "789"))[0].ratePercent, 9);
+    assert.equal(detailedRules(rows, "789").length, 0, "no detailed rules are pretended to exist");
+    assert.deepEqual(sync.detailed.campaignsDetailRetryRequired, []);
+  });
+
+  it("successful empty response for a previously detailed campaign fails closed (rules kept, VERIFY_LIVE recorded)", async () => {
+    const { rows, db } = createRuleDb();
+    await runOptimiseSync({ db, byCampaign: new Map([["123", success(groups123)]]), campaigns: [campaign123] });
+    const snapshot = JSON.stringify(detailedRules(rows, "123"));
+
+    const sync2 = await runOptimiseSync({
+      db,
+      byCampaign: new Map([["123", success([], new Date("2026-09-06T00:00:00.000Z"))]]),
+      campaigns: [campaign123],
+      fetchedAt: new Date("2026-09-06T00:00:00.000Z"),
+    });
+
+    assert.deepEqual(sync2.precedence.emptyWithOpenRulesCampaignIds, ["123"]);
+    assert.ok(sync2.precedence.protectedCampaignIds.has("123"));
+    assert.equal(sync2.fanOut.skippedDetailedCampaigns, 1);
+    assert.deepEqual(sync2.detailed.campaignsEmptyResponseVerifyLive, ["123"]);
+    assert.equal(sync2.detailed.campaigns[0].status, "EMPTY_RESPONSE_VERIFY_LIVE");
+    assert.equal(sync2.detailed.rulesPersisted, 0);
+    assert.equal(JSON.stringify(detailedRules(rows, "123")), snapshot, "open detailed rules untouched");
+    assert.equal(summaryRules(rows, "123").length, 0, "no duplicate summary economics");
+  });
+
+  it("empty response for a campaign with no detailed history keeps the campaign-level fallback", async () => {
+    const { rows, db } = createRuleDb();
+    const sync = await runOptimiseSync({ db, byCampaign: new Map([["123", success([])]]), campaigns: [campaign123] });
+    assert.deepEqual(sync.precedence.emptyWithOpenRulesCampaignIds, []);
+    assert.equal(sync.fanOut.upserted, 1);
+    assert.equal(openRules(summaryRules(rows, "123")).length, 1);
+  });
+
+  it("disabled or skipped detailed fetch still respects existing open detailed rules", async () => {
+    const { rows, db } = createRuleDb();
+    await runOptimiseSync({ db, byCampaign: new Map([["123", success(groups123)]]), campaigns: [campaign123] });
+
+    // OPTIMISE_COMMISSION_GROUPS_ENABLED=false / source object skipped → no byCampaign at all
+    const sync2 = await runOptimiseSync({ db, byCampaign: new Map(), campaigns: [campaign123], fetchedAt: new Date("2026-09-07T00:00:00.000Z") });
+
+    assert.deepEqual([...sync2.precedence.protectedCampaignIds], ["123"]);
+    assert.equal(sync2.fanOut.skippedDetailedCampaigns, 1);
+    assert.equal(summaryRules(rows, "123").length, 0, "campaign refresh did not create a summary rule over open detailed rules");
+    assert.equal(openRules(detailedRules(rows, "123")).length, 2);
+  });
+
+  it("loadOpenDetailedCampaignIds is one bounded account-scoped query and ignores closed rules and other accounts", async () => {
+    const { rows, db } = createRuleDb();
+    const base = { supplier: "OPTIMISE", sourceObject: "commission_groups", effectiveFrom: new Date("2026-08-01T00:00:00.000Z"), conditions: [] };
+    rows.push({ ...base, id: "a", sourceAccountLabel: "default", networkSource: "optimise_sea", outcomeKey: "optimise::commission_groups::111::G1::base::slot:1::", effectiveUntil: null });
+    rows.push({ ...base, id: "b", sourceAccountLabel: "default", networkSource: "optimise_sea", outcomeKey: "optimise::commission_groups::222::G1::base::slot:1::", effectiveUntil: new Date("2026-08-15T00:00:00.000Z") });
+    rows.push({ ...base, id: "c", sourceAccountLabel: "other-account", networkSource: "optimise_sea", outcomeKey: "optimise::commission_groups::333::G1::base::slot:1::", effectiveUntil: null });
+    rows.push({ ...base, id: "d", sourceAccountLabel: "default", networkSource: "optimise_mena", outcomeKey: "optimise::commission_groups::444::G1::base::slot:1::", effectiveUntil: null });
+    rows.push({ ...base, id: "e", sourceAccountLabel: "default", networkSource: "optimise_sea", sourceObject: "campaigns", outcomeKey: "555::campaigns::commission::x", effectiveUntil: null });
+    let queries = 0;
+    const original = db.supplierCommissionRule.findMany;
+    db.supplierCommissionRule.findMany = async (args) => { queries += 1; return original(args); };
+
+    const service = new OptimiseCommissionGroupPersistenceService({ prisma: db });
+    const ids = await service.loadOpenDetailedCampaignIds({ networkSource: "optimise_sea", sourceAccountLabel: "default" });
+
+    assert.deepEqual([...ids], ["111"]);
+    assert.equal(queries, 1);
+  });
+});
+
+describe("Optimise commission groups — anonymous group identity (P1)", () => {
+  const run1 = [
+    { name: "New customers", commission: "10%" },
+    { name: "Existing customers", commission: "5%" },
+  ];
+  const run2 = [run1[1], run1[0]];
+
+  it("never uses array position: reordering anonymous groups keeps the same logical outcomeKeys", () => {
+    const first = mapOptimiseCommissionGroupCandidates(run1, CONTEXT);
+    const second = mapOptimiseCommissionGroupCandidates(run2, CONTEXT);
+    const keysByName = (rules) => Object.fromEntries(rules.map((r) => [r.sourceGroupName, r.outcomeKey]));
+    assert.deepEqual(keysByName(first), keysByName(second));
+    assert.ok(first.every((r) => !/ANON_GROUP_\d/.test(r.outcomeKey)), "no positional ANON_GROUP_n identity");
+    assert.ok(first.every((r) => r.sourceGroupId === null && r.sourceRuleId === null), "no manufactured supplier ids");
+    assert.ok(first.every((r) => r.metadata.identityStrategy === "ANONYMOUS_SEMANTIC_FINGERPRINT"));
+    assert.ok(first.every((r) => r.metadata.reviewReasons.includes("supplier_group_id_missing")));
+    assert.ok(first.every((r) => r.mappingStatus === "REVIEW_REQUIRED" && r.metadata.financeReady === false));
+    // key order inside the source object does not change identity either
+    const reordered = mapOptimiseCommissionGroupCandidates([{ commission: "10%", name: "New customers" }], CONTEXT);
+    assert.equal(reordered[0].outcomeKey, keysByName(first)["New customers"]);
+  });
+
+  it("reordered anonymous groups do not create new historical versions on re-sync", async () => {
+    const { rows, db } = createRuleDb();
+    const service = new OptimiseCommissionGroupPersistenceService({ prisma: db });
+    await service.persistFetchedGroups({ networkSource: "optimise_sea", byCampaign: byCampaign(run1) });
+    await service.persistFetchedGroups({ networkSource: "optimise_sea", byCampaign: byCampaign(run2, { fetchedAt: new Date("2026-09-08T00:00:00.000Z") }) });
+    assert.equal(rows.length, 2);
+    assert.ok(rows.every((r) => r.effectiveUntil == null));
+  });
+
+  it("anonymous but semantically identifiable rule 10% → 12% versions the same logical outcome", async () => {
+    const { rows, db } = createRuleDb();
+    const service = new OptimiseCommissionGroupPersistenceService({ prisma: db });
+    await service.persistFetchedGroups({ networkSource: "optimise_sea", byCampaign: byCampaign([{ name: "New customers", commission: "10%" }]) });
+    const changedAt = new Date("2026-09-09T00:00:00.000Z");
+    await service.persistFetchedGroups({ networkSource: "optimise_sea", byCampaign: byCampaign([{ name: "New customers", commission: "12%" }], { fetchedAt: changedAt }) });
+
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].outcomeKey, rows[1].outcomeKey);
+    assert.equal(rows[0].ratePercent, 10);
+    assert.equal(new Date(rows[0].effectiveUntil).toISOString(), changedAt.toISOString());
+    assert.equal(rows[1].ratePercent, 12);
+    assert.equal(rows[1].effectiveUntil, null);
+  });
+
+  it("anonymous group with no stable semantics is REVIEW_REQUIRED, not finance-ready, evidence retained", () => {
+    const [rule] = mapOptimiseCommissionGroupCandidates([{ commission: "10%" }], CONTEXT);
+    assert.equal(rule.mappingStatus, "REVIEW_REQUIRED");
+    assert.equal(rule.metadata.financeReady, false);
+    assert.equal(rule.metadata.identityStrategy, "ANONYMOUS_INSUFFICIENT");
+    assert.equal(rule.metadata.identitySufficient, false);
+    assert.ok(rule.metadata.reviewReasons.includes("supplier_group_id_missing"));
+    assert.ok(rule.metadata.reviewReasons.includes("anonymous_group_identity_insufficient"));
+    assert.ok(rule.outcomeKey.includes("::ANON_UNIDENTIFIED:"));
+    assert.deepEqual(rule.rawRuleReference.group, { commission: "10%" });
+    assert.ok(rule.conditions.some((c) => c.sourceConditionType === OPTIMISE_VERIFY_LIVE_GATE.sourceConditionType));
+  });
+
+  it("supplier-provided ids remain the lineage and identity", () => {
+    const [rule] = mapOptimiseCommissionGroupCandidates([{ id: "G9", name: "Named", commission: "10%" }], CONTEXT);
+    assert.equal(rule.sourceGroupId, "G9");
+    assert.equal(rule.sourceRuleId, "G9");
+    assert.equal(rule.metadata.identityStrategy, "SUPPLIER_ID");
+    assert.ok(rule.outcomeKey.includes("::G9::"));
   });
 });

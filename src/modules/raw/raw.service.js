@@ -375,6 +375,8 @@ export async function upsertManyRawEntities({
   evidence = null,
   /** Campaign ids whose detailed commission rules were ingested separately this sync. */
   commissionRuleSkipCampaignIds = null,
+  /** Skip the campaign-summary commission fan-out for every campaign (fail closed). */
+  commissionRuleFanOutDisabled = false,
 }) {
   if (!rows.length) {
     if (onTiming) onTiming({ dbWriteMs: 0, fieldExtractionMs: 0, batchUpsertMs: 0, rowUpsertMs: 0 });
@@ -463,12 +465,14 @@ export async function upsertManyRawEntities({
       }
 
       try {
-        await upsertCommissionRulesForPreparedCampaigns({
-          networkSource,
-          preparedRecords,
-          sourceAccountKey,
-          skipCampaignIds: commissionRuleSkipCampaignIds,
-        });
+        if (!commissionRuleFanOutDisabled) {
+          await upsertCommissionRulesForPreparedCampaigns({
+            networkSource,
+            preparedRecords,
+            sourceAccountKey,
+            skipCampaignIds: commissionRuleSkipCampaignIds,
+          });
+        }
       } catch {
         // Commission rule fan-out must not block entity staging.
       }

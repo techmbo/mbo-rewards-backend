@@ -1049,8 +1049,10 @@ async function syncOptimiseRegion(region, accountLabel) {
 
   // RAW/SOURCE evidence for commission groups (RawPayload + Entity commission_group).
   const commissionGroupPersistence = new OptimiseCommissionGroupPersistenceService();
-  const commissionGroupByCampaign = commissionGroupsResult?.byCampaign ?? new Map();
-  let detailedCommissionCampaignIds = new Set();
+  const commissionGroupByCampaign =
+    commissionGroupsResult && !commissionGroupsResult.error && !commissionGroupsResult.skipped
+      ? commissionGroupsResult.byCampaign ?? new Map()
+      : new Map();
   if (commissionGroupsResult && !commissionGroupsResult.error && !commissionGroupsResult.skipped) {
     await upsertManyRawEntities({
       networkSource,
@@ -1061,17 +1063,26 @@ async function syncOptimiseRegion(region, accountLabel) {
       onTiming: entityTiming.onTiming,
       evidence: evidenceFromRunSummary(commissionGroupsResult.syncRun),
     });
-    // Precedence: campaigns with detailed group outcomes keep commissionCost as display
-    // evidence only — the campaign-level fan-out is skipped for them (no duplicate rules).
-    const planned = commissionGroupPersistence.planCandidates({
+  }
+  // Detailed-rule precedence: campaign-summary fan-out is suppressed for campaigns whose
+  // detailed groups succeeded now AND for campaigns that already hold open detailed rules.
+  // A failed, disabled, skipped or empty detailed fetch therefore never reactivates
+  // campaign-summary economics beside existing detailed rules.
+  let detailedPrecedence = null;
+  try {
+    detailedPrecedence = await commissionGroupPersistence.resolveDetailedPrecedence({
       networkSource,
       sourceAccountLabel: accountLabel || "default",
       byCampaign: commissionGroupByCampaign,
     });
-    for (const [campaignId, candidates] of planned) {
-      if (candidates.length) detailedCommissionCampaignIds.add(campaignId);
-    }
+  } catch (error) {
+    logger.warn(
+      { err: error?.message || String(error), networkSource, accountLabel },
+      "optimise detailed commission precedence lookup failed; campaign-summary fan-out is suppressed for this run",
+    );
   }
+  const detailedCommissionCampaignIds = detailedPrecedence?.protectedCampaignIds ?? null;
+  const suppressCampaignSummaryFanOut = detailedPrecedence == null;
 
   if (refreshCampaigns) {
     await upsertManyRawEntities({
@@ -1083,6 +1094,7 @@ async function syncOptimiseRegion(region, accountLabel) {
       onTiming: entityTiming.onTiming,
       evidence: evidenceFromRunSummary(campaignsResult.syncRun),
       commissionRuleSkipCampaignIds: detailedCommissionCampaignIds,
+      commissionRuleFanOutDisabled: suppressCampaignSummaryFanOut,
     });
     removedDuplicateCampaigns = await cleanupOptimiseCampaignDuplicates(networkSource, accountLabel);
   }
@@ -1097,6 +1109,7 @@ async function syncOptimiseRegion(region, accountLabel) {
         sourceAccountLabel: accountLabel || "default",
         byCampaign: commissionGroupByCampaign,
         syncRunId: commissionGroupsResult.syncRun?.syncRunId ?? null,
+        existingOpenDetailedCampaignIds: detailedPrecedence?.existingOpenDetailedCampaignIds ?? null,
       });
     } catch (error) {
       commissionGroupRules = { error: error?.message || String(error) };
@@ -1249,6 +1262,12 @@ async function syncOptimiseRegion(region, accountLabel) {
           reviewRequired: commissionGroupRules?.reviewRequired ?? 0,
           campaignsWithDetailedRules: commissionGroupRules?.campaignsWithDetailedRules ?? 0,
           supersededSummaryRules: commissionGroupRules?.supersededSummaryRules ?? 0,
+          protectedByExistingDetailedRules: detailedPrecedence ? detailedPrecedence.existingOpenDetailedCampaignIds.size : null,
+          protectedCampaignIds: detailedPrecedence ? detailedPrecedence.protectedCampaignIds.size : null,
+          detailRetryRequiredCampaignIds: detailedPrecedence?.retryRequiredCampaignIds ?? [],
+          firstEverFailureCampaignIds: detailedPrecedence?.firstEverFailureCampaignIds ?? [],
+          emptyResponseVerifyLiveCampaignIds: detailedPrecedence?.emptyWithOpenRulesCampaignIds ?? [],
+          campaignSummaryFanOutSuppressed: suppressCampaignSummaryFanOut,
           persistErrors: commissionGroupRules?.persistErrors ?? (commissionGroupRules?.error ? [{ message: commissionGroupRules.error }] : []),
         }
       : null,
