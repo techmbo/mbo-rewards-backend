@@ -16,7 +16,11 @@ import { extractMboActualReceipt } from "../finance/financeSeparation.contract.j
 import { resolveNetworkReconRowStatus } from "../finance/reconciliationLogic.contract.js";
 import { ReconciliationService } from "../finance/reconciliation.service.js";
 import { isCouponUrlValue } from "../coupons/codeType.js";
-import { toSupplierCommissionRuleDto } from "../commercial/supplierCommissionRule.contract.js";
+import {
+  assembleSupplierCommissionRows,
+  matchesCommissionSearch,
+  toListingDto,
+} from "./supplierCommissionListing.js";
 
 function deriveCouponScopeFromSupplierCoupon(supplierCoupon) {
   if (supplierCoupon?.couponIsExclusive === true) return "UNIQUE_TO_CLIENT";
@@ -1152,140 +1156,92 @@ export class NetworkPortalService {
   }
 
   // ─── Supplier commission rules (CSV Commission Rules entity) ─────────────
+  /**
+   * Network Operations supplier commission listing — Commission 1...N.
+   *
+   * Per campaign: persisted canonical SupplierCommissionRule rows are authoritative; only
+   * campaigns with no canonical rule get projected rows built with the ingestion fan-out.
+   * The hybrid list is assembled in memory (bounded) so totals, ordering and pagination are
+   * deterministic and no campaign disappears because another campaign has canonical rules.
+   */
   async listSupplierCommissionRules({
     network = null,
     q = null,
     skip = 0,
     take = 25,
   } = {}) {
-    const where = {};
-    if (network) where.supplier = String(network).toUpperCase();
-    if (q) {
-      const term = String(q).trim();
-      where.OR = [
-        { id: { contains: term, mode: "insensitive" } },
-        { supplierRuleType: { contains: term, mode: "insensitive" } },
-        { sourceAccountLabel: { contains: term, mode: "insensitive" } },
-      ];
-    }
-
-    const [totalDb, dbRows] = await Promise.all([
-      this.db.supplierCommissionRule.count({ where }),
-      this.db.supplierCommissionRule.findMany({
-        where,
-        orderBy: { updatedAt: "desc" },
-        skip,
-        take,
-        include: {
-          campaignSource: {
-            include: {
-              supplierCampaign: {
-                select: {
-                  id: true,
-                  campaignName: true,
-                  merchantNameRaw: true,
-                  supplier: true,
-                  supplierCampaignId: true,
-                  countryCodes: true,
-                  categoryName: true,
-                },
-              },
-            },
-          },
-        },
-      }),
-    ]);
-
-    if (totalDb > 0) {
-      const items = dbRows.map((row) =>
-        toSupplierCommissionRuleDto(row, {
-          supplierCampaign: row.campaignSource?.supplierCampaign,
-          campaignSource: row.campaignSource,
-        }),
-      );
-      return { total: totalDb, items };
-    }
-
-    // Fallback: project summary rules from SupplierCampaign commission facts (CSV: campaign summary ≠ rule registry).
-    const campWhere = {
-      OR: [
-        { defaultCommissionValue: { not: null } },
-        { commissionGroups: { not: null } },
-      ],
-      ...(network ? { supplier: String(network).toUpperCase() } : {}),
+    const supplier = network ? String(network).toUpperCase() : null;
+    const maxRules = Math.max(100, Number(process.env.NETWORK_OPS_COMMISSION_RULES_MAX || 5000));
+    const maxFallbackCampaigns = Math.max(50, Number(process.env.NETWORK_OPS_COMMISSION_FALLBACK_MAX_CAMPAIGNS || 2000));
+    const campaignSelect = {
+      id: true,
+      supplier: true,
+      supplierRegion: true,
+      sourceAccountLabel: true,
+      campaignName: true,
+      merchantNameRaw: true,
+      supplierCampaignId: true,
+      countryCodes: true,
+      categoryName: true,
     };
-    if (q) {
-      const term = String(q).trim();
-      campWhere.AND = [
-        {
-          OR: [
-            { campaignName: { contains: term, mode: "insensitive" } },
-            { merchantNameRaw: { contains: term, mode: "insensitive" } },
-            { supplierCampaignId: { contains: term, mode: "insensitive" } },
-          ],
-        },
-      ];
-    }
 
-    const [totalCamp, camps] = await Promise.all([
-      this.db.supplierCampaign.count({ where: campWhere }),
-      this.db.supplierCampaign.findMany({
-        where: campWhere,
-        orderBy: { updatedAt: "desc" },
-        skip,
-        take,
-        select: {
-          id: true,
-          supplier: true,
-          campaignName: true,
-          merchantNameRaw: true,
-          supplierCampaignId: true,
-          defaultCommissionValue: true,
-          commissionUnit: true,
-          commissionCurrency: true,
-          currencyCode: true,
-          countryCodes: true,
-          categoryName: true,
-          commissionGroups: true,
-          updatedAt: true,
-        },
-      }),
-    ]);
-
-    const items = camps.map((sc) =>
-      toSupplierCommissionRuleDto(
-        {
-          id: `projected:${sc.id}`,
-          supplier: sc.supplier,
-          supplierRuleType: String(sc.commissionUnit || "").toUpperCase() === "PERCENT" ? "PERCENT" : "FIXED",
-          basis: String(sc.commissionUnit || "").toUpperCase() === "PERCENT" ? "PERCENT_OF_SALE" : "FIXED_AMOUNT",
-          ratePercent:
-            sc.defaultCommissionValue != null && String(sc.commissionUnit || "").toUpperCase() === "PERCENT"
-              ? Number(sc.defaultCommissionValue)
-              : null,
-          fixedAmount:
-            sc.defaultCommissionValue != null && String(sc.commissionUnit || "").toUpperCase() !== "PERCENT"
-              ? Number(sc.defaultCommissionValue)
-              : null,
-          currency: sc.commissionCurrency || sc.currencyCode,
-          country: Array.isArray(sc.countryCodes) ? sc.countryCodes.join(", ") : null,
-          categoryProductGoal: sc.categoryName,
-          mappingStatus:
-            (Array.isArray(sc.commissionGroups) ? sc.commissionGroups.length : 0) || sc.defaultCommissionValue != null
-              ? "MAPPED"
-              : "NEEDS_REVIEW",
-          sourcePath:
-            String(sc.commissionUnit || "").toUpperCase() === "PERCENT"
-              ? "default_commission_rate / commission"
-              : "defaultCommissionValue / commissionGroups",
-          projected: true,
-          updatedAt: sc.updatedAt,
-        },
-        { supplierCampaign: sc },
+    const canonicalRules = await this.db.supplierCommissionRule.findMany({
+      where: supplier ? { supplier } : {},
+      orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
+      take: maxRules,
+      include: {
+        conditions: true,
+        supplierCampaign: { select: campaignSelect },
+        campaignSource: { include: { supplierCampaign: { select: campaignSelect } } },
+      },
+    });
+    const canonicalCampaignIds = [
+      ...new Set(
+        canonicalRules
+          .map((rule) => rule.supplierCampaignId ?? rule.campaignSource?.supplierCampaignId ?? null)
+          .filter(Boolean),
       ),
-    );
+    ];
 
-    return { total: totalCamp, items };
+    // Fallback projection only for campaigns lacking persisted canonical rules.
+    const fallbackCampaigns = await this.db.supplierCampaign.findMany({
+      where: {
+        archivedAt: null,
+        ...(supplier ? { supplier } : {}),
+        ...(canonicalCampaignIds.length ? { id: { notIn: canonicalCampaignIds } } : {}),
+        OR: [{ defaultCommissionValue: { not: null } }, { commissionGroups: { not: null } }],
+      },
+      orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
+      take: maxFallbackCampaigns,
+      select: {
+        ...campaignSelect,
+        defaultCommissionValue: true,
+        commissionUnit: true,
+        commissionCurrency: true,
+        currencyCode: true,
+        commissionGroups: true,
+        rawPayload: true,
+        updatedAt: true,
+      },
+    });
+
+    const assembled = assembleSupplierCommissionRows({ canonicalRules, fallbackCampaigns });
+    const term = q ? String(q).trim() : "";
+    const allItems = assembled.rows.map(toListingDto).filter((dto) => matchesCommissionSearch(dto, term));
+    const items = allItems.slice(skip, skip + take);
+
+    return {
+      total: allItems.length,
+      items,
+      meta: {
+        canonicalRules: canonicalRules.length,
+        canonicalCampaigns: assembled.canonicalCampaigns,
+        projectedCampaigns: assembled.projectedCampaigns,
+        projectedRules: allItems.filter((item) => item.projected).length,
+        truncated: canonicalRules.length >= maxRules || fallbackCampaigns.length >= maxFallbackCampaigns,
+        note: "Persisted canonical SupplierCommissionRule rows are authoritative per campaign; projected rows are transitional display only.",
+      },
+    };
   }
 
   async createTestSupplierCommissionRule(input = {}) {

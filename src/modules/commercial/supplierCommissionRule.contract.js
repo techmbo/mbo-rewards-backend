@@ -104,6 +104,17 @@ export function toSupplierCommissionRuleDto(record, context = {}) {
     record.effectiveUntil && new Date(record.effectiveUntil) < new Date()
       ? "EXPIRED"
       : "ACTIVE";
+  const conditions = Array.isArray(record.conditions)
+    ? record.conditions.map((condition) => ({
+        id: condition?.id ?? null,
+        conditionType: condition?.conditionType ?? null,
+        operator: condition?.operator ?? null,
+        value: condition?.value ?? null,
+        sourceConditionType: condition?.sourceConditionType ?? null,
+        sourceConditionValue: condition?.sourceConditionValue ?? null,
+      }))
+    : [];
+  const campaignCountries = Array.isArray(campaign?.countryCodes) ? [...campaign.countryCodes] : [];
 
   return {
     id: record.id,
@@ -111,22 +122,35 @@ export function toSupplierCommissionRuleDto(record, context = {}) {
     brandName: campaign?.merchantNameRaw ?? context.brandName ?? null,
     campaignName: campaign?.campaignName ?? context.campaignName ?? null,
     supplierCampaignId: record.supplierCampaignId ?? campaign?.id ?? null,
+    /** Supplier-side campaign id (source lineage), distinct from the MBO SupplierCampaign db id. */
+    sourceCampaignId:
+      campaign?.supplierCampaignId ?? record.sourceCampaignId ?? record.metadata?.sourceCampaignId ?? null,
     campaignSourceId: record.campaignSourceId ?? cs?.id ?? null,
     supplierCommissionRuleId: record.sourceRuleId ?? record.id,
+    // Supplier lineage (never overwritten by MBO display labels).
     sourceRuleId: record.sourceRuleId ?? null,
+    sourceRuleName: record.sourceRuleName ?? null,
+    sourceGroupId: record.sourceGroupId ?? null,
+    sourceGroupName: record.sourceGroupName ?? null,
+    // Stable MBO outcome identity and display sequencing (Commission 1...N is display only).
+    outcomeKey: record.outcomeKey ?? null,
+    outcomeSlot: record.outcomeSlot ?? null,
+    commissionSequence: record.commissionSequence ?? null,
     commissionType: record.supplierRuleType ?? record.basis ?? "UNKNOWN",
+    basis: record.basis ?? null,
     commissionValue,
     ratePercent,
     fixedAmount,
     currency: record.currency ?? null,
+    // Rule-scoped fields only. Campaign metadata (countries/category) is context, never
+    // an implied rule restriction — see campaignCountries / campaignCategory.
     customerType: record.customerType ?? null,
-    country:
-      record.country ??
-      (Array.isArray(campaign?.countryCodes) && campaign.countryCodes.length
-        ? campaign.countryCodes.join(", ")
-        : null),
-    categoryProductGoal: record.categoryProductGoal ?? campaign?.categoryName ?? null,
+    country: record.country ?? null,
+    categoryProductGoal: record.categoryProductGoal ?? null,
     couponOrTier: record.couponOrTier ?? null,
+    conditions,
+    campaignCountries,
+    campaignCategory: campaign?.categoryName ?? null,
     effectiveFrom: record.effectiveFrom ?? null,
     effectiveUntil: record.effectiveUntil ?? null,
     sourceObject: record.sourceObject ?? null,
@@ -137,6 +161,7 @@ export function toSupplierCommissionRuleDto(record, context = {}) {
     ruleStatus: status,
     sourceFieldPath: record.sourcePath ?? record.sourceObject ?? "SupplierCommissionRule",
     projected: record.projected === true,
+    projectionNote: record.projectionNote ?? null,
     note: "Supplier commission rules are rate structure — not actual commission earned on orders.",
     lastModifiedAt: record.updatedAt ?? null,
   };
