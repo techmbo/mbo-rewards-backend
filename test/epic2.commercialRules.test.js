@@ -53,6 +53,10 @@ function ratioRule(overrides = {}) {
     status: "EFFECTIVE",
     currency: "USD",
     effectiveFrom: new Date("2025-01-01"),
+    // Financial recognition requires approved commercial agreement lineage.
+    agreementRef: "IO-2025-001",
+    agreementApprovedAt: new Date("2025-01-01"),
+    agreementApprovedBy: "finance-lead",
     ...overrides,
   };
 }
@@ -177,6 +181,7 @@ describe("Epic 2 — D manual approved commission", () => {
         commissionType: "MANUAL_APPROVED_CLIENT_COMMISSION",
         manualAmount: "40",
         manualApproved: true,
+        manualApprovedAt: new Date("2025-05-01"),
         manualApprovedBy: "ops-user",
       }),
     });
@@ -252,6 +257,8 @@ describe("Epic 2 — F SupplierCommissionRule fact attachment", () => {
         },
       },
     };
+    // Canonical persistence runs transactionally and requires the stable outcome identity.
+    db.$transaction = async (callback) => callback(db);
     const svc = new SupplierCommissionRuleService({ prisma: db });
     const created = await svc.upsertNormalizedFact({
       campaignSourceId: "src-1",
@@ -260,6 +267,7 @@ describe("Epic 2 — F SupplierCommissionRule fact attachment", () => {
       ratePercent: "8",
       currency: "USD",
       effectiveFrom: new Date("2025-01-01"),
+      outcomeKey: "src-1::campaigns::commission::network-rule-1::PERCENT::PERCENT_OF_SALE::::slot:1::",
     });
     assert.equal(created.id, "scr-1");
     const found = await svc.findEffectiveForCampaignSource("src-1", new Date("2025-06-01"));
@@ -384,6 +392,9 @@ function epic2FinanceMock({ rule = ratioRule(), conversionOverrides = {}, orderO
         if (assignmentId !== "asg-1") return null;
         return rule.assignmentId === assignmentId ? rule : null;
       },
+      // Financial recognition matches against ALL effective rules of the assignment.
+      findEffectiveRulesForAssignment: async (assignmentId) =>
+        assignmentId === "asg-1" && rule.assignmentId === assignmentId ? [rule] : [],
     },
   };
 }
@@ -403,8 +414,8 @@ describe("Epic 2 — I/J reversal + idempotency via FT", () => {
 
     const first = await svc2.recognizeConversion({ conversionId: "cv-1", orderId: "ord-1" });
     assert.equal(first.created, true);
-    assert.equal(String(first.record.clientPayable), "70.0000");
-    assert.equal(String(first.record.mboMargin), "30.0000");
+    assert.equal(Number(first.record.clientPayable), 70);
+    assert.equal(Number(first.record.mboMargin), 30);
     const originalId = first.record.id;
     const originalPayable = first.record.clientPayable;
 
@@ -430,6 +441,8 @@ describe("Epic 2 — K tenant isolation on rule resolution", () => {
     const commissionRepo = {
       findEffectiveForAssignment: async (assignmentId) =>
         assignmentId === "asg-a" ? rule : null,
+      findEffectiveRulesForAssignment: async (assignmentId) =>
+        assignmentId === "asg-a" ? [rule] : [],
     };
     db.conversion.findUnique = async () => ({
       ...conversionBase,
@@ -440,6 +453,7 @@ describe("Epic 2 — K tenant isolation on rule resolution", () => {
         id: "ord-b",
         clientId: "client-b",
         clientAssignmentId: "asg-b",
+        items: [],
       },
       clientAssignment: {
         id: "asg-b",
@@ -462,7 +476,8 @@ describe("Epic 2 — K tenant isolation on rule resolution", () => {
     });
     const result = await svc.recognizeConversion({ conversionId: "cv-b", orderId: "ord-b" });
     assert.equal(result.unresolved, true);
-    assert.equal(result.reason, "missing_effective_commission_rule");
+    // Client B's assignment has no effective rule of its own; Client A's rule is never matched.
+    assert.equal(result.reason, "no_client_commercial_rule_matched");
   });
 });
 
@@ -518,15 +533,23 @@ describe("Epic 2 — L golden path Client→Rule→Conversion→Engine→FT", ()
     const recognized = await svc.recognizeConversion({ conversionId: "cv-1", orderId: "ord-1" });
     assert.equal(recognized.created, true);
     assert.equal(recognized.record.recognitionKey, earnRecognitionKey("cv-1"));
-    assert.equal(String(recognized.record.supplierReceivable), "250.0000");
-    assert.equal(String(recognized.record.clientPayable), "150.0000");
-    assert.equal(String(recognized.record.mboMargin), "100.0000");
+    assert.equal(Number(recognized.record.supplierReceivable), 250);
+    assert.equal(Number(recognized.record.clientPayable), 150);
+    assert.equal(Number(recognized.record.mboMargin), 100);
     assert.equal(
       Number(recognized.record.supplierReceivable) -
         Number(recognized.record.clientPayable) -
         Number(recognized.record.mboMargin),
       0,
     );
-    assert.equal(recognized.record.calculationMetadata.supplierCommissionRuleId, "scr-gold");
+    // Deterministic runtime lineage: supplier receivable is the network actual commission truth
+    // (conversion.approvedCommission), the client share comes from the matched rule, and the
+    // approved agreement lineage is recorded on the FT.
+    assert.equal(recognized.record.calculationMetadata.engine, "ClientCommercialRuntimeService");
+    assert.equal(recognized.record.calculationMetadata.payoutBasis, "NETWORK_ACTUAL_COMMISSION");
+    assert.equal(recognized.record.calculationMetadata.networkActualCommissionSource, "conversion.approvedCommission");
+    assert.equal(recognized.record.calculationMetadata.lineage.status, "COMPLETE");
+    assert.equal(recognized.record.calculationMetadata.lineage.agreementRef, "IO-2025-001");
+    assert.equal(recognized.record.commissionRuleId, "rule-ratio");
   });
 });

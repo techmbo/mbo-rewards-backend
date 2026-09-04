@@ -167,12 +167,17 @@ describe("Epic 7 — commission vocabulary + TIERED hygiene", () => {
   });
 
   it("historical TIERED remains readable; activate blocked", async () => {
+    // A historical TIERED row without persisted tier bands stays readable but can never be
+    // activated, even with complete agreement lineage.
     const historical = {
       id: "rule-t",
       commissionType: "TIERED",
       status: "DRAFT",
       assignmentId: "a1",
       effectiveFrom: new Date(),
+      agreementRef: "IO-2024-001",
+      agreementApprovedAt: new Date("2024-01-01"),
+      agreementApprovedBy: "finance-lead",
     };
     assert.equal(historical.commissionType, "TIERED");
     const svc = new CommercialService({
@@ -183,7 +188,10 @@ describe("Epic 7 — commission vocabulary + TIERED hygiene", () => {
         },
       },
     });
-    await assert.rejects(() => svc.activateCommissionRule("rule-t"), /TIERED_CLIENT_RULE_NOT_IMPLEMENTED/);
+    await assert.rejects(
+      () => svc.activateCommissionRule("rule-t"),
+      (e) => e.statusCode === 409 && /TIERED rules require tierMetric, tierPeriod and at least one persisted tier/.test(e.message),
+    );
   });
 });
 

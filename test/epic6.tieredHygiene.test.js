@@ -9,10 +9,7 @@ import {
   V15_RULE_TYPES,
 } from "../src/modules/commercial/commercialRuleEngine.js";
 import { CommercialService } from "../src/modules/commercial/services/commercial.service.js";
-import {
-  createCommissionRuleBodySchema,
-  TIERED_NOT_IMPLEMENTED_MESSAGE,
-} from "../src/modules/commercial/validators/schemas.js";
+import { createCommissionRuleBodySchema } from "../src/modules/commercial/validators/schemas.js";
 import {
   FinancialTransactionService,
   earnRecognitionKey,
@@ -59,6 +56,10 @@ function ratioRule(overrides = {}) {
     status: "EFFECTIVE",
     currency: "USD",
     effectiveFrom: new Date("2025-01-01"),
+    // Financial recognition requires approved commercial agreement lineage.
+    agreementRef: "IO-2025-001",
+    agreementApprovedAt: new Date("2025-01-01"),
+    agreementApprovedBy: "finance-lead",
     ...overrides,
   };
 }
@@ -119,11 +120,15 @@ describe("Epic 6-A — TIERED never calculates as PERCENT", () => {
       commissionRepo: {
         findEffectiveForAssignment: async () =>
           ratioRule({ commissionType: "TIERED", status: "EFFECTIVE" }),
+        findEffectiveRulesForAssignment: async () => [
+          ratioRule({ commissionType: "TIERED", status: "EFFECTIVE" }),
+        ],
       },
     });
+    // A TIERED rule without persisted tier metric/bands never yields a financial transaction.
     const out = await finance.recognizeConversion({ conversionId: "cv-tier", orderId: "ord-1" });
     assert.equal(out.unresolved, true);
-    assert.equal(out.reason, "tiered_not_implemented");
+    assert.equal(out.reason, "unsupported_or_missing_tier_metric");
     assert.equal(out.record, null);
     assert.equal(ftStore.size, 0);
     assert.ok(exceptions.some((e) => e.type === "COMMISSION_INVALID"));
@@ -183,6 +188,8 @@ describe("Epic 6-A — existing Epic 2 engines unchanged", () => {
         commissionType: "MANUAL_APPROVED_CLIENT_COMMISSION",
         manualAmount: "12.5",
         manualApproved: true,
+        manualApprovedAt: new Date("2025-05-01"),
+        manualApprovedBy: "ops-user",
         clientCommission: "12.5",
         mboCommission: "87.5",
       }),
@@ -219,6 +226,9 @@ describe("Epic 6-A — historical TIERED + activation block", () => {
       clientCommission: "70",
       mboCommission: "30",
       effectiveFrom: new Date("2024-01-01"),
+      agreementRef: "IO-2024-001",
+      agreementApprovedAt: new Date("2024-01-01"),
+      agreementApprovedBy: "finance-lead",
     };
     const svc = new CommercialService({
       commissionRepo: {
@@ -238,7 +248,7 @@ describe("Epic 6-A — historical TIERED + activation block", () => {
       () => svc.activateCommissionRule("rule-tier-hist"),
       (e) =>
         e.statusCode === 409 &&
-        String(e.message).includes("TIERED_CLIENT_RULE_NOT_IMPLEMENTED"),
+        /TIERED rules require tierMetric, tierPeriod and at least one persisted tier/.test(String(e.message)),
     );
   });
 
@@ -252,7 +262,8 @@ describe("Epic 6-A — historical TIERED + activation block", () => {
       activate: true,
     });
     assert.equal(parsed.success, false);
-    const draftOk = createCommissionRuleBodySchema.safeParse({
+    // A TIERED rule is only acceptable, even as a draft, with its tier metric, period and bands.
+    const bandless = createCommissionRuleBodySchema.safeParse({
       assignmentId: "asg-1",
       commissionType: "TIERED",
       grossCommission: "100",
@@ -260,8 +271,19 @@ describe("Epic 6-A — historical TIERED + activation block", () => {
       effectiveFrom: "2025-01-01",
       activate: false,
     });
-    assert.equal(draftOk.success, true);
-    assert.ok(TIERED_NOT_IMPLEMENTED_MESSAGE.includes("TIERED_CLIENT_RULE_NOT_IMPLEMENTED"));
+    assert.equal(bandless.success, false);
+    const draftOk = createCommissionRuleBodySchema.safeParse({
+      assignmentId: "asg-1",
+      commissionType: "TIERED",
+      grossCommission: "100",
+      clientCommission: "70",
+      effectiveFrom: "2025-01-01",
+      activate: false,
+      tierMetric: "ORDER_COUNT",
+      tierPeriod: "MONTHLY",
+      tiers: [{ minInclusive: 0, payoutType: "PERCENT_OF_SUPPLIER_COMMISSION", sharePercent: 50 }],
+    });
+    assert.equal(draftOk.success, true, JSON.stringify(draftOk.error?.issues ?? []));
   });
 
   it("service rejects create activate for TIERED before write", async () => {
@@ -290,7 +312,7 @@ describe("Epic 6-A — historical TIERED + activation block", () => {
           effectiveFrom: new Date("2025-01-01"),
           activate: true,
         }),
-      (e) => String(e.message).includes("TIERED_CLIENT_RULE_NOT_IMPLEMENTED"),
+      (e) => /approval lineage is required/.test(String(e.message)),
     );
   });
 });

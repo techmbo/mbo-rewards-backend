@@ -17,6 +17,7 @@ import {
   evaluatePayableEligibility,
 } from "../src/modules/networkOps/payableEligibilitySeparation.contract.js";
 import { AiIntegrationGuideService } from "../src/modules/networkOps/aiIntegrationGuide.service.js";
+import { runOrderReconciliationChecks } from "../src/modules/finance/reconciliation.service.js";
 import { apiRequest, startTestServer } from "./helpers/httpClient.js";
 
 describe("Pointer 44 — payableEligibilitySeparation.contract", () => {
@@ -113,16 +114,33 @@ describe("Pointer 44 — payableEligibilitySeparation.contract", () => {
   });
 
   it("evaluatePayableEligibility reaches ELIGIBLE when finance chain is complete", () => {
+    // A complete finance chain includes reconciled network evidence: eligibility fails closed
+    // without reconciliation checks, so the order carries supplier identity, network amounts,
+    // the MBO bank receipt, and a recognized FT that reconciles against them.
+    const order = {
+      id: "ord-1",
+      supplierOrderId: "net-order-1",
+      currency: "USD",
+      validationStatus: "VALIDATION_APPROVED",
+      metadata: {
+        networkPaymentEvidence: "PAID",
+        networkCommission: "100",
+        networkInvoiceAmount: "100",
+        networkPaymentAmount: "100",
+        mboReceivedDateTime: "2026-08-15T10:00:00.000Z",
+        mboReceiptSource: "BANK_RECONCILIATION",
+        mboReceivedAmount: "100",
+        mboReceivedCurrency: "USD",
+      },
+    };
+    const financialTransactions = [
+      { id: "ft-1", supplierReceivable: "100", clientPayable: "100", transactionType: "EARN", originalCurrency: "USD", metadata: {}, calculationMetadata: {} },
+    ];
     const result = evaluatePayableEligibility({
       calculatedClientCommission: 805,
-      order: {
-        validationStatus: "VALIDATION_APPROVED",
-        metadata: {
-          networkPaymentEvidence: "PAID",
-          mboReceivedDateTime: "2026-08-15T10:00:00.000Z",
-          mboReceiptSource: "BANK_RECONCILIATION",
-        },
-      },
+      order,
+      financialTransactions,
+      reconciliationChecks: runOrderReconciliationChecks({ order, financialTransactions }).checks,
     });
     assert.equal(result.status, PAYABLE_ELIGIBILITY_STATUS.ELIGIBLE);
     assert.equal(result.eligible, true);

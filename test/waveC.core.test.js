@@ -352,7 +352,10 @@ describe("Wave C — payment state machines", () => {
         update: async ({ data }) => ({ ...order, ...data }),
       },
       financialTransaction: {
-        findMany: async () => [],
+        // Client payable release reconciles the recognized FT against network evidence.
+        findMany: async () => [
+          { id: "ft-1", supplierReceivable: "100", clientPayable: "100", transactionType: "EARN", originalCurrency: "USD", metadata: {}, calculationMetadata: {} },
+        ],
       },
       exceptionCase: {
         findFirst: async () => null,
@@ -371,10 +374,18 @@ describe("Wave C — payment state machines", () => {
       (e) => e.statusCode === 409,
     );
 
+    // Complete finance chain: supplier-side order identity, network amounts, and the MBO bank receipt.
+    order.supplierOrderId = "net-order-1";
+    order.currency = "USD";
     order.supplierPaymentStatus = "PAYMENT_RECEIVED";
     order.metadata = {
+      networkCommission: "100",
+      networkInvoiceAmount: "100",
+      networkPaymentAmount: "100",
       mboReceivedDateTime: "2026-08-15T10:30:00.000Z",
       mboReceiptSource: "BANK_RECONCILIATION",
+      mboReceivedAmount: "100",
+      mboReceivedCurrency: "USD",
       bankReference: "BNK-001",
     };
     const updated = await service.transitionClientPayment("ord1", "CLIENT_PAYMENT_PAYABLE");

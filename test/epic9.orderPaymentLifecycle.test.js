@@ -35,6 +35,10 @@ const percentRule = {
   clientCommission: "70",
   mboCommission: "30",
   currency: "USD",
+  // Financial recognition requires approved commercial agreement lineage.
+  agreementRef: "IO-2025-001",
+  agreementApprovedAt: new Date("2025-01-01"),
+  agreementApprovedBy: "finance-lead",
 };
 
 const orderValueRule = {
@@ -62,6 +66,8 @@ const manualRule = {
   status: "EFFECTIVE",
   commissionType: "MANUAL_APPROVED_CLIENT_COMMISSION",
   manualApproved: true,
+  manualApprovedAt: new Date("2025-05-01"),
+  manualApprovedBy: "ops-user",
   manualAmount: "25",
   currency: "USD",
 };
@@ -456,6 +462,7 @@ describe("Epic 9 — FT identity and margin", () => {
       prisma: db,
       commissionRepo: {
         findEffectiveForAssignment: async () => percentRule,
+        findEffectiveRulesForAssignment: async () => [percentRule],
       },
       exceptions: { report: async () => ({}) },
       audit: { record: async () => {} },

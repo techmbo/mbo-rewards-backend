@@ -30,6 +30,10 @@ const rule70 = {
   status: "EFFECTIVE",
   currency: "USD",
   effectiveFrom: new Date("2025-01-01"),
+  // Financial recognition requires approved commercial agreement lineage.
+  agreementRef: "IO-2025-001",
+  agreementApprovedAt: new Date("2025-01-01"),
+  agreementApprovedBy: "finance-lead",
 };
 
 describe("Wave D — commission calculation", () => {
@@ -324,16 +328,16 @@ describe("Wave D — financial recognition + late rejection", () => {
       exceptions: new ExceptionCaseService({ prisma: db, audit: { record: async () => ({}) } }),
       fx: new FxService({ rateProvider: rates }),
       commissionRepo: {
-        findEffectiveForAssignment: async () => rule70,
+        findEffectiveForAssignment: async () => rule70, findEffectiveRulesForAssignment: async () => [rule70],
       },
     });
 
     const first = await finance.recognizeConversion({ conversionId: "cv-1", orderId: "ord-1" });
     assert.equal(first.created, true);
     assert.equal(first.record.recognitionKey, earnRecognitionKey("cv-1"));
-    assert.equal(String(first.record.supplierReceivable), "800.0000");
-    assert.equal(String(first.record.clientPayable), "560.0000");
-    assert.equal(String(first.record.mboMargin), "240.0000");
+    assert.equal(Number(first.record.supplierReceivable), 800);
+    assert.equal(Number(first.record.clientPayable), 560);
+    assert.equal(Number(first.record.mboMargin), 240);
 
     const second = await finance.recognizeConversion({ conversionId: "cv-1", orderId: "ord-1" });
     assert.equal(second.reused, true);
@@ -360,7 +364,7 @@ describe("Wave D — financial recognition + late rejection", () => {
     assert.equal(net.net.reconciles, true);
     assert.equal(net.rows.length, 2);
     assert.equal(net.rows[0].status, "FINANCIAL_REVERSED");
-    assert.equal(String(net.rows[0].clientPayable), "560.0000"); // original immutable
+    assert.equal(Number(net.rows[0].clientPayable), 560); // original immutable
   });
 
   it("supplier correction creates adjustment leaving original intact", async () => {
@@ -370,7 +374,7 @@ describe("Wave D — financial recognition + late rejection", () => {
       audit: { record: async () => ({}) },
       exceptions: new ExceptionCaseService({ prisma: db, audit: { record: async () => ({}) } }),
       fx: new FxService({ rateProvider: new Map([["USD:USD:2025-06-01", "1"]]) }),
-      commissionRepo: { findEffectiveForAssignment: async () => rule70 },
+      commissionRepo: { findEffectiveForAssignment: async () => rule70, findEffectiveRulesForAssignment: async () => [rule70] },
     });
 
     const earn = await finance.recognizeConversion({ conversionId: "cv-1" });
@@ -386,7 +390,7 @@ describe("Wave D — financial recognition + late rejection", () => {
       correctionKey: "corr-1",
     });
     assert.equal(adj.created, true);
-    assert.equal(String(earn.record.clientPayable), "560.0000");
+    assert.equal(Number(earn.record.clientPayable), 560);
     const net = await finance.netPositionForConversion("cv-1");
     assert.equal(net.net.supplierReceivable, "600.0000");
     assert.equal(net.net.clientPayable, "420.0000");
@@ -448,7 +452,7 @@ describe("Wave D — reconciliation + statements + invoices + tenant isolation",
       periodEnd: "2025-06-30",
       currency: "USD",
     });
-    assert.equal(String(statement.closingBalance), "70.0000");
+    assert.equal(Number(statement.closingBalance), 70);
 
     const invoices = new InvoiceService({
       prisma: db,
@@ -462,7 +466,7 @@ describe("Wave D — reconciliation + statements + invoices + tenant isolation",
       invoiceNumber: "INV-TEST-1",
     });
     assert.equal(invoice.status, "DRAFT");
-    assert.equal(String(invoice.total), "70.0000");
+    assert.equal(Number(invoice.total), 70);
 
     await invoices.issue(invoice.id, "client-a");
     await assert.rejects(
@@ -495,7 +499,7 @@ describe("Wave D — reconciliation + statements + invoices + tenant isolation",
       audit: { record: async () => ({}) },
       exceptions: new ExceptionCaseService({ prisma: db, audit: { record: async () => ({}) } }),
       fx: new FxService({ rateProvider: new Map() }),
-      commissionRepo: { findEffectiveForAssignment: async () => rule70 },
+      commissionRepo: { findEffectiveForAssignment: async () => rule70, findEffectiveRulesForAssignment: async () => [rule70] },
     });
     await assert.rejects(
       () => finance.getForClient([...db._ft.values()][0].id, "client-b"),
