@@ -13,16 +13,10 @@
 
 import { collectEmbeddedCommissionRulesFromCampaigns } from "../commercial/supplierCommissionRuleFanOut.js";
 import { toSupplierCommissionRuleDto } from "../commercial/supplierCommissionRule.contract.js";
-
-const UNVERIFIED_CONDITION_TYPES = new Set([
-  "OTHER_SOURCE_CONDITION",
-  "COMMISSION_TIER",
-  "PERFORMANCE_THRESHOLD",
-  "CUSTOM_FIELD",
-]);
-
-const EXPLICIT_UNIT_RE =
-  /%|\bor\b|\$|£|€|₹|\b(?:rp|rm|rs\.?|usd|aed|sar|gbp|eur|idr|myr|sgd|hkd|thb|inr)\b|percent|fixed|flat|cpa|cpl|cpc|cpm|cps/i;
+import {
+  assessSupplierCommissionReadiness,
+  sourceCommissionText as readinessSourceText,
+} from "../commercial/supplierCommissionReadiness.js";
 
 function present(value) {
   return value !== null && value !== undefined && !(typeof value === "string" && value.trim() === "");
@@ -74,25 +68,22 @@ function sourceCommissionText(entry) {
 }
 
 /**
- * Mapping/review status for a projected outcome. Ambiguous supplier text ("Up to 10%",
- * bare numbers with no unit, tier/threshold/unknown conditions) never becomes clean
- * MAPPED financial truth.
+ * Mapping/review status for a projected outcome — delegates to the central readiness
+ * assessment so Network Ops never disagrees with the commission engine. Ambiguous supplier
+ * text ("Up to 10%", bare numbers with no unit, tier/threshold/unknown conditions) never
+ * becomes clean MAPPED financial truth.
  */
 export function projectedMappingStatus(rule, { display = null } = {}) {
-  const reasons = [];
-  const entryText = sourceCommissionText(rule?.rawRuleReference) ?? "";
-  if (/^\s*up\s*to/i.test(display ?? "") || /up\s*to/i.test(entryText)) reasons.push("up_to_ceiling_not_exact_rate");
-  if (entryText && !EXPLICIT_UNIT_RE.test(entryText)) reasons.push("commission_unit_not_explicit");
-  const conditions = Array.isArray(rule?.conditions) ? rule.conditions : [];
-  if (conditions.some((c) => UNVERIFIED_CONDITION_TYPES.has(c?.conditionType))) {
-    reasons.push("unverified_condition_semantics");
-  }
-  if (rule?.ratePercent == null && rule?.fixedAmount == null) reasons.push("no_numeric_commission_outcome");
-  if (rule?.fixedAmount != null && !rule?.currency) reasons.push("fixed_payout_currency_missing");
+  const assessment = assessSupplierCommissionReadiness(
+    { ...rule, metadata: null },
+    { sourceText: readinessSourceText(rule?.rawRuleReference), factDisplay: display ?? rule?.metadata?.factDisplay ?? null },
+  );
   return {
-    mappingStatus: reasons.length ? "REVIEW_REQUIRED" : "MAPPED",
-    fieldMappingOutcome: reasons.length ? "REVIEW_REQUIRED" : "MAPPED",
-    reviewReasons: reasons,
+    mappingStatus: assessment.mappingStatus,
+    fieldMappingOutcome: assessment.fieldMappingOutcome,
+    reviewReasons: assessment.reviewReasons,
+    financeReady: assessment.financeReady,
+    semanticStatus: assessment.semanticStatus,
   };
 }
 
@@ -174,7 +165,13 @@ export function projectCampaignCommissionOutcomes(sc = {}) {
       fieldMappingOutcome: status.fieldMappingOutcome,
       ruleVersion: "PROJECTED",
       rawRuleReference: rule.rawRuleReference ?? null,
-      metadata: { reviewReasons: status.reviewReasons, projected: true },
+      metadata: {
+        ...(rule.metadata ?? {}),
+        reviewReasons: status.reviewReasons,
+        financeReady: false,
+        semanticStatus: status.semanticStatus,
+        projected: true,
+      },
       projected: true,
       projectionNote:
         "Projected from campaign commission evidence; not a persisted canonical SupplierCommissionRule and never order payout truth.",

@@ -29,7 +29,7 @@ const {
 const { OPTIMISE_RESOURCE_ENDPOINTS, buildOptimiseSyncMetadata } = await import("../src/jobs/optimiseResourceSync.js");
 const { OPTIMISE_RESOURCE_IDENTITY } = await import("../src/jobs/sourceObjectRuns.js");
 const { getSourceObject } = await import("../src/modules/networkOps/sourceObjects.catalog.js");
-const { matchSupplierCommissionRule } = await import("../src/modules/commercial/supplierCommissionMatcher.js");
+const { evaluateSupplierCommissionRule, matchSupplierCommissionRule } = await import("../src/modules/commercial/supplierCommissionMatcher.js");
 
 const CONTEXT = {
   sourceCampaignId: "123",
@@ -991,11 +991,16 @@ describe("Optimise commission groups — array-order-independent band and condit
     assert.equal(rules[0].outcomeKey, reordered[0].outcomeKey);
     const supplierConditions = rules[0].conditions.filter((c) => c.conditionType === "COUNTRY");
     assert.equal(supplierConditions.length, 2, "both alternatives persisted as separate same-dimension conditions");
-    const evaluated = matchSupplierCommissionRule({
-      rules: [{ ...rules[0], id: "r1", conditions: supplierConditions }],
-      facts: { country: "AE", orderValue: 100, currency: "USD" },
-    });
-    assert.equal(evaluated.status, "MATCHED", "AE OR SA still matches AE — grouping was not turned into AND");
+    // Grouping semantics: AE OR SA still matches AE (not turned into AND) — proven on the evaluator.
+    const asRule = { ...rules[0], id: "r1", conditions: supplierConditions };
+    assert.equal(evaluateSupplierCommissionRule(asRule, { country: "AE" }).state, "MATCH");
+    assert.equal(evaluateSupplierCommissionRule(asRule, { country: "SA" }).state, "MATCH");
+    assert.equal(evaluateSupplierCommissionRule(asRule, { country: "US" }).state, "NO_MATCH");
+    // The Optimise mapper marked this condition-bearing rule VERIFY_LIVE (financeReady=false), so
+    // the matcher must fail closed rather than calculate from unverified semantics.
+    const evaluated = matchSupplierCommissionRule({ rules: [asRule], facts: { country: "AE", orderValue: 100, currency: "USD" } });
+    assert.equal(evaluated.status, "REVIEW_REQUIRED");
+    assert.equal(evaluated.expectedSupplierCommission, null);
   });
 
   it("4. rate change plus reorder versions the same logical band rule", async () => {

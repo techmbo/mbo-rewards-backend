@@ -122,8 +122,14 @@ export async function upsertCommissionRulesForPreparedCampaigns(
         country: rule.country,
         categoryProductGoal: rule.categoryProductGoal,
         couponOrTier: rule.couponOrTier,
+        conditions: rule.conditions ?? [],
+        outcomeKey: rule.outcomeKey,
         sourceObject: rule.sourceObject,
         sourcePath: rule.sourcePath,
+        // Fan-out already assessed readiness (with source text); keep its decision.
+        mappingStatus: rule.mappingStatus ?? null,
+        fieldMappingOutcome: rule.fieldMappingOutcome ?? null,
+        metadata: rule.metadata ?? null,
       },
       {
         networkSource,
@@ -179,6 +185,7 @@ export async function upsertCommissionRulesForPreparedCampaigns(
       rawPayloadId: rule.rawPayloadId ?? null,
       rawRuleReference: rule.rawRuleReference ?? null,
       metadata: {
+        ...(enriched.metadata ?? {}),
         brandName: sc?.merchantNameRaw ?? null,
         campaignName: sc?.campaignName ?? null,
         sourceCampaignId: campaignKey,

@@ -9,6 +9,13 @@ import {
   collectSourceEntries,
   listCampaignCommissionFacts,
 } from "../ops/campaignCommissions.js";
+import {
+  anonymousRuleIdentity,
+  assessSupplierCommissionReadiness,
+  canonicalConditionSignature,
+  readinessMetadata,
+  sourceCommissionText,
+} from "./supplierCommissionReadiness.js";
 
 function campaignIdFromRaw(raw = {}) {
   return raw.id ?? raw.campaignId ?? raw.campaign_id ?? raw.CampaignId ?? raw.campaignID ?? raw.productId ?? raw.product_id ?? null;
@@ -245,10 +252,9 @@ function sourceGroupIdFromEntry(entry = {}) {
   );
 }
 
+/** Order-independent identity signature (see supplierCommissionReadiness). */
 function conditionSignature(conditions = []) {
-  return conditions
-    .map((condition) => `${condition.conditionType}:${condition.operator ?? ""}:${condition.value}`)
-    .join("|");
+  return canonicalConditionSignature(conditions);
 }
 
 /**
@@ -258,8 +264,9 @@ function conditionSignature(conditions = []) {
  * (for example 10% -> 12%) must create a new effective version of the same logical
  * outcome, not a brand-new lineage. `outcomeSlot` separates multiple otherwise
  * identical payout outcomes inside one source entry without making the value part
- * of identity. `sourceEntryIndex` is used only when the supplier provides no rule or
- * group ID, preventing anonymous commission groups from collapsing together.
+ * of identity. Supplier rule/group ids are used unchanged; when both are missing the
+ * identity is a deterministic fingerprint of stable non-economic semantics — never the
+ * source array position (see anonymousRuleIdentity), which stays in sourcePath/evidence.
  */
 function stableOutcomeKey({
   campaignId,
@@ -267,12 +274,12 @@ function stableOutcomeKey({
   sourcePath,
   sourceRuleId,
   sourceGroupId,
-  sourceEntryIndex,
+  identity,
   fact,
   conditions,
   outcomeSlot,
 }) {
-  const sourceIdentity = sourceRuleId ?? sourceGroupId ?? `ANON_SOURCE_ENTRY_${sourceEntryIndex ?? 1}`;
+  const sourceIdentity = sourceRuleId ?? sourceGroupId ?? identity?.key ?? "ANON_UNIDENTIFIED:none";
   const currency = fact?.currency ?? "";
   const basis = fact?.basis ?? (fact?.kind === "PERCENT" ? "PERCENT_OF_SALE" : fact?.kind === "FIXED" ? "FIXED_AMOUNT" : "UNKNOWN");
   const conditionPart = conditionSignature(conditions);
@@ -314,26 +321,70 @@ function normalizeRuleEntry(entry, {
     asString(entry.commission_type ?? entry.commissionType ?? entry.type) ??
     (fact.kind === "PERCENT" ? "PERCENTAGE" : fact.kind === "FIXED" ? "FIXED" : "OTHER");
   const basis = fact.basis ?? (fact.kind === "PERCENT" ? "PERCENT_OF_SALE" : fact.kind === "FIXED" ? "FIXED_AMOUNT" : "UNKNOWN");
+  const sourceGroupName = asString(
+    entry.group_name ?? entry.groupName ?? entry.commission_group_name ?? entry.commissionGroupName,
+  );
+  const sourceRuleName = asString(entry.rule_name ?? entry.ruleName ?? entry.name ?? entry.title);
+  const customerType = asString(entry.customer_type ?? entry.customerType ?? entry.audience);
+  const country = asString(entry.country ?? entry.country_code);
+  const categoryProductGoal = asString(
+    entry.category ?? entry.product ?? entry.goal ?? entry.scope ?? entry.vertical ?? entry.product_category,
+  );
+  const couponOrTier = asString(
+    entry.tier ?? entry.coupon ?? entry.coupon_code ?? entry.couponCode ?? entry.couponOrTier,
+  );
+  const actionType = asString(entry.action_type ?? entry.actionType ?? entry.action);
+
+  const identity =
+    sourceRuleId || sourceGroupId
+      ? { strategy: "SUPPLIER_ID", sufficient: true, key: sourceRuleId ?? sourceGroupId, inputs: null }
+      : anonymousRuleIdentity({
+          entry,
+          conditions,
+          kind: fact.kind,
+          basis,
+          currency: fact.kind === "FIXED" ? fact.currency ?? null : null,
+          name: sourceRuleName ?? sourceGroupName,
+          commissionModel,
+          commissionType: asString(entry.commission_type ?? entry.commissionType ?? entry.type),
+          customerType,
+          country,
+          categoryProductGoal,
+          couponOrTier,
+          actionType,
+        });
+
+  const outcomeKey = stableOutcomeKey({
+    campaignId,
+    sourceObject,
+    sourcePath,
+    sourceRuleId,
+    sourceGroupId,
+    identity,
+    fact,
+    conditions,
+    outcomeSlot,
+  });
+
+  const readiness = assessSupplierCommissionReadiness(
+    {
+      ratePercent: fact.kind === "PERCENT" ? fact.value : null,
+      fixedAmount: fact.kind === "FIXED" ? fact.value : null,
+      basis,
+      currency: fact.currency ?? null,
+      conditions,
+      outcomeKey,
+    },
+    { sourceText: sourceCommissionText(entry), factDisplay: fact.display, identity },
+  );
 
   return {
     sourceCampaignId: campaignId != null ? String(campaignId) : null,
     sourceGroupId,
-    sourceGroupName: asString(
-      entry.group_name ?? entry.groupName ?? entry.commission_group_name ?? entry.commissionGroupName,
-    ),
+    sourceGroupName,
     sourceRuleId,
-    sourceRuleName: asString(entry.rule_name ?? entry.ruleName ?? entry.name ?? entry.title),
-    outcomeKey: stableOutcomeKey({
-      campaignId,
-      sourceObject,
-      sourcePath,
-      sourceRuleId,
-      sourceGroupId,
-      sourceEntryIndex,
-      fact,
-      conditions,
-      outcomeSlot,
-    }),
+    sourceRuleName,
+    outcomeKey,
     outcomeSlot,
     commissionSequence,
     commissionModel,
@@ -343,24 +394,15 @@ function normalizeRuleEntry(entry, {
     ratePercent: fact.kind === "PERCENT" ? fact.value : null,
     fixedAmount: fact.kind === "FIXED" ? fact.value : null,
     currency: fact.currency ?? null,
-    actionType: asString(entry.action_type ?? entry.actionType ?? entry.action),
+    actionType,
     priority: asNumber(entry.priority),
     rank: asNumber(entry.rank),
 
     // Convenience/display fields retained for backward compatibility only.
-    customerType: asString(entry.customer_type ?? entry.customerType ?? entry.audience),
-    country: asString(entry.country ?? entry.country_code),
-    categoryProductGoal: asString(
-      entry.category ??
-        entry.product ??
-        entry.goal ??
-        entry.scope ??
-        entry.vertical ??
-        entry.product_category,
-    ),
-    couponOrTier: asString(
-      entry.tier ?? entry.coupon ?? entry.coupon_code ?? entry.couponCode ?? entry.couponOrTier,
-    ),
+    customerType,
+    country,
+    categoryProductGoal,
+    couponOrTier,
 
     conditions,
     effectiveFrom: entry.effective_from ?? entry.effectiveFrom ?? entry.start_date ?? null,
@@ -369,6 +411,16 @@ function normalizeRuleEntry(entry, {
     sourcePath,
     _mboSourcePath: sourcePath,
     _mboSourceObject: sourceObject,
+    // Readiness is assessed centrally; a numeric rate alone is never finance-ready.
+    mappingStatus: readiness.mappingStatus,
+    fieldMappingOutcome: readiness.fieldMappingOutcome,
+    metadata: readinessMetadata(readiness, {
+      identityStrategy: identity.strategy,
+      identitySufficient: identity.sufficient,
+      identityInputs: identity.inputs,
+      sourceEntryIndex, // evidence/debug only — never identity
+      factDisplay: fact.display,
+    }),
     rawRuleReference: entry,
     record_source: "commission_rule",
   };

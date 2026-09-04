@@ -6,13 +6,29 @@
 
 import { FIELD_MAPPING_OUTCOME } from "../mapping/mappingOutcome.contract.js";
 import { formatCommissionSummary } from "../ops/v15FieldContract.js";
+import { assessSupplierCommissionReadiness, readinessMetadata } from "./supplierCommissionReadiness.js";
 
+/**
+ * Canonical SupplierCommissionRule contract fields (persisted columns, child relation and
+ * derived DTO fields). Commission 1...N is display sequencing only — there are no
+ * commission_1 / commission_2 columns.
+ */
 export const SUPPLIER_COMMISSION_RULE_FIELDS = Object.freeze([
   "networkSource",
   "supplierCampaignId",
   "campaignSourceId",
+  "sourceCampaignId",
+  "sourceGroupId",
+  "sourceGroupName",
   "sourceRuleId",
+  "sourceRuleName",
+  "outcomeKey",
+  "outcomeSlot",
+  "commissionSequence",
+  "commissionModel",
   "commissionType",
+  "supplierRuleType",
+  "basis",
   "commissionValue",
   "ratePercent",
   "fixedAmount",
@@ -21,14 +37,16 @@ export const SUPPLIER_COMMISSION_RULE_FIELDS = Object.freeze([
   "country",
   "categoryProductGoal",
   "couponOrTier",
+  "conditions",
   "effectiveFrom",
   "effectiveUntil",
+  "networkSource",
   "sourceObject",
   "sourcePath",
   "mappingStatus",
   "fieldMappingOutcome",
   "ruleVersion",
-]);
+].filter((field, index, list) => list.indexOf(field) === index));
 
 function asString(value) {
   if (value == null || value === "") return null;
@@ -62,10 +80,18 @@ export function buildCampaignCommissionSummary({
   return summary;
 }
 
+/**
+ * Enrich a rule record with mapping metadata. A numeric rate alone is NOT finance-ready:
+ * the central readiness assessment decides MAPPED / REVIEW_REQUIRED / UNMAPPED and the
+ * readiness evidence is carried in metadata. Explicit statuses supplied by the caller
+ * (network-specific mappers) are preserved.
+ */
 export function enrichSupplierCommissionRuleRecord(base, meta = {}) {
-  const hasRate = base.ratePercent != null || base.fixedAmount != null;
-  const mappingStatus = hasRate ? "MAPPED" : "NEEDS_REVIEW";
-  const fieldMappingOutcome = hasRate
+  const readiness = assessSupplierCommissionReadiness(base, {
+    sourceText: meta.sourceText ?? null,
+    factDisplay: meta.factDisplay ?? base.metadata?.factDisplay ?? null,
+  });
+  const fieldMappingOutcome = readiness.financeReady
     ? FIELD_MAPPING_OUTCOME.MAPPED
     : FIELD_MAPPING_OUTCOME.REVIEW_REQUIRED;
 
@@ -74,9 +100,13 @@ export function enrichSupplierCommissionRuleRecord(base, meta = {}) {
     networkSource: meta.networkSource ?? base.networkSource ?? null,
     sourceObject: meta.sourceObject ?? base.sourceObject ?? "campaigns",
     sourcePath: meta.sourcePath ?? base.sourcePath ?? null,
-    mappingStatus: base.mappingStatus ?? mappingStatus,
+    mappingStatus: base.mappingStatus ?? readiness.mappingStatus,
     fieldMappingOutcome: base.fieldMappingOutcome ?? fieldMappingOutcome,
     ruleVersion: base.ruleVersion ?? meta.ruleVersion ?? base.mapperVersion ?? null,
+    metadata: {
+      ...(base.metadata && typeof base.metadata === "object" ? base.metadata : {}),
+      ...readinessMetadata(readiness),
+    },
   };
 }
 

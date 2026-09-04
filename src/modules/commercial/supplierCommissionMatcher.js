@@ -11,6 +11,8 @@
  * This module is intentionally pure. Database loading stays in SupplierCommissionRuleService.
  */
 
+import { assessSupplierCommissionReadiness } from "./supplierCommissionReadiness.js";
+
 const SET_LIKE_CONDITION_TYPES = new Set([
   "COUNTRY",
   "REGION",
@@ -647,16 +649,61 @@ export function matchSupplierCommissionRule({
   const evaluated = (Array.isArray(rules) ? rules : []).map((rule) => ({
     rule,
     evaluation: evaluateSupplierCommissionRule(rule, facts),
+    readiness: assessSupplierCommissionReadiness(rule),
   }));
 
+  // Finance-readiness gate (fail closed). Only finance-ready rules may produce MATCHED /
+  // expectedSupplierCommission. An unready rule is NOT filtered away: when it is applicable
+  // (MATCH) or could still apply (UNKNOWN) it blocks matching with REVIEW_REQUIRED, because
+  // its unverified semantics could change the payable supplier economics. An unready rule
+  // that conclusively does not apply (NO_MATCH) does not block other rules. An unready
+  // DEFAULT blocks only when no finance-ready specific rule already outranks it.
+  const readySpecificMatch = evaluated.some(
+    (item) => item.readiness.financeReady && !item.evaluation.isDefault && item.evaluation.state === "MATCH",
+  );
+  const unreadyBlocking = evaluated.filter((item) => {
+    if (item.readiness.financeReady) return false;
+    if (item.evaluation.state === "NO_MATCH") return false;
+    if (item.evaluation.isDefault) return !readySpecificMatch;
+    return item.evaluation.state === "MATCH" || item.evaluation.state === "UNKNOWN";
+  });
+  if (unreadyBlocking.length) {
+    const actual = resolveActual(actualCommission, actualCurrency, facts);
+    return {
+      status: "REVIEW_REQUIRED",
+      reason: "unverified_supplier_rule_applicable",
+      matchedRule: null,
+      matchedSupplierCommissionRuleId: null,
+      matchedCommissionSequence: null,
+      expectedSupplierCommission: null,
+      expectedCurrency: null,
+      expectedCalculationStatus: "NOT_CALCULATED",
+      // Network actual commission remains supplier-side truth; never overwritten.
+      networkActualCommission: actual.amount,
+      actualCurrency: actual.currency,
+      variance: null,
+      comparisonStatus: "NOT_COMPARABLE",
+      candidateRuleIds: unreadyBlocking.map((item) => item.rule?.id).filter(Boolean),
+      readinessBlockedRuleIds: unreadyBlocking.map((item) => item.rule?.id).filter(Boolean),
+      reviewReasons: [
+        ...new Set(
+          unreadyBlocking.flatMap((item) => [
+            ...(item.readiness.reviewReasons.length ? item.readiness.reviewReasons : ["finance_readiness_not_established"]),
+            ...(item.evaluation.state === "UNKNOWN" ? item.evaluation.reasons : []),
+          ]),
+        ),
+      ],
+    };
+  }
+
   const specificMatches = evaluated.filter(
-    (item) => !item.evaluation.isDefault && item.evaluation.state === "MATCH",
+    (item) => item.readiness.financeReady && !item.evaluation.isDefault && item.evaluation.state === "MATCH",
   );
   const specificUnknown = evaluated.filter(
-    (item) => !item.evaluation.isDefault && item.evaluation.state === "UNKNOWN",
+    (item) => item.readiness.financeReady && !item.evaluation.isDefault && item.evaluation.state === "UNKNOWN",
   );
   const defaults = evaluated.filter(
-    (item) => item.evaluation.isDefault && item.evaluation.state === "MATCH",
+    (item) => item.readiness.financeReady && item.evaluation.isDefault && item.evaluation.state === "MATCH",
   );
 
   // Fail closed: an incompletely evaluated specific rule could still outrank a known match/default.
@@ -757,6 +804,7 @@ export function matchSupplierCommissionRule({
     matchedRule: selected.rule,
     matchedSupplierCommissionRuleId: selected.rule?.id ?? null,
     matchedCommissionSequence: selected.rule?.commissionSequence ?? null,
+    matchedRuleFinanceReady: true,
     expectedSupplierCommission: expected.amount,
     expectedCurrency: expected.currency,
     expectedCalculationStatus: expected.status,
