@@ -18,6 +18,8 @@ function makeService({ client, items, sourcesByCampaign = {} }) {
     },
     assignmentService: {
       loadCatalogSources: mock.fn(async (id) => sourcesByCampaign[id] || []),
+      // Allocation lists batch-load sources per campaign (Map keyed by canonical campaign id).
+      loadCatalogSourcesByCampaignIds: mock.fn(async (ids) => new Map(ids.map((id) => [id, sourcesByCampaign[id] || []]))),
     },
     eligibility: {
       evaluate: mock.fn(({ catalogCampaign }) => {
@@ -257,6 +259,11 @@ describe("P1.7 Wave 2 allocation list", () => {
 
   it("assigned tab uses assignment-first pagination (not catalog page window)", async () => {
     const assignedOnly = campaign("assigned-deep", { campaignType: "CPS", linkSupport: true });
+    const deepSource = {
+      id: "src-deep",
+      supportsLink: true,
+      supplierCampaign: { campaignType: "CPS", coupons: [] },
+    };
     const service = new ClientAllocationService({
       clientRepo: { findById: mock.fn(async () => client) },
       adminContract: {
@@ -271,20 +278,8 @@ describe("P1.7 Wave 2 allocation list", () => {
         }),
       },
       assignmentService: {
-        loadCatalogSources: mock.fn(async (id) =>
-          id === "assigned-deep"
-            ? [
-                {
-                  id: "src-deep",
-                  supportsLink: true,
-                  supplierCampaign: {
-                    campaignType: "CPS",
-                    coupons: [],
-                  },
-                },
-              ]
-            : [],
-        ),
+        loadCatalogSources: mock.fn(async (id) => (id === "assigned-deep" ? [deepSource] : [])),
+        loadCatalogSourcesByCampaignIds: mock.fn(async (ids) => new Map(ids.map((id) => [id, id === "assigned-deep" ? [deepSource] : []]))),
       },
       eligibility: {
         evaluate: mock.fn(() => ({

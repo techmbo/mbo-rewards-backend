@@ -99,14 +99,24 @@ describe("ClientAssignmentService", () => {
       supplierCampaignId: null,
     }));
 
-    // Pass a tx stub so createDraft does not open a real Prisma transaction.
+    // Pass a tx stub so createDraft does not open a real Prisma transaction; it carries the
+    // models the draft path reads (catalog sources) and writes (the draft commission rule).
+    const tx = {
+      campaignSource: { findMany: mock.fn(async () => []) },
+      clientCommissionRule: {
+        findFirst: mock.fn(async () => null),
+        create: mock.fn(async ({ data }) => ({ id: "rule-draft", ...data })),
+      },
+    };
     const created = await service.createDraft(
       {
         clientId: "c1",
         couponEntityId: "entity-1",
       },
-      {},
+      tx,
     );
+    assert.equal(tx.clientCommissionRule.create.mock.calls.length, 1, "draft commission rule created");
+    assert.equal(tx.clientCommissionRule.create.mock.calls[0].arguments[0].data.status, "DRAFT");
 
     assert.equal(created.canonicalCampaignId, "cc-cms");
     assert.equal(catalogService.ensureFromCouponCmsEntity.mock.calls.length, 1);
@@ -148,6 +158,12 @@ describe("ClientAssignmentService", () => {
       prisma: {
         campaignSource: { findMany: mock.fn(async () => []) },
         clientCouponAssignment: { count: mock.fn(async () => 1) },
+        clientCommissionRule: {
+          findFirst: mock.fn(async () => ({ id: "rule1", status: "EFFECTIVE", grossCommission: "100", clientCommission: "70" })),
+          create: mock.fn(async () => {
+            throw new Error("must not create a second rule when one exists");
+          }),
+        },
         trackingLink: {
           findFirst: mock.fn(async () => ({
             id: "tl1",

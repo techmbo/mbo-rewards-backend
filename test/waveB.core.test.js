@@ -163,16 +163,23 @@ describe("Wave B — canonical assignment SoT", () => {
       canonicalCampaign: { id: "cc1", merchantId: "m1" },
     };
 
+    // The fake client doubles as the transaction handle: it carries the catalog sources the
+    // assignment path reads and the draft commission rule it writes.
+    const prisma = {
+      campaignSource: {
+        findMany: mock.fn(async () => [source]),
+        findUnique: mock.fn(async () => source),
+      },
+      clientCommissionRule: {
+        findFirst: mock.fn(async () => null),
+        create: mock.fn(async ({ data }) => ({ id: "rule-draft", ...data })),
+      },
+    };
     const service = new ClientAssignmentService({
       assignmentRepo,
       clientRepo,
       catalogRepo,
-      prisma: {
-        campaignSource: {
-          findMany: mock.fn(async () => [source]),
-          findUnique: mock.fn(async () => source),
-        },
-      },
+      prisma,
     });
 
     const created = await service.createClientCampaignAssignment(
@@ -181,8 +188,9 @@ describe("Wave B — canonical assignment SoT", () => {
         canonicalCampaignId: "cc1",
         campaignSourceId: "src1",
       },
-      {},
+      prisma,
     );
+    assert.equal(prisma.clientCommissionRule.create.mock.calls[0].arguments[0].data.status, "DRAFT");
 
     assert.equal(created.canonicalCampaignId, "cc1");
     assert.equal(created.campaignSourceId, "src1");
@@ -265,6 +273,8 @@ describe("Wave B — canonical assignment SoT", () => {
   });
 
   it("rejects ineligible CampaignSource on assign when sources are present", async () => {
+    // Hard source ineligibility (archived supplier campaign) rejects the assignment outright;
+    // soft relationship gaps such as NOT_JOINED are deferred to Assignment Review instead.
     const ineligible = {
       id: "src1",
       canonicalCampaignId: "cc1",
@@ -274,8 +284,18 @@ describe("Wave B — canonical assignment SoT", () => {
       relationshipStatus: "NOT_JOINED",
       supportsLink: true,
       supportsCoupon: false,
-      supplierCampaign: { merchantId: "m1", trackingUrl: "https://x", archivedAt: null },
+      supplierCampaign: { merchantId: "m1", trackingUrl: "https://x", archivedAt: new Date("2026-01-01") },
       canonicalCampaign: { merchantId: "m1" },
+    };
+    const ineligiblePrisma = {
+      campaignSource: {
+        findMany: async () => [ineligible],
+        findUnique: async () => ineligible,
+      },
+      clientCommissionRule: {
+        findFirst: mock.fn(async () => null),
+        create: mock.fn(async ({ data }) => ({ id: "rule-draft", ...data })),
+      },
     };
     const service = new ClientAssignmentService({
       assignmentRepo: { findActiveByPair: async () => null, create: async () => ({}) },
@@ -290,22 +310,44 @@ describe("Wave B — canonical assignment SoT", () => {
           countries: [],
         }),
       },
-      prisma: {
-        campaignSource: {
-          findMany: async () => [ineligible],
-          findUnique: async () => ineligible,
-        },
-      },
+      prisma: ineligiblePrisma,
     });
 
     await assert.rejects(
       () =>
         service.createClientCampaignAssignment(
           { clientId: "c1", canonicalCampaignId: "cc1", campaignSourceId: "src1" },
-          {},
+          ineligiblePrisma,
         ),
       (error) => error.statusCode === 409,
     );
+    assert.equal(ineligiblePrisma.clientCommissionRule.create.mock.calls.length, 0, "nothing written for a rejected source");
+
+    // The same source without the archive flag carries only the NOT_JOINED gap: assignable as a
+    // draft for Assignment Review, never rejected outright.
+    const softPrisma = {
+      campaignSource: {
+        findMany: async () => [{ ...ineligible, supplierCampaign: { ...ineligible.supplierCampaign, archivedAt: null } }],
+        findUnique: async () => ({ ...ineligible, supplierCampaign: { ...ineligible.supplierCampaign, archivedAt: null } }),
+      },
+      clientCommissionRule: {
+        findFirst: async () => null,
+        create: async ({ data }) => ({ id: "rule-draft", ...data }),
+      },
+    };
+    const softService = new ClientAssignmentService({
+      assignmentRepo: { findActiveByPair: async () => null, create: async (data) => ({ id: "a-soft", ...data }) },
+      clientRepo: { findById: async () => ({ id: "c1", status: "ACTIVE" }) },
+      catalogRepo: {
+        findById: async () => ({ id: "cc1", merchantId: "m1", status: "PUBLISHED", visibility: "ASSIGNABLE", deletedAt: null, countries: [] }),
+      },
+      prisma: softPrisma,
+    });
+    const draft = await softService.createClientCampaignAssignment(
+      { clientId: "c1", canonicalCampaignId: "cc1", campaignSourceId: "src1" },
+      softPrisma,
+    );
+    assert.equal(draft.id, "a-soft");
   });
 
   it("preserves legacy couponEntityId allotment without requiring supplier campaign", async () => {
@@ -341,7 +383,14 @@ describe("Wave B — canonical assignment SoT", () => {
       supplierCampaignId: null,
     });
 
-    const created = await service.createDraft({ clientId: "c1", couponEntityId: "entity-1" }, {});
+    const tx = {
+      campaignSource: { findMany: async () => [] },
+      clientCommissionRule: {
+        findFirst: async () => null,
+        create: async ({ data }) => ({ id: "rule-draft", ...data }),
+      },
+    };
+    const created = await service.createDraft({ clientId: "c1", couponEntityId: "entity-1" }, tx);
     assert.equal(created.canonicalCampaignId, "cc-cms");
     assert.equal(assignmentRepo.create.mock.calls.length, 1);
   });
