@@ -9,7 +9,7 @@ import {
   resolveClientReportingCurrency,
   toClientProductDto,
 } from "../src/modules/product/productFeed.service.js";
-import { CLIENT_API } from "../../frontend/src/apiUrl.js";
+import { CLIENT_API, assertBackendRegisters } from "./helpers/clientApiRoutes.js";
 import { apiRequest, startTestServer } from "./helpers/httpClient.js";
 
 function baseProduct(overrides = {}) {
@@ -65,6 +65,7 @@ function visibleAssignment(overrides = {}) {
 describe("P1.7 Wave 8 — path + currency + DTO", () => {
   it("CLIENT_API.products is /v1/client/products", () => {
     assert.equal(CLIENT_API.products, "/v1/client/products");
+    assert.equal(assertBackendRegisters(CLIENT_API.products), true);
   });
 
   it("09J currency: IN→INR, AE→USD, unknown→null (no invent)", () => {

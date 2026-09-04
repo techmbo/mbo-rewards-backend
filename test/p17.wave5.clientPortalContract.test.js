@@ -13,7 +13,7 @@ import { CLIENT_CAMPAIGN_FORBIDDEN_KEYS } from "../src/modules/client/dto/client
 import { PartnerCampaignService } from "../src/modules/client/services/partnerCampaign.service.js";
 import { ClientVisibilityService } from "../src/modules/client/services/visibility.service.js";
 import { PortalDashboardService } from "../src/modules/client/services/portalDashboard.service.js";
-import { CLIENT_API } from "../../frontend/src/apiUrl.js";
+import { CLIENT_API, assertBackendRegisters } from "./helpers/clientApiRoutes.js";
 import { apiRequest, startTestServer } from "./helpers/httpClient.js";
 
 const FORBIDDEN = [
@@ -133,6 +133,7 @@ function buildAssignment({
 describe("P1.7 Wave 5 — portal source of truth", () => {
   it("CLIENT_API.campaigns points at canonical /v1/client/campaigns", () => {
     assert.equal(CLIENT_API.campaigns, "/v1/client/campaigns");
+    assert.equal(assertBackendRegisters(CLIENT_API.campaigns), true);
   });
 
   it("portal overview campaign KPIs use PartnerCampaignService population", async () => {

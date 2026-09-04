@@ -13,12 +13,13 @@ import {
   sumDistinctOrderValues,
   uniqueOrNull,
 } from "../src/modules/ops/v15PerformanceGrain.js";
-import { CLIENT_API } from "../../frontend/src/apiUrl.js";
+import { CLIENT_API, assertBackendRegisters } from "./helpers/clientApiRoutes.js";
 import { apiRequest, startTestServer } from "./helpers/httpClient.js";
 
 describe("P1.7 Wave 6 — endpoint + DTO safety", () => {
   it("CLIENT_API.performance is canonical /v1/client/performance", () => {
     assert.equal(CLIENT_API.performance, "/v1/client/performance");
+    assert.equal(assertBackendRegisters(CLIENT_API.performance), true);
   });
 
   it("customerType and confirm dates stay unavailable", () => {
@@ -146,6 +147,9 @@ describe("P1.7 Wave 6 — empty DailyReport honest KPIs", () => {
           count: mock.fn(async () => 0),
           aggregate: mock.fn(async () => ({ _sum: {} })),
         },
+        // Empty DailyReport falls back to soft-attributed conversions; keep them empty too.
+        clientCampaignAssignment: { findMany: mock.fn(async () => []) },
+        conversion: { findMany: mock.fn(async () => []) },
       },
     });
     const out = await svc.listPerformance("client-a", { pageSize: 50 });
@@ -188,6 +192,9 @@ describe("P1.7 Wave 6 — empty DailyReport honest KPIs", () => {
           count: mock.fn(async () => 0),
           aggregate: mock.fn(async () => ({ _sum: {} })),
         },
+        // Empty DailyReport falls back to soft-attributed conversions; keep them empty too.
+        clientCampaignAssignment: { findMany: mock.fn(async () => []) },
+        conversion: { findMany: mock.fn(async () => []) },
       },
     });
     await svc.listPerformance("client-a", { clientId: "client-b", pageSize: 10 });

@@ -12,7 +12,7 @@ import {
   explainClientVisibilityBlock,
 } from "../src/modules/client/assignmentVisibilityTruth.js";
 import { hashApiKey, apiKeyHashesEqual } from "../src/modules/client/services/clientCredential.service.js";
-import { deriveAssignmentLifecycle } from "../../frontend/src/pages/clients/assignmentLifecycle.js";
+import { derivePartnerAssignmentStatus } from "../src/modules/client/dto/partnerCampaign.dto.js";
 
 const FORBIDDEN = [
   "supplierReceivable",
@@ -196,26 +196,27 @@ describe("P1.5 API key hashing", () => {
 });
 
 describe("P1.5 assignmentLifecycle is a projection only", () => {
+  // Backend truth for the client-facing lifecycle: derivePartnerAssignmentStatus (the frontend
+  // projection previously imported here lives in another repository and mirrors this contract).
   it("does not invent CLIENT_VISIBLE without published+ACTIVE+asset", () => {
-    const life = deriveAssignmentLifecycle({
-      status: "ASSIGNED",
+    const code = derivePartnerAssignmentStatus({
+      assignmentStatus: "ASSIGNED",
       published: false,
-      hasTrackingUrl: true,
-      commissionRuleStatus: "EFFECTIVE",
+      tracking: { mboTrackingUrl: "https://t.example/x" },
+      commercial: { status: "EFFECTIVE" },
     });
-    assert.notEqual(life.code, "CLIENT_VISIBLE");
-    assert.notEqual(life.code, "PUBLISHED");
-    assert.equal(life.clientVisible, false);
+    assert.notEqual(code, "CLIENT_VISIBLE");
+    assert.notEqual(code, "PUBLISHED");
+    assert.equal(code, "PROVISIONED");
   });
 
   it("maps published ACTIVE with tracking to CLIENT_VISIBLE", () => {
-    const life = deriveAssignmentLifecycle({
-      status: "ACTIVE",
+    const code = derivePartnerAssignmentStatus({
+      assignmentStatus: "ACTIVE",
       published: true,
-      hasTrackingUrl: true,
-      commissionRuleStatus: "EFFECTIVE",
+      tracking: { mboTrackingUrl: "https://t.example/x" },
+      commercial: { status: "EFFECTIVE" },
     });
-    assert.equal(life.code, "CLIENT_VISIBLE");
-    assert.equal(life.clientVisible, true);
+    assert.equal(code, "CLIENT_VISIBLE");
   });
 });

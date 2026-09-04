@@ -8,12 +8,13 @@ import {
   FORBIDDEN_CLIENT_PAYMENT_KEYS,
 } from "../src/modules/client/dto/clientReporting.dto.js";
 import { ClientReportingService } from "../src/modules/client/services/clientReporting.service.js";
-import { CLIENT_API } from "../../frontend/src/apiUrl.js";
+import { CLIENT_API, assertBackendRegisters } from "./helpers/clientApiRoutes.js";
 import { apiRequest, startTestServer } from "./helpers/httpClient.js";
 
 describe("P1.7 Wave 7 — API path + DTO", () => {
   it("CLIENT_API.payments is /v1/client/payments", () => {
     assert.equal(CLIENT_API.payments, "/v1/client/payments");
+    assert.equal(assertBackendRegisters(CLIENT_API.payments), true);
   });
 
   it("client DTO exposes commercial model, null linkClicks, no supplier finance", () => {
