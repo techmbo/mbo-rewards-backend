@@ -7,6 +7,7 @@ import {
 import { findUserById, logAccess, verifyAccessToken } from "../modules/auth/auth.service.js";
 import { ClientCredentialService } from "../modules/client/services/clientCredential.service.js";
 import { ClientRepository } from "../modules/client/repositories/client.repository.js";
+import { isApiEndpointEnabled } from "../modules/client/apiEnvironmentConfig.js";
 
 const credentialService = new ClientCredentialService();
 const clientRepo = new ClientRepository();
@@ -256,7 +257,6 @@ export function requireApiEndpoint(endpoint) {
       next();
       return;
     }
-    const { isApiEndpointEnabled } = require("../modules/client/apiEnvironmentConfig.js");
     const environment = req.partnerAuth?.environment || "PRODUCTION";
     const enabled = isApiEndpointEnabled(
       req.partnerClient?.apiEnvironmentConfig,
