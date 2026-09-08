@@ -4,15 +4,16 @@
   "description": "",
   "type": "module",
   "main": "src/index.js",
-  "scripts": {
-    "dev": "nodemon src/index.js",
-    "start": "node src/index.js",
-    "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev",
-    "test": "node --test test/*.test.js",
-    "sync": "node scripts/run-sync.js",
-    "db:reset": "node scripts/reset-database.js --confirm"
-  },
+"scripts": {
+  "dev": "nodemon src/index.js",
+  "start": "node src/index.js",
+  "build": "prisma generate",
+  "prisma:generate": "prisma generate",
+  "prisma:migrate": "prisma migrate dev",
+  "test": "node --test test/*.test.js",
+  "sync": "node scripts/run-sync.js",
+  "db:reset": "node scripts/reset-database.js --confirm"
+},
   "keywords": [],
   "author": "",
   "license": "ISC",
