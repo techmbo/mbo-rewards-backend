@@ -1,4 +1,9 @@
 import { Router } from "express";
+// TEMPORARY — preview-only Optimise certification endpoint (remove with the route below).
+import {
+  PREVIEW_CERTIFICATION_ROUTE,
+  optimiseCertificationPreviewHandler,
+} from "./internal/optimiseCertificationPreview.js";
 import { PERMISSIONS } from "../auth/permissions.js";
 import { getEntities, getEntitySummaryHandler } from "../controllers/entities.controller.js";
 import {
@@ -307,6 +312,12 @@ import {
 const router = Router();
 
 router.get("/health", (_req, res) => res.json({ ok: true }));
+
+// TEMPORARY — Preview-only Optimise live certification. Remove this route and
+// src/routes/internal/optimiseCertificationPreview.js once the certification
+// evidence has been captured. It 404s outside VERCEL_ENV=preview and without a
+// matching x-certification-token, and performs read-only supplier GETs.
+router.post(PREVIEW_CERTIFICATION_ROUTE, optimiseCertificationPreviewHandler);
 
 router.post("/auth/send-otp", authRateLimiter, sendOtpHandler);
 router.post("/auth/verify-otp", authRateLimiter, verifyOtpHandler);
