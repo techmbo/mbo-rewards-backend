@@ -1,0 +1,3463 @@
+diff --git a/.gitignore b/.gitignore
+index 51829f7..273f505 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -6,4 +6,6 @@
+ 
+ node_modules/
+ .DS_Store
+-**/.DS_Store
+\ No newline at end of file
++**/.DS_Store
++# Live supplier certification evidence (never committed)
++certification-output/
+diff --git a/scripts/certify-optimise-live.mjs b/scripts/certify-optimise-live.mjs
+new file mode 100644
+index 0000000..b57adc9
+--- /dev/null
++++ b/scripts/certify-optimise-live.mjs
+@@ -0,0 +1,327 @@
++#!/usr/bin/env node
++/**
++ * Optimise LIVE supplier data certification — READ-ONLY.
++ *
++ * Proves how real Optimise API data flows through the existing adapter and the
++ * existing production normalization into the MBO canonical representation.
++ *
++ *   node scripts/certify-optimise-live.mjs sea
++ *   node scripts/certify-optimise-live.mjs mena default
++ *   node scripts/certify-optimise-live.mjs uk default --scope all --max-campaigns 3
++ *
++ * Guarantees:
++ *   - GET requests only (adapter fetchCampaigns / fetchCommissionGroups).
++ *   - At most 5 campaigns are certified; commission-group requests are capped
++ *     by the same production selector the sync job uses.
++ *   - No database writes, no supplier mutations, no persistence of any kind.
++ *   - No api key, token, authorization header, database URL or other secret is
++ *     ever printed or written to the evidence files.
++ *
++ * Output: certification-output/optimise/<region>/<timestamp>/ (gitignored).
++ */
++
++import fs from "node:fs/promises";
++import path from "node:path";
++import process from "node:process";
++import { fileURLToPath } from "node:url";
++
++import {
++  MAX_CERTIFIED_CAMPAIGNS,
++  REGIONS,
++  renderSummaryMarkdown,
++  runCertification,
++} from "./lib/optimiseCertification.mjs";
++
++/** Environment variable NAMES per region. Values are never read for display. */
++export const REGION_ENV_NAMES = Object.freeze({
++  sea: { apiKey: "OPTIMISE_API_KEY", contactId: "OPTIMISE_SEA_CONTACT_ID" },
++  mena: { apiKey: "OPTIMISE_MENA_API_KEY", contactId: "OPTIMISE_MENA_CONTACT_ID" },
++  uk: { apiKey: "OPTIMISE_UK_API_KEY", contactId: "OPTIMISE_UK_CONTACT_ID" },
++});
++
++/**
++ * Production modules are loaded lazily: importing the adapter pulls the app's
++ * shared config, which requires BACKEND_URL / FRONTEND_URL. Loading it inside
++ * main lets the runner report that as a clear prerequisite instead of dying
++ * with an import-time stack trace, and keeps this module importable by tests.
++ */
++async function loadProductionModules() {
++  try {
++    const [adapterModule, credentialsModule, syncModule, httpModule] = await Promise.all([
++      import("../src/adapters/optimise.adapter.js"),
++      import("../src/modules/integrations/optimiseCredentials.js"),
++      import("../src/jobs/optimiseCommissionGroupSync.js"),
++      import("../src/core/httpClient.js"),
++    ]);
++    return {
++      createOptimiseAdapter: adapterModule.createOptimiseAdapter,
++      resolveOptimiseCredentials: credentialsModule.resolveOptimiseCredentials,
++      selectOptimiseCommissionGroupCampaigns: syncModule.selectOptimiseCommissionGroupCampaigns,
++      createHttpClient: httpModule.createHttpClient,
++    };
++  } catch (error) {
++    const missing = /Missing required environment variable: (\w+)/.exec(String(error?.message ?? ""));
++    if (missing) {
++      throw new Error(
++        `${missing[1]} must be set before the runner can load the Optimise adapter. ` +
++          "Required application configuration: BACKEND_URL, FRONTEND_URL, JWT_SECRET, " +
++          "OAUTH_TOKEN_ENCRYPTION_KEY, DATABASE_URL, DIRECT_URL.",
++      );
++    }
++    throw error;
++  }
++}
++
++export function parseArgs(argv = []) {
++  const positional = [];
++  const flags = {};
++  for (let index = 0; index < argv.length; index += 1) {
++    const token = argv[index];
++    if (token.startsWith("--")) {
++      const [name, inlineValue] = token.slice(2).split("=");
++      flags[name] = inlineValue ?? (argv[index + 1] && !argv[index + 1].startsWith("--") ? argv[++index] : "true");
++      continue;
++    }
++    positional.push(token);
++  }
++
++  const region = String(positional[0] ?? "").toLowerCase();
++  const accountLabel = positional[1] ? String(positional[1]) : "default";
++  const scope = flags.scope === "all" ? "all" : "joined";
++  const requestedMax = Number(flags["max-campaigns"] ?? MAX_CERTIFIED_CAMPAIGNS);
++  const maxCampaigns = Number.isFinite(requestedMax) && requestedMax > 0
++    ? Math.min(Math.floor(requestedMax), MAX_CERTIFIED_CAMPAIGNS)
++    : MAX_CERTIFIED_CAMPAIGNS;
++
++  return { region, accountLabel, scope, maxCampaigns, outDir: flags.out ?? null };
++}
++
++/** Safe label for display — never echoes anything credential-shaped. */
++export function safeAccountLabel(value) {
++  return String(value ?? "default").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40) || "default";
++}
++
++export function hostOf(baseUrl) {
++  try {
++    return new URL(String(baseUrl)).host;
++  } catch {
++    return "(unparseable base URL)";
++  }
++}
++
++/**
++ * PRESENT/MISSING only. This function must never return a secret value.
++ */
++export function credentialReport(credentials, region) {
++  const envNames = REGION_ENV_NAMES[region] ?? {};
++  const apiKeyPresent = Boolean(credentials?.apiKey);
++  const agencyIdPresent = Boolean(credentials?.agencyId);
++  const contactIdPresent = Boolean(credentials?.contactId);
++  const fromDatabase = String(credentials?.sources?.apiKey ?? "").startsWith("marketplace_account");
++
++  const missing = [];
++  if (!apiKeyPresent) {
++    missing.push(`apiKey — set env ${envNames.apiKey ?? "OPTIMISE_<REGION>_API_KEY"} or configure a MarketplaceAccount for platform "optimise_${region}"`);
++  }
++  if (!agencyIdPresent) {
++    missing.push(`agencyId — set MarketplaceAccount.agencyId for platform "optimise_${region}" (documented defaults: sea 118, mena 172, uk 1)`);
++  }
++  if (!contactIdPresent) {
++    missing.push(`contactId — set env ${envNames.contactId ?? "OPTIMISE_<REGION>_CONTACT_ID"} or MarketplaceAccount.contactId`);
++  }
++
++  return {
++    lines: [
++      "OPTIMISE LIVE CONFIG",
++      `region: ${region}`,
++      `accountLabel: ${safeAccountLabel(credentials?.accountLabel)}`,
++      `apiKey: ${apiKeyPresent ? "PRESENT" : "MISSING"}`,
++      `agencyId: ${agencyIdPresent ? "PRESENT" : "MISSING"}`,
++      `contactId: ${contactIdPresent ? "PRESENT" : "MISSING"}`,
++      `database credential source available: ${fromDatabase ? "YES" : "NO"}`,
++      `base URL host: ${hostOf(credentials?.baseURL)}`,
++    ],
++    complete: apiKeyPresent && agencyIdPresent && contactIdPresent,
++    missing,
++    agencyMismatch: Boolean(credentials?.agencyMismatch),
++  };
++}
++
++/** Repo root, derived from this file's location rather than the caller's cwd. */
++export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
++
++/** The only directory supplier evidence may ever be written into. */
++export const EVIDENCE_ROOT = path.join(REPO_ROOT, "certification-output");
++
++export function outputDirFor({ region, startedAt, root = REPO_ROOT }) {
++  const stamp = startedAt.toISOString().replace(/[:.]/g, "-");
++  return path.join(root, "certification-output", "optimise", region, stamp);
++}
++
++/**
++ * Confine evidence to <repo>/certification-output/.
++ *
++ * --out is operator input; without this, a typo or a stray path could scatter
++ * raw supplier payloads into a tracked directory or anywhere on the disk.
++ * Rejects traversal and symlink-style escapes by comparing resolved paths.
++ */
++export function resolveOutputDir(requested, { evidenceRoot = EVIDENCE_ROOT } = {}) {
++  const resolved = path.resolve(requested);
++  const rootWithSep = evidenceRoot.endsWith(path.sep) ? evidenceRoot : `${evidenceRoot}${path.sep}`;
++  if (resolved !== evidenceRoot && !resolved.startsWith(rootWithSep)) {
++    throw new Error(
++      `Refusing to write supplier evidence outside ${evidenceRoot}. --out must name a directory inside it (got: ${resolved}).`,
++    );
++  }
++  return resolved;
++}
++
++/** Add the ignore rule only if certification output is not already ignored. */
++export async function ensureGitignored(root = REPO_ROOT) {
++  const gitignorePath = path.join(root, ".gitignore");
++  let current = "";
++  try {
++    current = await fs.readFile(gitignorePath, "utf8");
++  } catch {
++    current = "";
++  }
++  if (/^certification-output\/?$/m.test(current)) return { changed: false, gitignorePath };
++  const suffix = current.endsWith("\n") || current === "" ? "" : "\n";
++  await fs.writeFile(
++    gitignorePath,
++    `${current}${suffix}\n# Live supplier certification evidence (never committed)\ncertification-output/\n`,
++    "utf8",
++  );
++  return { changed: true, gitignorePath };
++}
++
++export async function writeArtifacts(dir, report) {
++  await fs.mkdir(dir, { recursive: true });
++  const files = [
++    ["01-campaigns-raw.sanitized.json", { meta: report.meta, campaigns: report.campaignsRaw }],
++    ["02-campaign-details-raw.sanitized.json", { meta: report.meta, campaignDetails: report.campaignDetailsRaw }],
++    ["03-campaigns-mbo-normalized.json", { meta: report.meta, campaigns: report.campaignsNormalized }],
++    ["04-commission-groups-raw.sanitized.json", { meta: report.meta, commissionGroups: report.groupsRaw }],
++    ["05-commission-rules-mbo-normalized.json", { meta: report.meta, campaigns: report.rulesNormalized }],
++    ["06-field-certification-report.json", { meta: report.meta, ...report.fieldReport }],
++  ];
++
++  for (const [name, payload] of files) {
++    await fs.writeFile(path.join(dir, name), `${JSON.stringify(payload, null, 2)}\n`, "utf8");
++  }
++  await fs.writeFile(path.join(dir, "07-summary.md"), renderSummaryMarkdown(report), "utf8");
++  return [...files.map(([name]) => name), "07-summary.md"];
++}
++
++export async function main(argv = process.argv.slice(2)) {
++  const { region, accountLabel, scope, maxCampaigns, outDir } = parseArgs(argv);
++
++  if (!REGIONS.includes(region)) {
++    console.error(`Usage: node scripts/certify-optimise-live.mjs <${REGIONS.join("|")}> [accountLabel] [--scope joined|all] [--max-campaigns 1-${MAX_CERTIFIED_CAMPAIGNS}]`);
++    return 2;
++  }
++
++  // Validate the output location BEFORE any supplier call, so an unusable
++  // --out is never discovered only after evidence has been fetched.
++  let requestedOutDir = null;
++  if (outDir) {
++    try {
++      requestedOutDir = resolveOutputDir(outDir);
++    } catch (error) {
++      console.error(error.message);
++      return 2;
++    }
++  }
++
++  const { createOptimiseAdapter, createHttpClient, resolveOptimiseCredentials, selectOptimiseCommissionGroupCampaigns } =
++    await loadProductionModules();
++
++  const credentials = await resolveOptimiseCredentials(region, accountLabel);
++  const report = credentialReport(credentials, region);
++  console.log(report.lines.join("\n"));
++  console.log("");
++
++  if (!report.complete) {
++    console.error("Incomplete Optimise credentials. Missing:");
++    for (const item of report.missing) console.error(`  - ${item}`);
++    console.error("\nNo supplier call was attempted.");
++    return 1;
++  }
++  if (report.agencyMismatch) {
++    console.error(`Refusing to run: configured agencyId does not match the documented agency for region "${region}".`);
++    return 1;
++  }
++
++  // One shared client, built exactly as createOptimiseAdapter builds its own
++  // (Authorization + apikey + x-agency-id + x-contact-id). The adapter is given
++  // this same instance, so campaign detail and commission-group calls keep
++  // production semantics while the campaign LIST goes through the capped,
++  // single-request certification path.
++  const httpClient = createHttpClient({
++    baseURL: credentials.baseURL,
++    apiKey: credentials.apiKey,
++    headers: {
++      apikey: String(credentials.apiKey),
++      "x-agency-id": String(credentials.agencyId),
++      "x-contact-id": String(credentials.contactId),
++    },
++  });
++
++  const adapter = createOptimiseAdapter({
++    apiKey: credentials.apiKey,
++    baseURL: credentials.baseURL,
++    agencyId: credentials.agencyId,
++    contactId: credentials.contactId,
++    httpClient,
++  });
++  adapter.agencyId = credentials.agencyId;
++  adapter.contactId = credentials.contactId;
++
++  const startedAt = new Date();
++  const certification = await runCertification({
++    httpClient,
++    adapter,
++    region,
++    accountLabel: safeAccountLabel(credentials.accountLabel),
++    scope,
++    maxCampaigns,
++    selectCampaigns: selectOptimiseCommissionGroupCampaigns,
++  });
++
++  const ignore = await ensureGitignored();
++  if (ignore.changed) console.log(`Added certification-output/ to ${ignore.gitignorePath}`);
++
++  const dir = requestedOutDir ?? outputDirFor({ region, startedAt });
++  const written = await writeArtifacts(dir, certification);
++
++  const counts = certification.fieldReport.statusCounts;
++  console.log(`Campaign-list pages: ${certification.meta.campaignListPages} (pagination disabled)`);
++  console.log(`Outbound GET /campaigns requests, retries included: ${certification.meta.campaignListRequests}`);
++  console.log(`Campaign rows returned by that page: ${certification.meta.campaignListPage.rowsReturnedBySupplier} (limit ${certification.meta.campaignListPage.requestedLimit})`);
++  console.log(`Campaigns certified: ${certification.meta.campaignsCertified}`);
++  console.log(`Campaign detail responses fetched: ${certification.meta.campaignDetailsFetched}`);
++  console.log(`Commission groups fetched: ${certification.meta.commissionGroupsFetched}`);
++  console.log(`Normalized SupplierCommissionRule records: ${certification.meta.normalizedRuleCount}`);
++  console.log(`Values redacted: ${certification.meta.redactionCount}`);
++  console.log("");
++  for (const [status, count] of Object.entries(counts)) console.log(`${status}: ${count}`);
++  console.log("");
++  console.log(`MAPPING_GAP entries: ${certification.fieldReport.mappingGaps.length}`);
++  console.log(`New supplier concepts: ${certification.fieldReport.newSupplierConcepts.length}`);
++  console.log("");
++  console.log(`Evidence written to ${dir}`);
++  for (const name of written) console.log(`  - ${name}`);
++  console.log("\nRead-only: 0 database writes, 0 supplier mutations. Do not commit the evidence directory.");
++
++  return 0;
++}
++
++const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
++if (invokedDirectly) {
++  main()
++    .then((code) => process.exit(code))
++    .catch((error) => {
++      console.error(`Certification failed: ${error?.message ?? error}`);
++      process.exit(1);
++    });
++}
+diff --git a/scripts/lib/optimiseCertification.mjs b/scripts/lib/optimiseCertification.mjs
+new file mode 100644
+index 0000000..18e9b41
+--- /dev/null
++++ b/scripts/lib/optimiseCertification.mjs
+@@ -0,0 +1,1525 @@
++/**
++ * Optimise live certification core (READ-ONLY).
++ *
++ * Pure helpers for `scripts/certify-optimise-live.mjs`. This module deliberately
++ * imports NOTHING that can write: no prisma, no persistence service, no sync job.
++ * Its only production imports are the pure supplier mappers, so real supplier
++ * payloads are certified through the exact code path production uses.
++ *
++ * Nothing here mutates supplier data or derives commission values of its own:
++ * every canonical value in the artifacts comes from the production mappers.
++ */
++
++import { requestWithRetry } from "../../src/core/httpClient.js";
++import {
++  mapOptimiseCampaign,
++  mapOptimiseCampaignLifecycle,
++  mapOptimisePublisherRelationship,
++} from "../../src/modules/supplier/mappers/optimise.mapper.js";
++import { normalizeCampaignStatus } from "../../src/modules/supplier/mappers/status.js";
++import { mapOptimiseCommissionGroupCandidates } from "../../src/modules/commercial/optimiseCommissionGroup.mapper.js";
++
++/** Hard cap on certified campaigns — a certification is a sample, never a crawl. */
++export const MAX_CERTIFIED_CAMPAIGNS = 5;
++
++export const FIELD_STATUS = Object.freeze([
++  "LIVE_VERIFIED",
++  "MAPPED_NOT_IN_SAMPLE",
++  "NOT_AVAILABLE_FROM_ENDPOINT",
++  "VERIFY_LIVE",
++  "REVIEW_REQUIRED",
++  "MAPPING_GAP",
++]);
++
++export const AUTHORITY_CLASS = Object.freeze([
++  "RULE_DEFINITION",
++  "DIRECTIONAL_EVENT",
++  "NETWORK_ACTUAL",
++  "SUMMARY_ONLY",
++  "FINAL_PAYMENT_EVIDENCE",
++  "SUPPORTING",
++]);
++
++export const CONCEPT_KINDS = Object.freeze([
++  "identity",
++  "campaign metadata",
++  "relationship",
++  "commission",
++  "condition",
++  "tracking",
++  "capability",
++  "finance",
++  "other",
++]);
++
++export const REGIONS = Object.freeze(["sea", "mena", "uk"]);
++
++/* ------------------------------------------------------------------ *
++ * Sanitization
++ * ------------------------------------------------------------------ */
++
++/**
++ * Keys whose VALUES are credentials/authorization material. Ordinary campaign
++ * evidence (ids, names, statuses, countries, currencies, dates, URLs, commission
++ * values, group ids/names, bands, conditions) is never in this list and is
++ * preserved verbatim — sanitizing it would destroy the evidence we are here for.
++ */
++const CREDENTIAL_KEY = /^(apikey|api_key|apikeys|x-api-key|xapikey|authorization|auth|bearer|token|tokens|secrets|access_token|accesstoken|refresh_token|refreshtoken|id_token|idtoken|password|passwd|pwd|secret|client_secret|clientsecret|private_key|privatekey|signature|hmac|salt|credential|credentials|connection_string|connectionstring|database_url|databaseurl|dsn|cookie|set-cookie|session|sessionid|session_id)$/i;
++
++/** Personally identifying values that a campaign endpoint should never return. */
++const PII_KEY = /^(email|emailaddress|email_address|contactemail|phone|phonenumber|phone_number|mobile|msisdn|firstname|first_name|lastname|last_name|fullname|full_name|dateofbirth|date_of_birth|dob|ssn|nationalid|national_id|taxid|tax_id|iban|bic|swift|accountnumber|account_number|cardnumber|card_number|addressline1|address_line_1|streetaddress|street_address)$/i;
++
++/** Values that carry embedded credentials regardless of their key name. */
++const SECRET_VALUE = [
++  /^[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s:@]+@/i, // scheme://user:password@host
++  /^bearer\s+\S+/i,
++  /^basic\s+[a-z0-9+/=]{8,}$/i,
++];
++
++export const REDACTED = "[REDACTED]";
++
++function redactionReasonFor(key, value) {
++  if (CREDENTIAL_KEY.test(String(key))) return "credential_key";
++  if (PII_KEY.test(String(key))) return "pii_key";
++  if (typeof value === "string" && SECRET_VALUE.some((re) => re.test(value))) return "secret_value_pattern";
++  return null;
++}
++
++/**
++ * Deep-copy `value`, replacing only credential/PII-shaped leaves with [REDACTED].
++ * Every redaction is reported by path so a reviewer can see what was withheld and
++ * a mapping gap can never hide behind sanitization.
++ *
++ * @returns {{ value: unknown, redactions: Array<{path: string, reason: string}> }}
++ */
++export function sanitizeDeep(value, { path = "$" } = {}) {
++  const redactions = [];
++
++  function walk(node, nodePath) {
++    // Primitives are inspected too. A secret can sit in a bare array element
++    // ({ tokens: ["Bearer real-secret"] }) or be the whole value passed in,
++    // where there is no property key to judge it by.
++    if (node === null || typeof node !== "object") {
++      if (typeof node === "string" && SECRET_VALUE.some((re) => re.test(node))) {
++        redactions.push({ path: nodePath, reason: "secret_value_pattern" });
++        return REDACTED;
++      }
++      return node;
++    }
++    if (node instanceof Date) return node.toISOString();
++    if (Array.isArray(node)) return node.map((item, index) => walk(item, `${nodePath}[${index}]`));
++
++    const out = {};
++    for (const [key, child] of Object.entries(node)) {
++      const childPath = `${nodePath}.${key}`;
++      const reason = redactionReasonFor(key, child);
++      if (reason) {
++        out[key] = REDACTED;
++        redactions.push({ path: childPath, reason });
++        continue;
++      }
++      out[key] = walk(child, childPath);
++    }
++    return out;
++  }
++
++  return { value: walk(value, path), redactions };
++}
++
++/**
++ * Scrub a supplier error message before it is stored anywhere.
++ *
++ * Upstream messages routinely echo the failing request, which can carry the api
++ * key in a query string or an Authorization header.
++ */
++export function sanitizeErrorMessage(message, { maxLength = 300 } = {}) {
++  const text = (typeof message === "string" ? message : String(message ?? ""))
++    .replace(/\b(apikey|api_key|access_token|token|password|secret|signature|auth)=[^&\s"']+/gi, "$1=[REDACTED]")
++    .replace(/\bbearer\s+\S+/gi, "Bearer [REDACTED]")
++    .replace(/\bbasic\s+[A-Za-z0-9+/=]{8,}/gi, "Basic [REDACTED]")
++    .replace(/([a-z][a-z0-9+.-]*:\/\/[^/\s:@]+):[^/\s:@]+@/gi, "$1:[REDACTED]@");
++  return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
++}
++
++/**
++ * The only shape a failed supplier request is ever recorded in. Deliberately a
++ * whitelist: no error.config, no error.request, no headers, no response body —
++ * all of which carry the Authorization header on an Axios error.
++ */
++export function safeRequestFailure(campaignId, error) {
++  const status = error?.response?.status;
++  const code = error?.code;
++  return {
++    campaignId: String(campaignId),
++    httpStatus: typeof status === "number" ? status : null,
++    code: typeof code === "string" ? sanitizeErrorMessage(code, { maxLength: 60 }) : null,
++    message: sanitizeErrorMessage(error?.message ?? error),
++  };
++}
++
++/* ------------------------------------------------------------------ *
++ * Raw path reading
++ * ------------------------------------------------------------------ */
++
++/** Read a dotted path, supporting `a.b[0].c` and `a[].b` (first non-empty array item). */
++export function readPath(root, path) {
++  const segments = String(path)
++    .replace(/\[(\d+)\]/g, ".$1")
++    .replace(/\[\]/g, ".[]")
++    .split(".")
++    .filter((segment) => segment !== "");
++
++  let current = root;
++  for (const segment of segments) {
++    if (current === null || current === undefined) return undefined;
++    if (segment === "[]") {
++      if (!Array.isArray(current)) return undefined;
++      current = current[0];
++      continue;
++    }
++    current = current[segment];
++  }
++  return current;
++}
++
++export function hasValue(value) {
++  if (value === null || value === undefined) return false;
++  if (typeof value === "string") {
++    const trimmed = value.trim();
++    return trimmed !== "" && trimmed.toUpperCase() !== "UNKNOWN";
++  }
++  if (Array.isArray(value)) return value.length > 0;
++  if (typeof value === "object") return Object.keys(value).length > 0;
++  return true; // numbers (0 included) and booleans (false included) are real values
++}
++
++/** First candidate path actually present in the payload. */
++export function readFirstPath(root, paths = []) {
++  for (const path of paths) {
++    const value = readPath(root, path);
++    if (value !== undefined && value !== null && value !== "") {
++      return { path, present: true, value };
++    }
++  }
++  return { path: null, present: false, value: undefined };
++}
++
++/* ------------------------------------------------------------------ *
++ * Status derivation
++ * ------------------------------------------------------------------ */
++
++/**
++ * Decide a field's certification status from real evidence.
++ *
++ * Deliberate asymmetry: supplier data present but canonical value absent is a
++ * MAPPING_GAP (we lost real data), while a canonical value with no matching raw
++ * path is VERIFY_LIVE (we produced something we cannot trace to this sample).
++ */
++export function deriveStatus({ rawPresent, normalizedValue, notAvailable = false, reviewReason = null }) {
++  if (notAvailable) return "NOT_AVAILABLE_FROM_ENDPOINT";
++  if (reviewReason) return "REVIEW_REQUIRED";
++  const normalized = hasValue(normalizedValue);
++  if (rawPresent && normalized) return "LIVE_VERIFIED";
++  if (rawPresent && !normalized) return "MAPPING_GAP";
++  if (!rawPresent && normalized) return "VERIFY_LIVE";
++  return "MAPPED_NOT_IN_SAMPLE";
++}
++
++export function assertStatusEnum(entries = []) {
++  for (const entry of entries) {
++    if (!FIELD_STATUS.includes(entry.status)) {
++      throw new Error(`Invalid certification status "${entry.status}" for field "${entry.mboField}"`);
++    }
++    if (!AUTHORITY_CLASS.includes(entry.sourceAuthorityClass)) {
++      throw new Error(
++        `Invalid sourceAuthorityClass "${entry.sourceAuthorityClass}" for field "${entry.mboField}"`,
++      );
++    }
++  }
++  return entries;
++}
++
++/* ------------------------------------------------------------------ *
++ * Field specifications
++ * ------------------------------------------------------------------ */
++
++/**
++ * Candidate raw paths mirror what the production mappers actually read
++ * (src/modules/supplier/mappers/optimise.mapper.js and shared.js). The runner
++ * records the first path present in the real payload, so `rawSourcePath` is
++ * observed evidence rather than documentation.
++ */
++export const CAMPAIGN_FIELD_SPECS = Object.freeze([
++  // Identity
++  { mboField: "supplier", rawPaths: [], normalizedKey: "supplier", authority: "SUPPORTING", constant: true,
++    notes: "Constant for this adapter; not supplier-provided." },
++  { mboField: "supplierCampaignId", rawPaths: ["id", "campaignId", "productId", "legacyId", "campaign_id"],
++    normalizedKey: "supplierCampaignId", authority: "SUPPORTING" },
++  { mboField: "supplierMerchantId", rawPaths: ["advertiserId", "advertiserID", "advertiser.id", "companyId", "merchantId"],
++    normalizedKey: "supplierMerchantId", authority: "SUPPORTING",
++    notes: "The canonical campaign carries no supplier merchant id; merchant linkage currently relies on merchantNameRaw." },
++  // Campaign
++  { mboField: "campaignName", rawPaths: ["campaignName", "name", "title"], normalizedKey: "campaignName", authority: "SUPPORTING" },
++  { mboField: "merchantName", rawPaths: ["advertiserName", "companyName", "advertiser.name", "brandName", "merchant.name"],
++    normalizedKey: "merchantNameRaw", authority: "SUPPORTING" },
++  { mboField: "campaignDescription", rawPaths: ["description"], normalizedKey: "campaignDescription", authority: "SUPPORTING" },
++  { mboField: "campaignStatus", rawPaths: ["status", "campaignStatus", "subStatus"], normalizedKey: "campaignStatus",
++    authority: "SUPPORTING", evidenceResolver: "campaignStatus",
++    notes: "Production prefers advertiserCampaignStatus over top-level status; the traced path mirrors that." },
++  { mboField: "relationshipStatus", rawPaths: ["publishers[].campaignSubStatus", "publisherEligibility", "status"],
++    normalizedKey: "participationStatus", authority: "SUPPORTING", evidenceResolver: "relationship",
++    notes: "Traced to the evidenceSource the production relationship mapper reports." },
++  { mboField: "isJoined", rawPaths: ["publishers[].campaignSubStatus", "publisherEligibility", "status"],
++    normalizedKey: "isJoined", authority: "SUPPORTING", evidenceResolver: "relationship",
++    notes: "Traced to the evidenceSource the production relationship mapper reports." },
++  { mboField: "primaryCategory", rawPaths: ["vertical.primary", "vertical.name", "vertical", "category"],
++    normalizedKey: "categoryName", authority: "SUPPORTING" },
++  { mboField: "secondaryCategory", rawPaths: ["vertical.secondary", "subCategory", "categories"],
++    normalizedKey: "secondaryCategory", authority: "SUPPORTING" },
++  { mboField: "countries", rawPaths: ["markets", "countryCodes", "countries", "targetCountries", "country"],
++    normalizedKey: "countryCodes", authority: "SUPPORTING" },
++  { mboField: "currency", rawPaths: ["currencyCode", "payout.currency", "currency"], normalizedKey: "currencyCode", authority: "SUPPORTING" },
++  { mboField: "startDate", rawPaths: ["startDate", "liveDate", "appliedDate", "dateCreated", "activationDate"],
++    normalizedKey: "campaignStartDate", authority: "SUPPORTING" },
++  { mboField: "endDate", rawPaths: ["endDate", "expiryDate", "cancelledDate"], normalizedKey: "campaignEndDate", authority: "SUPPORTING" },
++  { mboField: "destinationUrl", rawPaths: ["deepLinkURL", "destinationUrl", "landingPage.websiteUrl", "website"],
++    normalizedKey: "destinationUrl", authority: "SUPPORTING" },
++  { mboField: "supplierTrackingUrl", rawPaths: ["trackingURL", "deepLinkTrackingURL", "baseTrackingUrl"],
++    normalizedKey: "trackingUrl", authority: "SUPPORTING" },
++  { mboField: "deepLinkingEnabled", rawPaths: ["deepLinkEnabled", "deeplinkEnabled", "deepLinkURL", "deepLinkTrackingURL"],
++    normalizedKey: "deepLinkingEnabled", authority: "SUPPORTING" },
++  { mboField: "terms", rawPaths: ["terms", "termsAndConditions", "conditions"],
++    normalizedKey: "normalizedPayload.termsAndConditions", authority: "SUPPORTING" },
++  { mboField: "couponCapability", rawPaths: ["hasVouchers", "voucherCount", "couponsAvailable", "hasCoupons"],
++    normalizedKey: null, authority: "SUPPORTING",
++    notes: "Coupons are a separate Optimise endpoint; absence here is expected, not a gap." },
++  { mboField: "productCapability", rawPaths: ["productFeed", "hasProductFeed", "productFeedUrl", "feeds"],
++    normalizedKey: null, authority: "SUPPORTING",
++    notes: "Product feeds are a separate Optimise endpoint; absence here is expected, not a gap." },
++  // Campaign-level commission summary — never rule truth.
++  { mboField: "campaignCommissionSummary", rawPaths: ["commissionCost", "payout.value", "payout.amount", "commission"],
++    normalizedKey: "defaultCommissionValue", authority: "SUMMARY_ONLY",
++    notes: "Campaign-level summary. Must never overwrite detailed commission-group rules." },
++]);
++
++/** Detailed commission-group rules are the authoritative rule definition. */
++export const COMMISSION_FIELD_SPECS = Object.freeze([
++  { mboField: "sourceGroupId", rawPaths: ["id", "groupId", "commissionGroupId"], normalizedKey: "sourceGroupId", authority: "RULE_DEFINITION" },
++  { mboField: "sourceGroupName", rawPaths: ["name", "groupName", "commissionGroupName"], normalizedKey: "sourceGroupName", authority: "RULE_DEFINITION" },
++  { mboField: "sourceRuleId", rawPaths: ["id", "groupId", "commissionGroupId"], normalizedKey: "sourceRuleId", authority: "RULE_DEFINITION" },
++  { mboField: "sourceRuleName", rawPaths: ["name", "groupName", "commissionGroupName"], normalizedKey: "sourceRuleName", authority: "RULE_DEFINITION" },
++  { mboField: "commissionType", rawPaths: ["commission", "commissionValue", "value", "rate", "amount"], normalizedKey: "commissionType", authority: "RULE_DEFINITION" },
++  { mboField: "supplierRuleType", rawPaths: ["type", "commissionType", "bandType"], normalizedKey: "supplierRuleType", authority: "RULE_DEFINITION" },
++  { mboField: "ratePercent", rawPaths: ["commission", "commissionValue", "value", "rate", "percentage"], normalizedKey: "ratePercent", authority: "RULE_DEFINITION" },
++  { mboField: "fixedAmount", rawPaths: ["commission", "commissionValue", "value", "amount", "fixed"], normalizedKey: "fixedAmount", authority: "RULE_DEFINITION" },
++  { mboField: "currency", rawPaths: ["currency", "currencyCode", "currency_code"], normalizedKey: "currency", authority: "RULE_DEFINITION" },
++  { mboField: "basis", rawPaths: ["basis", "commissionBasis", "payoutBasis", "commission"], normalizedKey: "basis", authority: "RULE_DEFINITION" },
++  { mboField: "conditions", rawPaths: ["conditions", "condition", "rules"], normalizedKey: "conditions", authority: "RULE_DEFINITION" },
++  { mboField: "countryConditions", rawPaths: ["countries", "country", "markets", "geo"], normalizedKey: "country", authority: "RULE_DEFINITION" },
++  { mboField: "categoryProductConditions", rawPaths: ["categories", "category", "productCategories", "products"],
++    normalizedKey: "categoryProductGoal", authority: "RULE_DEFINITION" },
++  { mboField: "customerType", rawPaths: ["customerType", "customer_type", "newCustomer", "customerSegment"],
++    normalizedKey: "customerType", authority: "RULE_DEFINITION" },
++  { mboField: "couponOrTier", rawPaths: ["voucher", "coupon", "tier", "bands", "band"], normalizedKey: "couponOrTier", authority: "RULE_DEFINITION" },
++  { mboField: "bands", rawPaths: ["bands", "band", "tiers", "commissionBands"], normalizedKey: "commissionModel", authority: "RULE_DEFINITION" },
++  { mboField: "effectiveFrom", rawPaths: ["effectiveFrom", "startDate", "validFrom", "start_date"], normalizedKey: "effectiveFrom", authority: "RULE_DEFINITION" },
++  { mboField: "effectiveUntil", rawPaths: ["effectiveUntil", "endDate", "validTo", "end_date"], normalizedKey: "effectiveUntil", authority: "RULE_DEFINITION" },
++  { mboField: "lineage", rawPaths: [], normalizedKey: "rawRuleReference", authority: "RULE_DEFINITION", constant: true,
++    notes: "Raw supplier evidence retained on every canonical rule." },
++]);
++
++/** Raw campaign keys the production mapper is known to consume. */
++const KNOWN_CAMPAIGN_KEYS = new Set(
++  CAMPAIGN_FIELD_SPECS.flatMap((spec) => spec.rawPaths.map((path) => String(path).split(/[.[]/)[0])).concat([
++    "campaign", "payout", "payouts", "publishers", "advertiser", "merchant", "vertical",
++    "landingPage", "commissionGroups", "commission_groups", "commissionGroup",
++    "pendingCommission", "campaignLogo", "advertiserLogoLocation", "rejectedDate",
++    "isEligible", "acceptingApplications", "start_date", "end_date", "currency_code",
++  ]),
++);
++
++const CONCEPT_HINTS = [
++  [/commission|payout|rate|cpa|cps|cpl|revshare|earning/i, "commission"],
++  [/invoice|payment|balance|billing|finance|tax/i, "finance"],
++  [/country|geo|market|region|locale|condition|eligib|restrict/i, "condition"],
++  [/track|click|deeplink|url|link|pixel/i, "tracking"],
++  [/voucher|coupon|feed|product|creative|banner|capab/i, "capability"],
++  [/publisher|relationship|applic|join|approval|contract/i, "relationship"],
++  [/^id$|identifier|_id$|Id$|guid|uuid/i, "identity"],
++  [/name|title|desc|status|date|category|vertical|logo/i, "campaign metadata"],
++];
++
++function classifyConcept(key) {
++  for (const [pattern, kind] of CONCEPT_HINTS) {
++    if (pattern.test(key)) return kind;
++  }
++  return "other";
++}
++
++/**
++ * Top-level raw keys the mapper does not consume. These are candidate MBO
++ * standard extensions — the point of a live certification is to find concepts
++ * our universal model does not yet carry.
++ */
++export function discoverNewConcepts(raw = {}, { knownKeys = KNOWN_CAMPAIGN_KEYS, scope = "campaign" } = {}) {
++  const found = [];
++  for (const [key, value] of Object.entries(raw ?? {})) {
++    if (knownKeys.has(key)) continue;
++    // Redact by this key first: a top-level scalar has no parent key for the
++    // deep sanitizer to judge it by.
++    const ownReason = redactionReasonFor(key, value);
++    const safeValue = ownReason ? REDACTED : sanitizeDeep(value).value;
++    found.push({
++      scope,
++      supplierJsonPath: `$.${key}`,
++      sanitizedSampleValue: summarizeValue(safeValue),
++      currentMboResult: "not carried by current normalization",
++      proposedMboConcept: null,
++      conceptKind: classifyConcept(key),
++      valueShape: Array.isArray(value) ? "array" : value === null ? "null" : typeof value,
++    });
++  }
++  return found;
++}
++
++function summarizeValue(value, maxLength = 400) {
++  if (value === null || value === undefined) return null;
++  if (typeof value === "string") return value.length > maxLength ? `${value.slice(0, maxLength)}…` : value;
++  if (typeof value !== "object") return value;
++  const json = JSON.stringify(value);
++  if (json === undefined) return null;
++  return json.length > maxLength ? `${json.slice(0, maxLength)}…` : JSON.parse(json);
++}
++
++/* ------------------------------------------------------------------ *
++ * Certification-only capped read path
++ * ------------------------------------------------------------------ */
++
++/**
++ * Total attempts for the single GET /campaigns page, retries included.
++ * requestWithRetry counts attempts (not extra tries), and only re-issues on
++ * 429/500/502/503/504.
++ */
++export const CAMPAIGN_LIST_MAX_ATTEMPTS = 3;
++
++/** Strictly date-shaped strings: YYYY-MM-DD or YYYY/MM/DD, with an optional time. */
++const DATE_LIKE = /^\d{4}[-/]\d{2}[-/]\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
++
++/**
++ * Do two real supplier values disagree in a way a human must adjudicate?
++ *
++ * Formatting differences are not conflicts: strings are trimmed, whitespace
++ * collapsed and case-folded, and two parseable dates naming the same instant
++ * agree. Anything left is a genuine disagreement between two responses.
++ */
++export function materiallyDiffer(listValue, detailValue) {
++  const listMissing = listValue === undefined || listValue === null || listValue === "";
++  const detailMissing = detailValue === undefined || detailValue === null || detailValue === "";
++  if (listMissing || detailMissing) return false;
++
++  // Date.parse is dangerously lenient — it reads "LIST-1" as 2001-01-01 — so the
++  // date comparison is gated on an actual date shape. Without this guard two
++  // genuinely different identifiers would be declared equal.
++  if (
++    typeof listValue === "string" &&
++    typeof detailValue === "string" &&
++    DATE_LIKE.test(listValue.trim()) &&
++    DATE_LIKE.test(detailValue.trim())
++  ) {
++    const listTime = Date.parse(listValue);
++    const detailTime = Date.parse(detailValue);
++    if (!Number.isNaN(listTime) && !Number.isNaN(detailTime)) return listTime !== detailTime;
++  }
++
++  const canonical = (value) => {
++    if (typeof value === "string") return value.trim().replace(/\s+/g, " ").toLowerCase();
++    if (typeof value === "number" || typeof value === "boolean") return String(value);
++    try {
++      return JSON.stringify(value);
++    } catch {
++      return String(value);
++    }
++  };
++
++  return canonical(listValue) !== canonical(detailValue);
++}
++
++/** Campaign-list envelopes accepted by the certification reader. */
++const CAMPAIGN_ARRAY_KEYS = ["response", "data", "results", "items", "campaigns"];
++
++/**
++ * Rows of a SINGLE GET /campaigns page.
++ *
++ * Production's fetchOffsetPaginated() keeps requesting pages until a short page
++ * arrives, so it cannot express "one request only". This reader is the
++ * certification-only equivalent for exactly one page. Like the production
++ * commission-group reader, it fails closed: an unrecognised non-empty envelope
++ * throws rather than silently reporting zero campaigns.
++ */
++export function extractCampaignRows(responseData) {
++  if (responseData == null || responseData === "") return { rows: [], envelopeKind: "empty" };
++  if (Array.isArray(responseData)) return { rows: responseData, envelopeKind: "array" };
++  if (typeof responseData !== "object") {
++    const error = new Error("Optimise campaigns response is not JSON");
++    error.code = "optimise_campaigns_unrecognised_envelope";
++    throw error;
++  }
++
++  const containers = [responseData, responseData.payload, responseData.data].filter(
++    (value) => value && typeof value === "object" && !Array.isArray(value),
++  );
++  for (const container of containers) {
++    for (const key of CAMPAIGN_ARRAY_KEYS) {
++      if (Array.isArray(container[key])) {
++        return {
++          rows: container[key],
++          envelopeKind: container === responseData ? key : `nested.${key}`,
++        };
++      }
++    }
++  }
++
++  const single = responseData.data && typeof responseData.data === "object" ? responseData.data : responseData;
++  const keys = Object.keys(single ?? {});
++  if (!keys.length) return { rows: [], envelopeKind: "empty_object" };
++  if (keys.includes("id") || keys.includes("campaignId") || keys.includes("productId")) {
++    return { rows: [single], envelopeKind: "single_object" };
++  }
++
++  const error = new Error(
++    `Optimise campaigns response envelope not recognised (keys: ${keys.slice(0, 8).join(", ")})`,
++  );
++  error.code = "optimise_campaigns_unrecognised_envelope";
++  throw error;
++}
++
++/**
++ * Exactly ONE outbound GET /campaigns, returning at most `limit` rows.
++ *
++ * Query semantics are identical to production fetchCampaigns (agencyId,
++ * contactId, extendedData, returnPublishersForCampaign) with offset pinned to 0
++ * and no pagination loop. Campaign NORMALIZATION is not duplicated: rows are fed
++ * to the production mapOptimiseCampaign unchanged.
++ */
++export async function fetchCampaignListPage({
++  httpClient,
++  agencyId,
++  contactId,
++  limit = MAX_CERTIFIED_CAMPAIGNS,
++  retries = CAMPAIGN_LIST_MAX_ATTEMPTS,
++  delayMs = 750,
++}) {
++  const cappedLimit = Math.max(1, Math.min(Number(limit) || MAX_CERTIFIED_CAMPAIGNS, MAX_CERTIFIED_CAMPAIGNS));
++  let attempts = 0;
++
++  // The production retry helper wraps ONE request. It re-issues the same
++  // offset=0 page on 429/5xx only; it never advances an offset, so this stays a
++  // single logical page no matter how many attempts it takes.
++  const response = await requestWithRetry(
++    () => {
++      attempts += 1;
++      return httpClient.get("/campaigns", {
++        params: {
++          agencyId,
++          contactId,
++          extendedData: true,
++          returnPublishersForCampaign: true,
++          offset: 0,
++          limit: cappedLimit,
++        },
++      });
++    },
++    { retries, delayMs },
++  );
++
++  const { rows, envelopeKind } = extractCampaignRows(response?.data);
++  // Defensive: a supplier that ignores `limit` must not widen the sample.
++  const capped = rows.slice(0, cappedLimit);
++  return {
++    rows: capped,
++    envelopeKind,
++    httpStatus: response?.status ?? null,
++    rowsReturnedBySupplier: rows.length,
++    truncatedBySupplierOverrun: rows.length > cappedLimit,
++    requestedLimit: cappedLimit,
++    attempts,
++    maxAttempts: retries,
++  };
++}
++
++/** Unwrap GET /campaigns/{id}, which may return the object bare or enveloped. */
++export function extractCampaignDetail(responseData) {
++  if (responseData == null || responseData === "") return null;
++  if (Array.isArray(responseData)) return responseData[0] ?? null;
++  if (typeof responseData !== "object") return null;
++  for (const key of ["data", "response", "payload", "campaign"]) {
++    const nested = responseData[key];
++    if (Array.isArray(nested)) return nested[0] ?? null;
++    if (nested && typeof nested === "object") return nested;
++  }
++  return responseData;
++}
++
++/**
++ * Merge the two REAL supplier payloads for one campaign.
++ *
++ * Detail fills fields the list omits; list values win on conflict, because the
++ * list response is what the production campaign sync actually stores. Nothing is
++ * invented, and every disagreement between the two responses is recorded.
++ */
++export function mergeListAndDetail(listRaw = {}, detailRaw = null) {
++  if (!detailRaw || typeof detailRaw !== "object") {
++    return { merged: { ...listRaw }, detailOnlyKeys: [], conflicts: [] };
++  }
++
++  const conflicts = [];
++
++  const isPlainObject = (value) =>
++    value !== null && typeof value === "object" && !Array.isArray(value) && !(value instanceof Date);
++
++  /**
++   * Deep merge of two REAL supplier payloads.
++   *
++   * Detail fills leaves the list omits, at any depth; the list leaf wins when
++   * both carry one, because the list response is what the production sync
++   * stores. A shallow merge would drop detail-only nested leaves entirely —
++   * list.landingPage = { id } would erase detail.landingPage.websiteUrl —
++   * turning real evidence into a phantom mapping gap.
++   *
++   * Arrays are whole supplier values and are never element-merged: inventing a
++   * row-by-row union would fabricate a payload the supplier never sent.
++   */
++  function mergeNode(listNode, detailNode, pathPrefix) {
++    if (listNode === undefined) return detailNode;
++    if (detailNode === undefined) return listNode;
++
++    if (isPlainObject(listNode) && isPlainObject(detailNode)) {
++      const out = { ...detailNode };
++      for (const [key, listChild] of Object.entries(listNode)) {
++        const childPath = pathPrefix ? `${pathPrefix}.${key}` : key;
++        out[key] = key in detailNode ? mergeNode(listChild, detailNode[key], childPath) : listChild;
++      }
++      return out;
++    }
++
++    // Leaf (or array) present on both sides.
++    if (materiallyDiffer(listNode, detailNode)) {
++      conflicts.push({
++        key: pathPrefix,
++        listValue: summarizeValue(sanitizeDeep(listNode).value, 200),
++        detailValue: summarizeValue(sanitizeDeep(detailNode).value, 200),
++      });
++    }
++    return listNode;
++  }
++
++  const merged = mergeNode(listRaw ?? {}, detailRaw, "");
++  const detailOnlyKeys = Object.keys(detailRaw).filter((key) => !(key in (listRaw ?? {})));
++
++  return { merged, detailOnlyKeys, conflicts };
++}
++
++/**
++ * Locate a field in list evidence first, then detail, reporting which response
++ * carried it. A field present only in detail is real evidence, never
++ * NOT_AVAILABLE_FROM_ENDPOINT.
++ */
++export function readFirstPathAcrossSources({ listRaw, detailRaw, paths = [] }) {
++  const fromList = readFirstPath(listRaw ?? {}, paths);
++  if (fromList.present) return { ...fromList, origin: "list", qualifiedPath: `list:$.${fromList.path}` };
++  const fromDetail = readFirstPath(detailRaw ?? {}, paths);
++  if (fromDetail.present) return { ...fromDetail, origin: "detail", qualifiedPath: `detail:$.${fromDetail.path}` };
++  return { path: null, present: false, value: undefined, origin: null, qualifiedPath: null };
++}
++
++/* ------------------------------------------------------------------ *
++ * Production-aligned evidence resolvers
++ * ------------------------------------------------------------------ */
++
++/** Advertiser-status paths production consults before top-level status. */
++const ADVERTISER_STATUS_PATHS = ["advertiserCampaignStatus", "advertiser_campaign_status", "advertiserCampaignStatuses"];
++
++/**
++ * Ordered candidate paths for campaignStatus, mirroring
++ * mapOptimiseCampaignLifecycle: an advertiser status wins only when it actually
++ * normalizes to something. Otherwise production falls through to `status`, and
++ * so must the traced evidence — certifying against a field production ignored
++ * would assert a verification we never performed.
++ */
++export function campaignStatusEvidencePaths(source = {}) {
++  for (const path of ADVERTISER_STATUS_PATHS) {
++    const value = readPath(source, path);
++    if (value === undefined || value === null || value === "") continue;
++    if (normalizeCampaignStatus(value) !== "UNKNOWN") return [path];
++  }
++  return ["status", "campaignStatus", "subStatus"];
++}
++
++/**
++ * The raw path the production relationship mapper actually used, taken from its
++ * own evidenceSource ("optimise.publishers[].campaignSubStatus" and friends)
++ * rather than guessed independently.
++ */
++export function relationshipEvidencePaths(source = {}) {
++  const relationship = mapOptimisePublisherRelationship(source ?? {});
++  const evidenceSource = relationship?.evidenceSource ?? null;
++  if (!evidenceSource) return ["publishers[].campaignSubStatus", "publisherEligibility", "status"];
++  const path = String(evidenceSource).replace(/^optimise\./, "");
++  return [path];
++}
++
++/**
++ * Semantic comparison of the two responses for one field, run through the
++ * PRODUCTION mappers independently against each payload.
++ *
++ * Raw-path comparison alone misses a real disagreement expressed through
++ * different fields: list `status: "live"` and detail
++ * `advertiserCampaignStatus: "paused"` share no path, yet production reads them
++ * as ACTIVE and PAUSED. It also avoids the opposite error — two different raw
++ * spellings that mean the same thing are not a conflict.
++ *
++ * @returns {{ comparable: boolean, listSemantic: unknown, detailSemantic: unknown, differs: boolean }}
++ */
++export function semanticComparison(spec, listRaw, detailRaw) {
++  const none = { comparable: false, listSemantic: null, detailSemantic: null, differs: false };
++  if (!spec.evidenceResolver || !listRaw || !detailRaw) return none;
++
++  if (spec.evidenceResolver === "campaignStatus") {
++    const listSemantic = mapOptimiseCampaignLifecycle(listRaw, "UNKNOWN");
++    const detailSemantic = mapOptimiseCampaignLifecycle(detailRaw, "UNKNOWN");
++    if (listSemantic === "UNKNOWN" || detailSemantic === "UNKNOWN") return none;
++    return { comparable: true, listSemantic, detailSemantic, differs: listSemantic !== detailSemantic };
++  }
++
++  if (spec.evidenceResolver === "relationship") {
++    const listRelationship = mapOptimisePublisherRelationship(listRaw);
++    const detailRelationship = mapOptimisePublisherRelationship(detailRaw);
++    // "Sufficient evidence" is the mapper reporting a source it actually used.
++    if (!listRelationship?.evidenceSource || !detailRelationship?.evidenceSource) return none;
++
++    const useJoined = spec.mboField === "isJoined";
++    const listSemantic = useJoined ? listRelationship.isJoined : listRelationship.participationStatus;
++    const detailSemantic = useJoined ? detailRelationship.isJoined : detailRelationship.participationStatus;
++    return {
++      comparable: true,
++      listSemantic,
++      detailSemantic,
++      differs:
++        listRelationship.participationStatus !== detailRelationship.participationStatus ||
++        listRelationship.isJoined !== detailRelationship.isJoined,
++    };
++  }
++
++  return none;
++}
++
++/** Resolve a spec's candidate paths, honouring production precedence. */
++export function evidencePathsForSpec(spec, source = {}) {
++  if (spec.evidenceResolver === "campaignStatus") return campaignStatusEvidencePaths(source);
++  if (spec.evidenceResolver === "relationship") return relationshipEvidencePaths(source);
++  return spec.rawPaths;
++}
++
++/* ------------------------------------------------------------------ *
++ * Production wrappers
++ * ------------------------------------------------------------------ */
++
++export function networkSourceFor(region) {
++  return `optimise_${String(region).toLowerCase()}`;
++}
++
++/**
++ * Minimal staged-entity wrapper around a REAL raw campaign payload, matching the
++ * shape the production sync stores and the mapper expects. No supplier value is
++ * altered: `rawData` is the untouched response object.
++ */
++export function campaignEntityFor({ region, accountLabel = "default", campaignId, raw }) {
++  const networkSource = networkSourceFor(region);
++  return {
++    networkSource,
++    externalId: `${accountLabel}:${networkSource}-campaign-${campaignId}`,
++    rawData: raw,
++  };
++}
++
++/* ------------------------------------------------------------------ *
++ * Commission presentation (display semantics only)
++ * ------------------------------------------------------------------ */
++
++/**
++ * Commission 1..N presentation derived for DISPLAY only.
++ *
++ * The average is a display string; it is never a financial input and never
++ * collapses distinct rules. Mixed units yield MIXED with no average at all.
++ */
++export function commissionPresentation(rules = []) {
++  const outcomes = rules.map((rule, index) => ({
++    label: `Commission ${index + 1}`,
++    commissionType: rule.commissionType,
++    ratePercent: rule.ratePercent,
++    fixedAmount: rule.fixedAmount,
++    currency: rule.currency,
++    basis: rule.basis,
++    sourceGroupId: rule.sourceGroupId,
++    sourceGroupName: rule.sourceGroupName,
++    couponOrTier: rule.couponOrTier,
++    explicitZero: rule.ratePercent === 0 || rule.fixedAmount === 0,
++    mappingStatus: rule.mappingStatus,
++  }));
++
++  const average = averageCommissionDisplay(outcomes);
++
++  return {
++    outcomeCount: outcomes.length,
++    outcomes,
++    mixed: average.mixed,
++    mixedReason: average.mixedReason,
++    averageDisplay: average.display,
++    averageValue: average.value,
++    averageCurrency: average.currency,
++    averageBasis: average.basis,
++    averageIsDisplayOnly: true,
++    averageUsableAsFinancialInput: false,
++    distinctRulesPreserved: outcomes.length === rules.length,
++  };
++}
++
++/** Basis token → display suffix. Tokens come from production payoutBasisFrom. */
++const BASIS_DISPLAY_SUFFIX = Object.freeze({
++  FIXED_PER_ORDER: "/order",
++  FIXED_PER_ITEM: "/item",
++  FIXED_AMOUNT: "",
++});
++
++function basisSuffix(basis) {
++  return basis in BASIS_DISPLAY_SUFFIX ? BASIS_DISPLAY_SUFFIX[basis] : ` ${basis}`;
++}
++
++function round4(value) {
++  return Number(Number(value).toFixed(4));
++}
++
++/**
++ * Average commission for DISPLAY only — never a payout input.
++ *
++ * Percentage-only: arithmetic mean, explicit zero included.
++ * Fixed-only: averaged only when every outcome shares ONE currency and ONE
++ * basis, and the result keeps both. Anything else is MIXED, because averaging
++ * across currencies or bases would invent a number that means nothing.
++ */
++export function averageCommissionDisplay(outcomes = []) {
++  const mixedResult = (reason) => ({
++    mixed: true,
++    mixedReason: reason,
++    display: "MIXED",
++    value: null,
++    currency: null,
++    basis: null,
++  });
++
++  if (outcomes.length === 0) return mixedResult("no_outcomes");
++
++  const kinds = new Set(outcomes.map((outcome) => outcome.commissionType));
++  if (kinds.size > 1) return mixedResult("mixed_commission_types");
++  const [kind] = [...kinds];
++
++  if (kind === "PERCENTAGE") {
++    const values = outcomes.map((outcome) => outcome.ratePercent);
++    if (values.some((value) => typeof value !== "number")) return mixedResult("non_numeric_percentage");
++    const mean = round4(values.reduce((sum, value) => sum + value, 0) / values.length);
++    return {
++      mixed: false,
++      mixedReason: null,
++      display: `${mean}%`,
++      value: mean,
++      currency: null,
++      basis: "PERCENT_OF_SALE",
++    };
++  }
++
++  if (kind === "FIXED") {
++    const values = outcomes.map((outcome) => outcome.fixedAmount);
++    if (values.some((value) => typeof value !== "number")) return mixedResult("non_numeric_fixed");
++
++    const currencies = new Set(outcomes.map((outcome) => outcome.currency ?? null));
++    if (currencies.size > 1) return mixedResult("mixed_currencies");
++    const [currency] = [...currencies];
++    if (!currency) return mixedResult("fixed_currency_missing");
++
++    const bases = new Set(outcomes.map((outcome) => outcome.basis ?? null));
++    if (bases.size > 1) return mixedResult("mixed_bases");
++    const [basis] = [...bases];
++    if (!basis || basis === "UNKNOWN") return mixedResult("fixed_basis_unknown");
++
++    const mean = round4(values.reduce((sum, value) => sum + value, 0) / values.length);
++    return {
++      mixed: false,
++      mixedReason: null,
++      display: `${currency} ${mean}${basisSuffix(basis)}`,
++      value: mean,
++      currency,
++      basis,
++    };
++  }
++
++  return mixedResult("unsupported_commission_type");
++}
++
++/**
++ * The raw evidence a canonical rule actually came from.
++ *
++ * One commission group fans out into several rules (one per band, and one per
++ * distinct fact), so array position is NOT lineage — rules[1] is routinely
++ * still group A. The production mapper records its own lineage on every rule,
++ * so that is the primary source; a sourceGroupId lookup is the only fallback,
++ * and the array index is never used as commercial lineage.
++ */
++export function outcomeEvidenceFor(rule, groups = []) {
++  const lineage = rule?.rawRuleReference ?? null;
++  let group = lineage?.group && typeof lineage.group === "object" ? lineage.group : null;
++  let resolvedBy = group ? "rawRuleReference.group" : null;
++
++  if (!group) {
++    const id = rule?.sourceGroupId;
++    group =
++      (id != null &&
++        groups.find(
++          (candidate) =>
++            String(candidate?.id ?? candidate?.groupId ?? candidate?.commissionGroupId ?? "") === String(id),
++        )) ||
++      null;
++    resolvedBy = group ? "sourceGroupId_fallback" : "unresolved";
++  }
++
++  const band = lineage?.band && typeof lineage.band === "object" ? lineage.band : null;
++  return {
++    group: group ?? {},
++    band,
++    bandIndex: lineage?.bandIndex ?? null,
++    sourcePath: rule?.sourcePath ?? null,
++    resolvedBy,
++  };
++}
++
++/* ------------------------------------------------------------------ *
++ * Certification
++ * ------------------------------------------------------------------ */
++
++function certifyCampaignFields({ listRaw, detailRaw, merged, detailFetchFailed = false, normalized, region, accountLabel }) {
++  return CAMPAIGN_FIELD_SPECS.map((spec) => {
++    // Paths are resolved against the merged payload production actually mapped,
++    // so the traced evidence is the field production used, not a lookalike.
++    const paths = evidencePathsForSpec(spec, merged ?? listRaw ?? {});
++    const hasPaths = paths.length > 0;
++
++    // Each response is also read through its OWN precedence, so the recorded
++    // list/detail evidence names the field production would have used for that
++    // payload even when the two responses express the field differently.
++    const listPaths = hasPaths ? evidencePathsForSpec(spec, listRaw ?? {}) : [];
++    const detailPaths = hasPaths ? evidencePathsForSpec(spec, detailRaw ?? {}) : [];
++    const fromList = listPaths.length ? readFirstPath(listRaw ?? {}, listPaths) : { path: null, present: false, value: undefined };
++    const fromDetail = detailPaths.length ? readFirstPath(detailRaw ?? {}, detailPaths) : { path: null, present: false, value: undefined };
++
++    // Semantic comparison is authoritative where production defines the meaning;
++    // otherwise fall back to comparing the raw values themselves.
++    const semantic = semanticComparison(spec, listRaw, detailRaw);
++    const conflicted = semantic.comparable
++      ? semantic.differs
++      : fromList.present && fromDetail.present && materiallyDiffer(fromList.value, fromDetail.value);
++
++    const mergedHit = hasPaths ? readFirstPath(merged ?? listRaw ?? {}, paths) : { path: null, present: false };
++    const hit = fromList.present
++      ? { ...fromList, origin: "list", qualifiedPath: `list:$.${fromList.path}` }
++      : fromDetail.present
++        ? { ...fromDetail, origin: "detail", qualifiedPath: `detail:$.${fromDetail.path}` }
++        : mergedHit.present
++          ? { ...mergedHit, origin: "merged", qualifiedPath: `merged:$.${mergedHit.path}` }
++          : { path: null, present: false, value: undefined, origin: null, qualifiedPath: null };
++
++    const normalizedValue = spec.normalizedKey ? readPath(normalized, spec.normalizedKey) ?? null : null;
++
++    // Detail is a potential source for every campaign field we certify, so when
++    // that request failed we cannot claim the endpoints do not carry the field.
++    const detailUnknown = detailFetchFailed && !hit.present && hasPaths;
++
++    let status;
++    let statusReason = null;
++    if (spec.constant) {
++      status = hasValue(normalizedValue) ? "LIVE_VERIFIED" : "MAPPED_NOT_IN_SAMPLE";
++    } else if (conflicted) {
++      // Production precedence is untouched; the canonical value stands. The
++      // certification verdict, not the mapping, is what changes.
++      status = "REVIEW_REQUIRED";
++      statusReason = "supplier_list_detail_conflict";
++    } else if (detailUnknown) {
++      status = "VERIFY_LIVE";
++      statusReason = "campaign_detail_request_failed";
++    } else if (spec.normalizedKey === null) {
++      // Capability probes: evidence in EITHER response counts. Only absence from
++      // both successfully queried responses means the endpoints do not carry it.
++      status = hit.present ? "VERIFY_LIVE" : "NOT_AVAILABLE_FROM_ENDPOINT";
++    } else {
++      status = deriveStatus({ rawPresent: hit.present, normalizedValue });
++    }
++
++    return {
++      mboField: spec.mboField,
++      scope: "campaign",
++      rawSourcePath: hit.path,
++      rawSourceOrigin: hit.origin,
++      qualifiedRawSourcePath: hit.qualifiedPath,
++      rawValuePresent: hit.present,
++      listSourcePath: fromList.present ? `list:$.${fromList.path}` : null,
++      listValue: fromList.present ? summarizeValue(sanitizeDeep(fromList.value).value, 200) : null,
++      detailSourcePath: fromDetail.present ? `detail:$.${fromDetail.path}` : null,
++      detailValue: fromDetail.present ? summarizeValue(sanitizeDeep(fromDetail.value).value, 200) : null,
++      listDetailConflict: conflicted,
++      listSemanticValue: semantic.comparable ? semantic.listSemantic : null,
++      detailSemanticValue: semantic.comparable ? semantic.detailSemantic : null,
++      conflictKind: conflicted ? (semantic.comparable ? "semantic" : "raw_value") : null,
++      normalizedValue: summarizeValue(sanitizeDeep(normalizedValue).value),
++      status,
++      statusReason,
++      notes: spec.notes ?? null,
++      sourceAuthorityClass: spec.authority,
++      supplierAccountScope: { region, accountLabel },
++    };
++  });
++}
++
++/**
++ * Which MBO fields each production review reason makes economically unsafe.
++ *
++ * The production mapper fails closed on purpose: when it records a reason, the
++ * rule is NOT commercially verified, however cleanly the raw value parsed. A
++ * bare `8.5` yields ratePercent 8.5 AND commission_unit_not_explicit — calling
++ * that LIVE_VERIFIED would assert a certainty the mapper explicitly withheld.
++ */
++export const REVIEW_REASON_FIELDS = Object.freeze({
++  commission_unit_not_explicit: ["commissionType", "supplierRuleType", "ratePercent", "fixedAmount", "basis"],
++  payout_basis_unknown: ["basis"],
++  fixed_payout_currency_missing: ["currency", "fixedAmount"],
++  unverified_condition_dimension: ["conditions", "countryConditions", "categoryProductConditions", "customerType"],
++  optimise_condition_semantics_not_verified_live: [
++    "conditions",
++    "countryConditions",
++    "categoryProductConditions",
++    "customerType",
++  ],
++  band_selection_semantics_not_verified_live: ["bands", "couponOrTier", "ratePercent", "fixedAmount"],
++  band_identity_insufficient: ["bands", "couponOrTier"],
++  supplier_group_id_missing: ["sourceGroupId", "sourceGroupName", "sourceRuleId", "sourceRuleName"],
++  anonymous_group_identity_insufficient: ["sourceGroupId", "sourceRuleId"],
++});
++
++/** The first production review reason that makes this field unsafe to verify. */
++export function reviewReasonForField(mboField, reviewReasons = []) {
++  for (const reason of reviewReasons) {
++    const fields = REVIEW_REASON_FIELDS[reason];
++    if (fields && fields.includes(mboField)) return reason;
++  }
++  return null;
++}
++
++function certifyCommissionFields({ group, band, bandIndex, sourcePath, rule }) {
++  return COMMISSION_FIELD_SPECS.map((spec) => {
++    // A band-derived rule is certified against ITS band first. A rate that lives
++    // in bands[n] is real supplier evidence, not something to defer to a live check.
++    const fromBand = band && spec.rawPaths.length ? readFirstPath(band, spec.rawPaths) : { path: null, present: false };
++    const fromGroup = spec.rawPaths.length ? readFirstPath(group, spec.rawPaths) : { path: null, present: false };
++
++    const hit = fromBand.present
++      ? { ...fromBand, origin: "band" }
++      : fromGroup.present
++        ? { ...fromGroup, origin: "group" }
++        : { path: null, present: false, origin: null };
++
++    const qualifiedPath = hit.present
++      ? hit.origin === "band"
++        ? `${sourcePath ?? "commission-groups[?]"}.${hit.path}`
++        : `${(sourcePath ?? "commission-groups[?]").replace(/\.bands\[\d+\]$/, "")}.${hit.path}`
++      : null;
++
++    const normalizedValue = spec.normalizedKey ? readPath(rule, spec.normalizedKey) ?? null : null;
++    const reviewReasons = rule?.metadata?.reviewReasons ?? [];
++
++    // The production mapper already fails closed on ambiguous economics; mirror
++    // that verdict rather than inventing a friendlier one.
++    const reviewReason = reviewReasonForField(spec.mboField, reviewReasons);
++
++    let status;
++    if (spec.constant) {
++      status = hasValue(normalizedValue) ? "LIVE_VERIFIED" : "MAPPING_GAP";
++    } else {
++      status = deriveStatus({ rawPresent: hit.present, normalizedValue, reviewReason });
++    }
++
++    return {
++      mboField: spec.mboField,
++      scope: "commission",
++      rawSourcePath: hit.path,
++      rawSourceOrigin: hit.origin,
++      qualifiedRawSourcePath: qualifiedPath,
++      rawValuePresent: hit.present,
++      normalizedValue: summarizeValue(sanitizeDeep(normalizedValue).value),
++      status,
++      statusReason: reviewReason,
++      notes: spec.notes ?? (reviewReason ? `Production mapper review reason: ${reviewReason}` : null),
++      sourceAuthorityClass: spec.authority,
++      outcomeKey: rule?.outcomeKey ?? null,
++      sourceGroupId: rule?.sourceGroupId ?? null,
++      bandIndex: bandIndex ?? null,
++      lineageSourcePath: sourcePath ?? null,
++    };
++  });
++}
++
++function mappingGapsFrom(entries, { raw, scope }) {
++  return entries
++    .filter((entry) => entry.status === "MAPPING_GAP")
++    .map((entry) => ({
++      supplierJsonPath: entry.qualifiedRawSourcePath ?? (entry.rawSourcePath ? `$.${entry.rawSourcePath}` : null),
++      sourceResponse: entry.rawSourceOrigin ?? scope,
++      sanitizedSampleValue: entry.rawSourcePath ? summarizeValue(sanitizeDeep(readPath(raw, entry.rawSourcePath)).value) : null,
++      currentMboResult: entry.normalizedValue,
++      proposedMboStandardField: entry.mboField,
++      conceptKind: classifyConcept(entry.mboField),
++      scope,
++      whyRealGap: "Supplier returned a usable value on this path but the production normalization produced no canonical value.",
++      proposedMinimalCorrection: `Review the ${scope} mapper for "${entry.mboField}"; do not change production mapping until this gap is accepted.`,
++    }));
++}
++
++/**
++ * Run a read-only certification against a live (or injected) Optimise adapter.
++ *
++ * Only adapter GET methods are used: fetchCampaigns and fetchCommissionGroups.
++ * Nothing is persisted; this function has no database access of any kind.
++ */
++export async function runCertification({
++  httpClient,
++  adapter,
++  region,
++  accountLabel = "default",
++  scope = "joined",
++  maxCampaigns = MAX_CERTIFIED_CAMPAIGNS,
++  selectCampaigns,
++  now = () => new Date(),
++  listRetryDelayMs = 750,
++}) {
++  if (!httpClient || typeof httpClient.get !== "function") {
++    throw new Error("runCertification requires an httpClient exposing get()");
++  }
++  if (!adapter || typeof adapter.fetchCampaignDetail !== "function" || typeof adapter.fetchCommissionGroups !== "function") {
++    throw new Error("runCertification requires an adapter exposing fetchCampaignDetail and fetchCommissionGroups");
++  }
++  const cap = Math.max(1, Math.min(Number(maxCampaigns) || MAX_CERTIFIED_CAMPAIGNS, MAX_CERTIFIED_CAMPAIGNS));
++  const networkSource = networkSourceFor(region);
++  const startedAt = now();
++
++  // Exactly one outbound GET /campaigns. No pagination loop exists on this path.
++  const page = await fetchCampaignListPage({
++    httpClient,
++    agencyId: adapter.agencyId ?? undefined,
++    contactId: adapter.contactId ?? undefined,
++    limit: cap,
++    delayMs: listRetryDelayMs,
++  });
++  const rows = page.rows;
++
++  let selection = selectCampaigns(rows, { scope, maxCampaigns: cap });
++  let effectiveScope = scope;
++  if (selection.campaigns.length === 0 && scope === "joined") {
++    selection = selectCampaigns(rows, { scope: "all", maxCampaigns: cap });
++    effectiveScope = "all-fallback";
++  }
++  const selected = selection.campaigns.slice(0, cap);
++
++  const campaignsRaw = [];
++  const campaignDetailsRaw = [];
++  const campaignsNormalized = [];
++  const groupsRaw = [];
++  const rulesNormalized = [];
++  const fieldEntries = [];
++  const mappingGaps = [];
++  const newConcepts = [];
++  const detailRequestFailures = [];
++  const commissionRequestFailures = [];
++  const ruleLineage = [];
++  const sourceConflicts = [];
++  const redactions = [];
++  const endpointsCalled = ["GET /campaigns (single page, offset=0)"];
++
++  const rowById = new Map();
++  for (const row of rows) {
++    const id = row?.id ?? row?.campaignId ?? row?.productId ?? row?.legacyId ?? row?.campaign_id;
++    if (id !== undefined && id !== null) rowById.set(String(id), row);
++  }
++
++  for (const { campaignId, currency } of selected) {
++    const listRaw = rowById.get(String(campaignId)) ?? {};
++    const sanitizedList = sanitizeDeep(listRaw, { path: `$.campaigns.${campaignId}` });
++    redactions.push(...sanitizedList.redactions);
++    campaignsRaw.push({ campaignId, raw: sanitizedList.value });
++
++    // GET /campaigns/{id} — read-only detail evidence.
++    let detailRaw = null;
++    try {
++      endpointsCalled.push(`GET /campaigns/${campaignId}`);
++      // eslint-disable-next-line no-await-in-loop
++      const detailResponse = await adapter.fetchCampaignDetail(campaignId);
++      detailRaw = extractCampaignDetail(detailResponse);
++    } catch (error) {
++      detailRequestFailures.push(safeRequestFailure(campaignId, error));
++    }
++
++    const sanitizedDetail = sanitizeDeep(detailRaw, { path: `$.campaignDetails.${campaignId}` });
++    redactions.push(...sanitizedDetail.redactions);
++    campaignDetailsRaw.push({
++      campaignId,
++      fetched: detailRaw !== null,
++      raw: sanitizedDetail.value,
++    });
++
++    const { merged, detailOnlyKeys, conflicts } = mergeListAndDetail(listRaw, detailRaw);
++    if (conflicts.length) sourceConflicts.push({ campaignId, conflicts });
++
++    const entity = campaignEntityFor({ region, accountLabel, campaignId, raw: merged });
++    const normalized = mapOptimiseCampaign(entity);
++    const sanitizedNormalized = sanitizeDeep(normalized, { path: `$.normalized.${campaignId}` });
++    redactions.push(...sanitizedNormalized.redactions);
++    campaignsNormalized.push({
++      campaignId,
++      detailOnlyKeys,
++      // Written whole: truncating evidence to a summary string would defeat the
++      // purpose of a certification artifact.
++      normalized: sanitizedNormalized.value,
++    });
++
++    const detailFetchFailed = detailRequestFailures.some((entry) => String(entry.campaignId) === String(campaignId));
++    const campaignEntries = certifyCampaignFields({
++      listRaw,
++      detailRaw,
++      merged,
++      detailFetchFailed,
++      normalized,
++      region,
++      accountLabel,
++    });
++    fieldEntries.push(...campaignEntries.map((entry) => ({ ...entry, campaignId })));
++    mappingGaps.push(
++      ...campaignEntries
++        .filter((entry) => entry.status === "MAPPING_GAP")
++        .map((entry) => {
++          const source = entry.rawSourceOrigin === "detail" ? detailRaw : listRaw;
++          return {
++            supplierJsonPath: entry.qualifiedRawSourcePath,
++            sourceResponse: entry.rawSourceOrigin,
++            sanitizedSampleValue: entry.rawSourcePath
++              ? summarizeValue(sanitizeDeep(readPath(source ?? {}, entry.rawSourcePath)).value)
++              : null,
++            currentMboResult: entry.normalizedValue,
++            proposedMboStandardField: entry.mboField,
++            conceptKind: classifyConcept(entry.mboField),
++            scope: "campaign",
++            campaignId,
++            whyRealGap:
++              "Supplier returned a usable value on this path but the production normalization produced no canonical value.",
++            proposedMinimalCorrection: `Review the campaign mapper for "${entry.mboField}"; do not change production mapping until this gap is accepted.`,
++          };
++        }),
++    );
++
++    newConcepts.push(...discoverNewConcepts(listRaw, { scope: "campaign-list" }).map((c) => ({ ...c, campaignId })));
++    if (detailRaw) {
++      newConcepts.push(...discoverNewConcepts(detailRaw, { scope: "campaign-detail" }).map((c) => ({ ...c, campaignId })));
++    }
++
++    let result;
++    try {
++      endpointsCalled.push(`GET /campaigns/${campaignId}/commission-groups`);
++      // eslint-disable-next-line no-await-in-loop
++      result = await adapter.fetchCommissionGroups(campaignId);
++    } catch (error) {
++      commissionRequestFailures.push(safeRequestFailure(campaignId, error));
++      continue;
++    }
++
++    const groups = Array.isArray(result?.groups) ? result.groups : [];
++    const sanitizedGroups = sanitizeDeep(groups, { path: `$.commissionGroups.${campaignId}` });
++    redactions.push(...sanitizedGroups.redactions);
++    groupsRaw.push({
++      campaignId,
++      envelopeKind: result?.envelopeKind ?? null,
++      httpStatus: result?.httpStatus ?? null,
++      groupCount: groups.length,
++      groups: sanitizedGroups.value,
++    });
++
++    const rules = mapOptimiseCommissionGroupCandidates(groups, {
++      sourceCampaignId: String(campaignId),
++      networkSource,
++      sourceAccountLabel: accountLabel,
++      currency: currency ?? null,
++      fetchedAt: result?.fetchedAt ?? null,
++    });
++
++    const sanitizedRules = sanitizeDeep(rules, { path: `$.rules.${campaignId}` });
++    redactions.push(...sanitizedRules.redactions);
++    rulesNormalized.push({
++      campaignId,
++      ruleCount: rules.length,
++      rules: sanitizedRules.value,
++      presentation: commissionPresentation(rules),
++    });
++
++    rules.forEach((rule) => {
++      const evidence = outcomeEvidenceFor(rule, groups);
++      const entries = certifyCommissionFields({
++        group: evidence.group,
++        band: evidence.band,
++        bandIndex: evidence.bandIndex,
++        sourcePath: evidence.sourcePath,
++        rule,
++      });
++      ruleLineage.push({
++        campaignId,
++        outcomeKey: rule.outcomeKey,
++        sourceGroupId: rule.sourceGroupId,
++        sourceGroupName: rule.sourceGroupName,
++        bandIndex: evidence.bandIndex,
++        sourcePath: evidence.sourcePath,
++        resolvedBy: evidence.resolvedBy,
++      });
++      fieldEntries.push(...entries.map((entry) => ({ ...entry, campaignId })));
++      mappingGaps.push(
++        ...entries
++          .filter((entry) => entry.status === "MAPPING_GAP")
++          .map((entry) => ({
++            supplierJsonPath: entry.qualifiedRawSourcePath,
++            sourceResponse: entry.rawSourceOrigin,
++            sanitizedSampleValue: entry.rawSourcePath
++              ? summarizeValue(
++                  sanitizeDeep(readPath(entry.rawSourceOrigin === "band" ? evidence.band ?? {} : evidence.group, entry.rawSourcePath)).value,
++                )
++              : null,
++            currentMboResult: entry.normalizedValue,
++            proposedMboStandardField: entry.mboField,
++            conceptKind: classifyConcept(entry.mboField),
++            scope: "commission",
++            campaignId,
++            whyRealGap:
++              "Supplier returned a usable value on this path but the production normalization produced no canonical value.",
++            proposedMinimalCorrection: `Review the commission mapper for "${entry.mboField}"; do not change production mapping until this gap is accepted.`,
++          })),
++      );
++    });
++
++    groups.forEach((group, index) => {
++      newConcepts.push(
++        ...discoverNewConcepts(group, {
++          scope: "commission-group",
++          knownKeys: new Set([
++            "id", "groupId", "commissionGroupId", "name", "groupName", "commissionGroupName",
++            "commission", "commissionValue", "value", "rate", "amount", "currency", "currencyCode",
++            "bands", "band", "tiers", "bandType", "conditions", "condition", "rules",
++            "effectiveFrom", "effectiveUntil", "startDate", "endDate", "type", "commissionType",
++          ]),
++        }).map((concept) => ({ ...concept, campaignId, groupIndex: index })),
++      );
++    });
++  }
++
++  assertStatusEnum(fieldEntries);
++
++  const statusCounts = Object.fromEntries(FIELD_STATUS.map((status) => [status, 0]));
++  for (const entry of fieldEntries) statusCounts[entry.status] += 1;
++
++  return {
++    meta: {
++      supplier: "OPTIMISE",
++      region,
++      accountLabel,
++      networkSource,
++      requestedScope: scope,
++      effectiveScope,
++      maxCampaigns: cap,
++      startedAt: startedAt.toISOString(),
++      finishedAt: now().toISOString(),
++      endpointsCalled,
++      // Pages are logical; requests are what actually left the machine. A page
++      // retried twice is still one page but three outbound requests.
++      campaignListPages: 1,
++      campaignListRequests: page.attempts,
++      campaignListPage: {
++        requestedLimit: page.requestedLimit,
++        rowsReturnedBySupplier: page.rowsReturnedBySupplier,
++        rowsUsed: rows.length,
++        truncatedBySupplierOverrun: page.truncatedBySupplierOverrun,
++        envelopeKind: page.envelopeKind,
++        httpStatus: page.httpStatus,
++        attempts: page.attempts,
++        maxAttempts: page.maxAttempts,
++        paginationDisabled: true,
++        note: "Exactly one GET /campaigns page is requested. Campaigns beyond this page are never fetched, so scope=joined selects only from these rows.",
++      },
++      campaignsCertified: campaignsRaw.length,
++      campaignDetailsFetched: campaignDetailsRaw.filter((entry) => entry.fetched).length,
++      campaignSelection: {
++        campaignsInspected: selection.campaignsInspected,
++        skippedNoId: selection.skippedNoId,
++        skippedByScope: selection.skippedByScope,
++        skippedDuplicate: selection.skippedDuplicate,
++        skippedByCap: selection.skippedByCap,
++      },
++      commissionGroupsFetched: groupsRaw.reduce((sum, entry) => sum + entry.groupCount, 0),
++      normalizedRuleCount: rulesNormalized.reduce((sum, entry) => sum + entry.ruleCount, 0),
++      detailRequestFailures,
++      commissionRequestFailures,
++      listDetailConflicts: sourceConflicts,
++      redactionCount: redactions.length,
++      writesPerformed: 0,
++      supplierMutations: 0,
++    },
++    campaignsRaw,
++    campaignDetailsRaw,
++    campaignsNormalized,
++    groupsRaw,
++    rulesNormalized,
++    fieldReport: {
++      statusCounts,
++      authorityRule: {
++        "GET /campaigns/{campaignId}/commission-groups": "RULE_DEFINITION",
++        "campaign-level commissionCost / payout summary": "SUMMARY_ONLY",
++        note: "Campaign-level summary commission never overwrites detailed commission-group truth.",
++      },
++      fields: fieldEntries,
++      ruleLineage,
++      fieldConflicts: fieldEntries
++        .filter((entry) => entry.listDetailConflict)
++        .map((entry) => ({
++          campaignId: entry.campaignId,
++          mboField: entry.mboField,
++          listSourcePath: entry.listSourcePath,
++          listValue: entry.listValue,
++          detailSourcePath: entry.detailSourcePath,
++          detailValue: entry.detailValue,
++          listSemanticValue: entry.listSemanticValue,
++          detailSemanticValue: entry.detailSemanticValue,
++          conflictKind: entry.conflictKind,
++          normalizedValue: entry.normalizedValue,
++          status: entry.status,
++          reason: entry.statusReason,
++        })),
++      mappingGaps,
++      reviewRequired: fieldEntries.filter((entry) => entry.status === "REVIEW_REQUIRED"),
++      newSupplierConcepts: newConcepts,
++      listDetailConflicts: sourceConflicts,
++      redactions,
++    },
++  };
++}
++
++/* ------------------------------------------------------------------ *
++ * Summary rendering
++ * ------------------------------------------------------------------ */
++
++export function renderSummaryMarkdown(report) {
++  const { meta, fieldReport, rulesNormalized } = report;
++  const counts = fieldReport.statusCounts;
++  const lines = [];
++
++  lines.push(`# Optimise live certification — ${meta.region.toUpperCase()} / ${meta.accountLabel}`);
++  lines.push("");
++  lines.push(`- Started: ${meta.startedAt}`);
++  lines.push(`- Finished: ${meta.finishedAt}`);
++  lines.push(`- Network source: ${meta.networkSource}`);
++  lines.push(`- Scope requested: ${meta.requestedScope} (effective: ${meta.effectiveScope})`);
++  lines.push(`- Campaign-list pages: ${meta.campaignListPages} (pagination disabled)`);
++  lines.push(`- Outbound GET /campaigns requests, retries included: ${meta.campaignListRequests}`);
++  lines.push(`- Campaign rows returned by that page: ${meta.campaignListPage.rowsReturnedBySupplier} (limit ${meta.campaignListPage.requestedLimit})`);
++  lines.push(`- Campaigns certified: ${meta.campaignsCertified} (cap ${meta.maxCampaigns})`);
++  lines.push(`- Campaign detail responses fetched: ${meta.campaignDetailsFetched} (failures: ${meta.detailRequestFailures.length})`);
++  lines.push(`- Campaign list attempts used: ${meta.campaignListPage.attempts} of a maximum ${meta.campaignListPage.maxAttempts}`);
++  lines.push(`- Commission groups fetched: ${meta.commissionGroupsFetched}`);
++  lines.push(`- Normalized SupplierCommissionRule records: ${meta.normalizedRuleCount}`);
++  lines.push(`- Database writes: ${meta.writesPerformed} · Supplier mutations: ${meta.supplierMutations}`);
++  lines.push(`- Values redacted: ${meta.redactionCount}`);
++  lines.push("");
++  lines.push("## Endpoints called");
++  lines.push("");
++  for (const endpoint of meta.endpointsCalled) lines.push(`- \`${endpoint}\``);
++  lines.push("");
++  lines.push("## Field certification counts");
++  lines.push("");
++  lines.push("| Status | Count |");
++  lines.push("| --- | ---: |");
++  for (const status of FIELD_STATUS) lines.push(`| ${status} | ${counts[status]} |`);
++  lines.push("");
++
++  lines.push("## Mapping gaps");
++  lines.push("");
++  if (fieldReport.mappingGaps.length === 0) {
++    lines.push("None detected in this sample.");
++  } else {
++    lines.push("Not fixed in this run, by design. Each needs review before production mapping changes.");
++    lines.push("");
++    for (const gap of fieldReport.mappingGaps) {
++      lines.push(`- **${gap.proposedMboStandardField}** (${gap.conceptKind}, ${gap.scope}) — supplier path \`${gap.supplierJsonPath}\`, current MBO result: \`${JSON.stringify(gap.currentMboResult)}\``);
++    }
++  }
++  lines.push("");
++
++  lines.push("## New supplier concepts");
++  lines.push("");
++  if (fieldReport.newSupplierConcepts.length === 0) {
++    lines.push("No unrecognized supplier fields in this sample.");
++  } else {
++    lines.push("Fields the current MBO standard does not carry. Review for possible standard extension.");
++    lines.push("");
++    for (const concept of fieldReport.newSupplierConcepts) {
++      lines.push(`- \`${concept.supplierJsonPath}\` (${concept.conceptKind}, ${concept.valueShape}, ${concept.scope})`);
++    }
++  }
++  lines.push("");
++
++  lines.push("## List vs detail disagreements");
++  lines.push("");
++  if (fieldReport.fieldConflicts.length > 0) {
++    lines.push("These MBO fields are REVIEW_REQUIRED because the two responses disagreed:");
++    lines.push("");
++    for (const conflict of fieldReport.fieldConflicts) {
++      lines.push(
++        `- Campaign ${conflict.campaignId} · **${conflict.mboField}** — ${conflict.listSourcePath} = \`${JSON.stringify(conflict.listValue)}\`, ${conflict.detailSourcePath} = \`${JSON.stringify(conflict.detailValue)}\`, canonical value kept: \`${JSON.stringify(conflict.normalizedValue)}\` (${conflict.reason})`,
++      );
++    }
++    lines.push("");
++  }
++  if (meta.listDetailConflicts.length === 0) {
++    lines.push("The list and detail responses agreed on every shared field.");
++  } else {
++    lines.push("Both values are real supplier evidence. The list value wins, matching what the production sync stores.");
++    lines.push("");
++    for (const entry of meta.listDetailConflicts) {
++      for (const conflict of entry.conflicts) {
++        lines.push(`- Campaign ${entry.campaignId} · \`${conflict.key}\` — list: \`${JSON.stringify(conflict.listValue)}\`, detail: \`${JSON.stringify(conflict.detailValue)}\``);
++      }
++    }
++  }
++  lines.push("");
++
++  lines.push("## Commission presentation per campaign");
++  lines.push("");
++  for (const entry of rulesNormalized) {
++    const presentation = entry.presentation;
++    lines.push(`### Campaign ${entry.campaignId}`);
++    lines.push("");
++    lines.push(`- Distinct outcomes: ${presentation.outcomeCount} (Commission 1..${presentation.outcomeCount})`);
++    lines.push(`- MIXED: ${presentation.mixed}`);
++    lines.push(`- Average display: ${presentation.averageDisplay} (display only, never a financial input)`);
++    lines.push(`- Distinct rules preserved (no flattening): ${presentation.distinctRulesPreserved}`);
++    lines.push("");
++  }
++
++  return `${lines.join("\n")}\n`;
++}
+diff --git a/test/certifyOptimiseLive.test.js b/test/certifyOptimiseLive.test.js
+new file mode 100644
+index 0000000..60be003
+--- /dev/null
++++ b/test/certifyOptimiseLive.test.js
+@@ -0,0 +1,1580 @@
++/**
++ * Tests for the Optimise live certification runner.
++ *
++ * These prove the RUNNER behaves safely. They are not, and must never be read
++ * as, proof of live supplier behaviour: every response here is injected.
++ */
++
++import assert from "node:assert/strict";
++import fs from "node:fs";
++import path from "node:path";
++import test from "node:test";
++import { fileURLToPath } from "node:url";
++
++import { selectOptimiseCommissionGroupCampaigns } from "../src/jobs/optimiseCommissionGroupSync.js";
++import {
++  AUTHORITY_CLASS,
++  CAMPAIGN_LIST_MAX_ATTEMPTS,
++  REVIEW_REASON_FIELDS,
++  averageCommissionDisplay,
++  campaignStatusEvidencePaths,
++  reviewReasonForField,
++  semanticComparison,
++  outcomeEvidenceFor,
++  relationshipEvidencePaths,
++  safeRequestFailure,
++  sanitizeErrorMessage,
++  fetchCampaignListPage,
++  materiallyDiffer,
++  extractCampaignDetail,
++  extractCampaignRows,
++  mergeListAndDetail,
++  FIELD_STATUS,
++  MAX_CERTIFIED_CAMPAIGNS,
++  REDACTED,
++  assertStatusEnum,
++  commissionPresentation,
++  deriveStatus,
++  discoverNewConcepts,
++  networkSourceFor,
++  renderSummaryMarkdown,
++  runCertification,
++  sanitizeDeep,
++} from "../scripts/lib/optimiseCertification.mjs";
++import {
++  EVIDENCE_ROOT,
++  REGION_ENV_NAMES,
++  credentialReport,
++  parseArgs,
++  resolveOutputDir,
++  safeAccountLabel,
++} from "../scripts/certify-optimise-live.mjs";
++
++const here = path.dirname(fileURLToPath(import.meta.url));
++const CORE_PATH = path.join(here, "..", "scripts", "lib", "optimiseCertification.mjs");
++const CLI_PATH = path.join(here, "..", "scripts", "certify-optimise-live.mjs");
++
++function joinedCampaign(id, overrides = {}) {
++  return {
++    id,
++    campaignName: `Campaign ${id}`,
++    advertiserName: `Advertiser ${id}`,
++    status: "live",
++    publishers: [{ campaignSubStatus: "live" }],
++    currencyCode: "USD",
++    trackingURL: `https://track.example.com/${id}`,
++    vertical: { primary: "Retail" },
++    markets: [{ name: "Singapore" }],
++    startDate: "2026-01-01",
++    ...overrides,
++  };
++}
++
++/**
++ * HTTP transport double for the campaign LIST call. It always reports a full
++ * page plus a `hasMore` marker, so a paginating implementation would keep going.
++ */
++function fakeHttpClient({ rows, envelope = null }) {
++  const calls = [];
++  return {
++    calls,
++    async get(url, config = {}) {
++      calls.push({ url, params: config.params ?? {} });
++      const limit = Number(config.params?.limit ?? rows.length);
++      const page = rows.slice(0, limit);
++      return {
++        status: 200,
++        data: envelope ? envelope(page) : { response: page, hasMore: true, totalCount: rows.length },
++      };
++    },
++  };
++}
++
++/** Adapter double for the per-campaign GET calls. */
++function fakeAdapter({ groupsByCampaign = {}, detailByCampaign = {}, detailError = null } = {}) {
++  const calls = { fetchCampaignDetail: [], fetchCommissionGroups: [] };
++  return {
++    calls,
++    agencyId: "118",
++    contactId: "9001",
++    async fetchCampaignDetail(campaignId) {
++      calls.fetchCampaignDetail.push(String(campaignId));
++      if (detailError) throw detailError;
++      return detailByCampaign[String(campaignId)] ?? null;
++    },
++    async fetchCommissionGroups(campaignId) {
++      calls.fetchCommissionGroups.push(String(campaignId));
++      return {
++        campaignId: String(campaignId),
++        groups: groupsByCampaign[String(campaignId)] ?? [],
++        envelopeKind: "array",
++        httpStatus: 200,
++        fetchedAt: new Date("2026-09-09T00:00:00.000Z"),
++      };
++    },
++  };
++}
++
++function certify({ rows, adapter = fakeAdapter(), httpClient = null, envelope = null, ...options } = {}) {
++  const client = httpClient ?? fakeHttpClient({ rows: rows ?? [], envelope });
++  return runCertification({
++    httpClient: client,
++    adapter,
++    region: "sea",
++    accountLabel: "default",
++    selectCampaigns: selectOptimiseCommissionGroupCampaigns,
++    now: () => new Date("2026-09-09T00:00:00.000Z"),
++    ...options,
++  });
++}
++
++test("caps the certified campaign sample at 5 and issues one request per campaign", async () => {
++  const rows = Array.from({ length: 12 }, (_, index) => joinedCampaign(1000 + index));
++  const adapter = fakeAdapter();
++  const httpClient = fakeHttpClient({ rows });
++
++  const report = await certify({ rows, adapter, httpClient });
++
++  assert.equal(report.meta.campaignsCertified, MAX_CERTIFIED_CAMPAIGNS);
++  assert.equal(report.campaignsRaw.length, MAX_CERTIFIED_CAMPAIGNS);
++  assert.equal(adapter.calls.fetchCampaignDetail.length, MAX_CERTIFIED_CAMPAIGNS);
++  assert.equal(adapter.calls.fetchCommissionGroups.length, MAX_CERTIFIED_CAMPAIGNS);
++  assert.equal(httpClient.calls.length, 1);
++});
++
++test("HARD CAP: exactly one outbound /campaigns request even when another page exists", async () => {
++  // The transport returns a full page of 5 and advertises more pages. A
++  // paginating implementation would issue a second request; this must not.
++  const rows = Array.from({ length: 40 }, (_, index) => joinedCampaign(3000 + index));
++  const httpClient = fakeHttpClient({ rows });
++
++  const report = await certify({ rows, httpClient });
++
++  const campaignListCalls = httpClient.calls.filter((call) => call.url === "/campaigns");
++  assert.equal(campaignListCalls.length, 1, "exactly one GET /campaigns");
++  assert.equal(httpClient.calls.length, 1, "no other request goes through this client");
++
++  const [call] = campaignListCalls;
++  assert.equal(call.params.limit, MAX_CERTIFIED_CAMPAIGNS);
++  assert.equal(call.params.offset, 0);
++  assert.equal(call.params.extendedData, true);
++  assert.equal(call.params.returnPublishersForCampaign, true);
++  assert.equal(call.params.agencyId, "118");
++  assert.equal(call.params.contactId, "9001");
++
++  assert.equal(report.meta.campaignListRequests, 1);
++  assert.equal(report.meta.campaignListPage.paginationDisabled, true);
++  assert.equal(report.meta.campaignListPage.rowsReturnedBySupplier, MAX_CERTIFIED_CAMPAIGNS);
++  assert.equal(report.meta.campaignsCertified, MAX_CERTIFIED_CAMPAIGNS);
++});
++
++test("a supplier that ignores the limit cannot widen the sample", async () => {
++  const rows = Array.from({ length: 30 }, (_, index) => joinedCampaign(4000 + index));
++  // Envelope ignores `limit` and returns everything.
++  const httpClient = fakeHttpClient({ rows, envelope: () => ({ response: rows }) });
++
++  const report = await certify({ rows, httpClient });
++
++  assert.equal(httpClient.calls.length, 1);
++  assert.equal(report.meta.campaignListPage.truncatedBySupplierOverrun, true);
++  assert.equal(report.meta.campaignListPage.rowsUsed, MAX_CERTIFIED_CAMPAIGNS);
++  assert.equal(report.meta.campaignsCertified, MAX_CERTIFIED_CAMPAIGNS);
++});
++
++test("an explicit --max-campaigns above the hard cap cannot widen the sample", async () => {
++  const rows = Array.from({ length: 20 }, (_, index) => joinedCampaign(2000 + index));
++
++  const report = await certify({ rows, maxCampaigns: 50 });
++
++  assert.equal(report.meta.campaignsCertified, MAX_CERTIFIED_CAMPAIGNS);
++  assert.equal(parseArgs(["sea", "default", "--max-campaigns", "50"]).maxCampaigns, MAX_CERTIFIED_CAMPAIGNS);
++});
++
++test("only read methods are used and nothing is written", async () => {
++  const forbidden = ["create", "update", "upsert", "delete", "createMany", "updateMany", "deleteMany", "executeRaw"];
++  const adapter = fakeAdapter();
++  const guarded = new Proxy(adapter, {
++    get(target, property) {
++      if (forbidden.includes(String(property))) {
++        throw new Error(`Certification attempted a write method: ${String(property)}`);
++      }
++      return target[property];
++    },
++  });
++
++  const report = await certify({ rows: [joinedCampaign(1)], adapter: guarded });
++
++  assert.equal(report.meta.writesPerformed, 0);
++  assert.equal(report.meta.supplierMutations, 0);
++
++  // Structural proof: the certification core cannot reach the database at all.
++  const coreSource = fs.readFileSync(CORE_PATH, "utf8");
++  assert.ok(!/from\s+["'][^"']*database\/prisma/.test(coreSource), "core must not import prisma");
++  assert.ok(!/PersistenceService|SupplierCommissionRuleService/.test(coreSource), "core must not import persistence");
++
++  for (const source of [coreSource, fs.readFileSync(CLI_PATH, "utf8")]) {
++    assert.ok(!/prisma\.[A-Za-z]+\.(create|update|upsert|delete)/.test(source), "no prisma mutation calls");
++    assert.ok(!/\.(createMany|updateMany|deleteMany|executeRaw)\(/.test(source), "no bulk write calls");
++  }
++});
++
++test("sanitizer removes credential-shaped fields but preserves campaign evidence", () => {
++  const payload = {
++    id: "555",
++    campaignName: "Spring Sale",
++    advertiserName: "Acme",
++    currencyCode: "USD",
++    commission: "5%",
++    trackingURL: "https://track.example.com/555?sub=abc",
++    countries: ["SG", "MY"],
++    apikey: "should-not-appear",
++    Authorization: "Bearer should-not-appear",
++    nested: { password: "should-not-appear", contactEmail: "person@example.com", databaseUrl: "postgres://u:p@host/db" },
++    connection: "postgresql://user:secretpw@localhost:5432/db",
++  };
++
++  const { value, redactions } = sanitizeDeep(payload);
++  const serialized = JSON.stringify(value);
++
++  assert.ok(!serialized.includes("should-not-appear"), "credential values must not survive");
++  assert.ok(!serialized.includes("secretpw"), "embedded connection-string password must not survive");
++  assert.ok(!serialized.includes("person@example.com"), "PII must not survive");
++
++  assert.equal(value.campaignName, "Spring Sale");
++  assert.equal(value.advertiserName, "Acme");
++  assert.equal(value.currencyCode, "USD");
++  assert.equal(value.commission, "5%");
++  assert.equal(value.trackingURL, "https://track.example.com/555?sub=abc");
++  assert.deepEqual(value.countries, ["SG", "MY"]);
++  assert.equal(value.id, "555");
++
++  assert.equal(value.apikey, REDACTED);
++  assert.equal(value.connection, REDACTED);
++  assert.ok(redactions.length >= 5, "every redaction is reported by path");
++  assert.ok(redactions.every((entry) => typeof entry.path === "string" && typeof entry.reason === "string"));
++});
++
++test("explicit zero commission survives into the certification output", async () => {
++  const report = await certify({
++    rows: [joinedCampaign(300)],
++    adapter: fakeAdapter({ groupsByCampaign: { 300: [{ id: "gz", name: "Zero Group", commission: "0%" }] } }),
++  });
++  const [entry] = report.rulesNormalized;
++
++  assert.equal(entry.ruleCount, 1);
++  assert.equal(entry.rules[0].ratePercent, 0);
++  assert.equal(entry.rules[0].commissionType, "PERCENTAGE");
++  assert.equal(entry.presentation.outcomes[0].explicitZero, true);
++
++  // A zero rate is a real value, never "missing".
++  const rateField = report.fieldReport.fields.find(
++    (field) => field.scope === "commission" && field.mboField === "ratePercent",
++  );
++  assert.equal(rateField.status, "LIVE_VERIFIED");
++  assert.equal(rateField.normalizedValue, 0);
++});
++
++test("multiple commission outcomes stay separate and are never flattened or averaged into one", async () => {
++  const report = await certify({
++    rows: [joinedCampaign(400)],
++    adapter: fakeAdapter({
++      groupsByCampaign: {
++        400: [
++          { id: "g1", name: "Standard", commission: "5%" },
++          { id: "g2", name: "Premium", commission: "12%" },
++          { id: "g3", name: "Flat", commission: "USD 8" },
++        ],
++      },
++    }),
++  });
++  const [entry] = report.rulesNormalized;
++
++  assert.equal(entry.ruleCount, 3);
++  assert.equal(new Set(entry.rules.map((rule) => rule.outcomeKey)).size, 3, "outcome keys stay distinct");
++  assert.equal(entry.presentation.outcomeCount, 3);
++  assert.deepEqual(
++    entry.presentation.outcomes.map((outcome) => outcome.label),
++    ["Commission 1", "Commission 2", "Commission 3"],
++  );
++  assert.equal(entry.presentation.distinctRulesPreserved, true);
++
++  // Percent and fixed together is MIXED, and a mixed set yields no average.
++  assert.equal(entry.presentation.mixed, true);
++  assert.equal(entry.presentation.averageDisplay, "MIXED");
++  assert.equal(entry.presentation.averageUsableAsFinancialInput, false);
++});
++
++test("a uniform percent set produces a display-only average that is never a financial input", () => {
++  const presentation = commissionPresentation([
++    { commissionType: "PERCENTAGE", ratePercent: 4, fixedAmount: null, currency: null },
++    { commissionType: "PERCENTAGE", ratePercent: 6, fixedAmount: null, currency: null },
++  ]);
++
++  assert.equal(presentation.mixed, false);
++  assert.equal(presentation.averageDisplay, "5%");
++  assert.equal(presentation.averageIsDisplayOnly, true);
++  assert.equal(presentation.averageUsableAsFinancialInput, false);
++  assert.equal(presentation.outcomeCount, 2);
++});
++
++test("banded groups keep one canonical rule per band", async () => {
++  const report = await certify({
++    rows: [joinedCampaign(500)],
++    adapter: fakeAdapter({
++      groupsByCampaign: {
++        500: [
++          {
++            id: "gb",
++            name: "Banded",
++            bandType: "orderValue",
++            bands: [{ lower: 0, upper: 100, commission: "3%" }, { lower: 100, commission: "6%" }],
++          },
++        ],
++      },
++    }),
++  });
++  const [entry] = report.rulesNormalized;
++
++  assert.equal(entry.ruleCount, 2);
++  assert.deepEqual(entry.rules.map((rule) => rule.ratePercent), [3, 6]);
++  assert.ok(entry.rules.every((rule) => rule.commissionModel === "BANDED:orderValue"));
++  assert.equal(new Set(entry.rules.map((rule) => rule.couponOrTier)).size, 2);
++});
++
++test("detailed commission groups are RULE_DEFINITION and campaign summary is SUMMARY_ONLY", async () => {
++  const report = await certify({
++    rows: [joinedCampaign(600, { commissionCost: "7%" })],
++    adapter: fakeAdapter({ groupsByCampaign: { 600: [{ id: "g1", name: "Standard", commission: "5%" }] } }),
++  });
++
++  const summaryField = report.fieldReport.fields.find((field) => field.mboField === "campaignCommissionSummary");
++  assert.equal(summaryField.sourceAuthorityClass, "SUMMARY_ONLY");
++
++  const ruleFields = report.fieldReport.fields.filter((field) => field.scope === "commission");
++  assert.ok(ruleFields.length > 0);
++  assert.ok(ruleFields.every((field) => field.sourceAuthorityClass === "RULE_DEFINITION"));
++
++  assert.equal(report.fieldReport.authorityRule["GET /campaigns/{campaignId}/commission-groups"], "RULE_DEFINITION");
++
++  // The campaign-level summary never becomes a canonical rule.
++  assert.equal(report.rulesNormalized[0].ruleCount, 1);
++  assert.equal(report.rulesNormalized[0].rules[0].sourceGroupId, "g1");
++});
++
++test("region selection drives the network source and the credential variable names", () => {
++  assert.equal(networkSourceFor("sea"), "optimise_sea");
++  assert.equal(networkSourceFor("MENA"), "optimise_mena");
++  assert.equal(networkSourceFor("uk"), "optimise_uk");
++
++  assert.equal(parseArgs(["mena", "house"]).region, "mena");
++  assert.equal(parseArgs(["mena", "house"]).accountLabel, "house");
++  assert.equal(parseArgs(["uk"]).accountLabel, "default");
++  assert.equal(parseArgs(["sea", "default", "--scope", "all"]).scope, "all");
++  assert.equal(parseArgs(["sea"]).scope, "joined");
++
++  assert.equal(REGION_ENV_NAMES.sea.apiKey, "OPTIMISE_API_KEY");
++  assert.equal(REGION_ENV_NAMES.mena.apiKey, "OPTIMISE_MENA_API_KEY");
++  assert.equal(REGION_ENV_NAMES.uk.contactId, "OPTIMISE_UK_CONTACT_ID");
++});
++
++test("incomplete credentials fail safely and never echo a secret", () => {
++  const report = credentialReport(
++    { apiKey: null, agencyId: "118", contactId: null, accountLabel: "default", baseURL: "https://public.api.optimisemedia.com/v1", sources: {} },
++    "sea",
++  );
++
++  assert.equal(report.complete, false);
++  assert.equal(report.missing.length, 2);
++  assert.ok(report.missing.some((line) => line.includes("OPTIMISE_API_KEY")));
++  assert.ok(report.missing.some((line) => line.includes("OPTIMISE_SEA_CONTACT_ID")));
++
++  const printed = report.lines.join("\n");
++  assert.ok(printed.includes("apiKey: MISSING"));
++  assert.ok(printed.includes("agencyId: PRESENT"));
++  assert.ok(printed.includes("base URL host: public.api.optimisemedia.com"));
++  assert.ok(!printed.includes("https://public.api.optimisemedia.com/v1"), "only the host is printed, never a full URL");
++});
++
++test("a complete credential set is reported without printing any value", () => {
++  const secret = "live-key-must-never-print";
++  const report = credentialReport(
++    {
++      apiKey: secret,
++      agencyId: "118",
++      contactId: "9001",
++      accountLabel: "Main Account!",
++      baseURL: "https://public.api.optimisemedia.com/v1",
++      sources: { apiKey: "marketplace_account:API_KEY" },
++    },
++    "sea",
++  );
++
++  const printed = report.lines.join("\n");
++  assert.equal(report.complete, true);
++  assert.ok(!printed.includes(secret));
++  assert.ok(!printed.includes("9001"), "contactId is reported as PRESENT, never echoed");
++  assert.ok(printed.includes("database credential source available: YES"));
++  assert.equal(safeAccountLabel("Main Account!"), "MainAccount");
++});
++
++test("every emitted field status and authority class is a member of the enum", async () => {
++  const report = await certify({
++    rows: [joinedCampaign(700)],
++    adapter: fakeAdapter({ groupsByCampaign: { 700: [{ id: "g1", name: "Standard", commission: "5%" }] } }),
++  });
++
++  assert.ok(report.fieldReport.fields.length > 0);
++  for (const field of report.fieldReport.fields) {
++    assert.ok(FIELD_STATUS.includes(field.status), `unexpected status ${field.status}`);
++    assert.ok(AUTHORITY_CLASS.includes(field.sourceAuthorityClass), `unexpected class ${field.sourceAuthorityClass}`);
++  }
++
++  const total = Object.values(report.fieldReport.statusCounts).reduce((sum, count) => sum + count, 0);
++  assert.equal(total, report.fieldReport.fields.length);
++
++  assert.throws(
++    () => assertStatusEnum([{ mboField: "x", status: "PROBABLY_FINE", sourceAuthorityClass: "RULE_DEFINITION" }]),
++    /Invalid certification status/,
++  );
++  assert.throws(
++    () => assertStatusEnum([{ mboField: "x", status: "LIVE_VERIFIED", sourceAuthorityClass: "TRUST_ME" }]),
++    /Invalid sourceAuthorityClass/,
++  );
++});
++
++test("status derivation distinguishes a lost value from an untraceable one", () => {
++  assert.equal(deriveStatus({ rawPresent: true, normalizedValue: "Acme" }), "LIVE_VERIFIED");
++  assert.equal(deriveStatus({ rawPresent: true, normalizedValue: null }), "MAPPING_GAP");
++  assert.equal(deriveStatus({ rawPresent: true, normalizedValue: "UNKNOWN" }), "MAPPING_GAP");
++  assert.equal(deriveStatus({ rawPresent: false, normalizedValue: "derived" }), "VERIFY_LIVE");
++  assert.equal(deriveStatus({ rawPresent: false, normalizedValue: null }), "MAPPED_NOT_IN_SAMPLE");
++  assert.equal(deriveStatus({ rawPresent: true, normalizedValue: "x", notAvailable: true }), "NOT_AVAILABLE_FROM_ENDPOINT");
++  assert.equal(deriveStatus({ rawPresent: true, normalizedValue: "x", reviewReason: "payout_basis_unknown" }), "REVIEW_REQUIRED");
++
++  // Zero and false are real supplier values, not absences.
++  assert.equal(deriveStatus({ rawPresent: true, normalizedValue: 0 }), "LIVE_VERIFIED");
++  assert.equal(deriveStatus({ rawPresent: true, normalizedValue: false }), "LIVE_VERIFIED");
++});
++
++test("unrecognized supplier fields are surfaced as new concepts, sanitized", () => {
++  const concepts = discoverNewConcepts({
++    id: "1",
++    campaignName: "Known",
++    newCommissionLadder: [{ tier: 1, payout: "4%" }],
++    apikey: "must-not-appear",
++  });
++
++  const ladder = concepts.find((concept) => concept.supplierJsonPath === "$.newCommissionLadder");
++  assert.ok(ladder, "unknown supplier field is reported");
++  assert.equal(ladder.conceptKind, "commission");
++  assert.equal(ladder.currentMboResult, "not carried by current normalization");
++
++  const key = concepts.find((concept) => concept.supplierJsonPath === "$.apikey");
++  assert.ok(key, "even an unexpected credential-shaped key is reported as a concept");
++  assert.ok(!JSON.stringify(concepts).includes("must-not-appear"), "its value is still redacted");
++});
++
++test("mapping gaps are recorded for review and never auto-corrected", async () => {
++  // Optimise returns advertiserId, but the canonical campaign carries no
++  // supplier merchant id — a real value the normalization drops today.
++  const report = await certify({ rows: [joinedCampaign(800, { advertiserId: "77" })] });
++  const gap = report.fieldReport.mappingGaps.find((entry) => entry.proposedMboStandardField === "supplierMerchantId");
++
++  assert.ok(gap, "a lost supplier value is reported as MAPPING_GAP");
++  assert.equal(gap.supplierJsonPath, "list:$.advertiserId");
++  assert.equal(gap.sanitizedSampleValue, "77");
++  assert.equal(gap.conceptKind, "identity");
++  assert.match(gap.proposedMinimalCorrection, /do not change production mapping/i);
++
++  // The gap is reported only. No production mapping is altered by the runner.
++  const merchantField = report.fieldReport.fields.find((field) => field.mboField === "supplierMerchantId");
++  assert.equal(merchantField.status, "MAPPING_GAP");
++  assert.equal(merchantField.normalizedValue, null);
++});
++
++test("a field the mapper nests under normalizedPayload still certifies as verified", async () => {
++  const report = await certify({ rows: [joinedCampaign(810, { terms: "Standard affiliate terms" })] });
++  const termsField = report.fieldReport.fields.find((field) => field.mboField === "terms");
++
++  assert.equal(termsField.rawSourcePath, "terms");
++  assert.equal(termsField.status, "LIVE_VERIFIED");
++  assert.equal(termsField.normalizedValue, "Standard affiliate terms");
++});
++
++test("the summary renders the counts, authority rule and gap review posture", async () => {
++  const markdown = renderSummaryMarkdown(
++    await certify({
++      rows: [joinedCampaign(900)],
++      adapter: fakeAdapter({ groupsByCampaign: { 900: [{ id: "g1", name: "Standard", commission: "5%" }] } }),
++    }),
++  );
++
++  assert.match(markdown, /# Optimise live certification — SEA \/ default/);
++  assert.match(markdown, /Database writes: 0 · Supplier mutations: 0/);
++  assert.match(markdown, /LIVE_VERIFIED/);
++  assert.match(markdown, /display only, never a financial input/);
++  assert.match(markdown, /GET \/campaigns\/900\/commission-groups/);
++});
++
++test("a failed commission-group request is recorded, never silently treated as empty", async () => {
++  const adapter = {
++    agencyId: "118",
++    contactId: "9001",
++    async fetchCampaignDetail() {
++      return null;
++    },
++    async fetchCommissionGroups() {
++      const error = new Error("upstream 503");
++      error.response = { status: 503 };
++      throw error;
++    },
++  };
++
++  const report = await certify({ rows: [joinedCampaign(1)], adapter });
++
++  assert.equal(report.meta.commissionRequestFailures.length, 1);
++  assert.equal(report.meta.commissionRequestFailures[0].httpStatus, 503);
++  assert.equal(report.meta.normalizedRuleCount, 0);
++  assert.equal(report.rulesNormalized.length, 0, "a failure never yields an invented empty rule set");
++});
++
++test("the six evidence artifacts are written and carry no credential values", async () => {
++  const { mkdtemp, readFile, readdir, rm } = await import("node:fs/promises");
++  const os = await import("node:os");
++  const { writeArtifacts } = await import("../scripts/certify-optimise-live.mjs");
++
++  const report = await certify({
++    rows: [joinedCampaign(950, { apikey: "must-not-reach-disk", contactEmail: "person@example.com" })],
++    adapter: fakeAdapter({ groupsByCampaign: { 950: [{ id: "g1", name: "Standard", commission: "5%" }] } }),
++  });
++
++  const dir = await mkdtemp(path.join(os.tmpdir(), "optimise-cert-"));
++  try {
++    const written = await writeArtifacts(dir, report);
++
++    assert.deepEqual(written, [
++      "01-campaigns-raw.sanitized.json",
++      "02-campaign-details-raw.sanitized.json",
++      "03-campaigns-mbo-normalized.json",
++      "04-commission-groups-raw.sanitized.json",
++      "05-commission-rules-mbo-normalized.json",
++      "06-field-certification-report.json",
++      "07-summary.md",
++    ]);
++    assert.deepEqual((await readdir(dir)).sort(), [...written].sort());
++
++    for (const name of written) {
++      const contents = await readFile(path.join(dir, name), "utf8");
++      assert.ok(!contents.includes("must-not-reach-disk"), `${name} must not contain a credential value`);
++      assert.ok(!contents.includes("person@example.com"), `${name} must not contain PII`);
++      if (name.endsWith(".json")) JSON.parse(contents);
++    }
++
++    // Ordinary supplier evidence must survive into the raw artifact.
++    const raw = JSON.parse(await readFile(path.join(dir, "01-campaigns-raw.sanitized.json"), "utf8"));
++    assert.equal(raw.campaigns[0].raw.campaignName, "Campaign 950");
++    assert.equal(raw.campaigns[0].raw.apikey, REDACTED);
++
++    const groups = JSON.parse(await readFile(path.join(dir, "04-commission-groups-raw.sanitized.json"), "utf8"));
++    assert.equal(groups.commissionGroups[0].groups[0].commission, "5%");
++  } finally {
++    await rm(dir, { recursive: true, force: true });
++  }
++});
++
++
++test("campaign detail is fetched for every selected campaign and preserved separately", async () => {
++  const adapter = fakeAdapter({
++    detailByCampaign: { 1200: { id: 1200, description: "Detail-only description", terms: "Detail terms" } },
++  });
++
++  const report = await certify({ rows: [joinedCampaign(1200)], adapter });
++
++  assert.deepEqual(adapter.calls.fetchCampaignDetail, ["1200"]);
++  assert.equal(report.campaignDetailsRaw.length, 1);
++  assert.equal(report.campaignDetailsRaw[0].fetched, true);
++  assert.equal(report.campaignDetailsRaw[0].raw.description, "Detail-only description");
++  assert.equal(report.meta.campaignDetailsFetched, 1);
++
++  // List and detail stay in separate artifacts.
++  assert.equal(report.campaignsRaw[0].raw.description, undefined);
++  assert.ok(report.meta.endpointsCalled.includes("GET /campaigns/1200"));
++});
++
++test("a field present only in campaign detail is certified against its detail path", async () => {
++  const report = await certify({
++    rows: [joinedCampaign(1210)],
++    adapter: fakeAdapter({ detailByCampaign: { 1210: { id: 1210, terms: "Detail-only terms" } } }),
++  });
++
++  const termsField = report.fieldReport.fields.find((field) => field.mboField === "terms");
++
++  assert.equal(termsField.rawValuePresent, true);
++  assert.equal(termsField.rawSourceOrigin, "detail");
++  assert.equal(termsField.qualifiedRawSourcePath, "detail:$.terms");
++  assert.equal(termsField.status, "LIVE_VERIFIED");
++  assert.equal(termsField.normalizedValue, "Detail-only terms");
++
++  assert.ok(report.campaignsNormalized[0].detailOnlyKeys.includes("terms"));
++});
++
++test("NOT_AVAILABLE_FROM_ENDPOINT requires absence from BOTH list and detail", async () => {
++  const withoutEvidence = await certify({ rows: [joinedCampaign(1220)] });
++  const absent = withoutEvidence.fieldReport.fields.find((field) => field.mboField === "productCapability");
++  assert.equal(absent.status, "NOT_AVAILABLE_FROM_ENDPOINT");
++
++  const withDetailEvidence = await certify({
++    rows: [joinedCampaign(1221)],
++    adapter: fakeAdapter({ detailByCampaign: { 1221: { id: 1221, productFeedUrl: "https://feeds.example.com/1221.csv" } } }),
++  });
++  const present = withDetailEvidence.fieldReport.fields.find((field) => field.mboField === "productCapability");
++
++  assert.notEqual(present.status, "NOT_AVAILABLE_FROM_ENDPOINT");
++  assert.equal(present.status, "VERIFY_LIVE");
++  assert.equal(present.rawSourceOrigin, "detail");
++  assert.equal(present.qualifiedRawSourcePath, "detail:$.productFeedUrl");
++});
++
++test("advertiser identity found only in detail is still reported as an identity MAPPING_GAP", async () => {
++  const report = await certify({
++    rows: [joinedCampaign(1230)],
++    adapter: fakeAdapter({ detailByCampaign: { 1230: { id: 1230, advertiserId: "A-99" } } }),
++  });
++
++  const gap = report.fieldReport.mappingGaps.find((entry) => entry.proposedMboStandardField === "supplierMerchantId");
++
++  assert.ok(gap, "detail-sourced advertiser identity is a gap too");
++  assert.equal(gap.supplierJsonPath, "detail:$.advertiserId");
++  assert.equal(gap.sourceResponse, "detail");
++  assert.equal(gap.sanitizedSampleValue, "A-99");
++  assert.equal(gap.conceptKind, "identity");
++  assert.equal(gap.currentMboResult, null);
++  assert.match(gap.proposedMinimalCorrection, /do not change production mapping/i);
++});
++
++test("a failed campaign-detail request is recorded and never invented", async () => {
++  const error = new Error("detail unavailable");
++  error.response = { status: 404 };
++  const report = await certify({ rows: [joinedCampaign(1240)], adapter: fakeAdapter({ detailError: error }) });
++
++  assert.equal(report.meta.detailRequestFailures.length, 1);
++  assert.equal(report.meta.detailRequestFailures[0].httpStatus, 404);
++  assert.equal(report.campaignDetailsRaw[0].fetched, false);
++  assert.equal(report.campaignDetailsRaw[0].raw, null);
++  // Certification still proceeds on the list evidence alone.
++  assert.equal(report.meta.campaignsCertified, 1);
++});
++
++test("list and detail disagreements are recorded, with the list value kept", async () => {
++  const report = await certify({
++    rows: [joinedCampaign(1250, { status: "live" })],
++    adapter: fakeAdapter({ detailByCampaign: { 1250: { id: 1250, status: "paused", terms: "T" } } }),
++  });
++
++  const [entry] = report.meta.listDetailConflicts;
++  assert.ok(entry, "a disagreement between two real responses is surfaced");
++  const conflict = entry.conflicts.find((item) => item.key === "status");
++  assert.equal(conflict.listValue, "live");
++  assert.equal(conflict.detailValue, "paused");
++
++  const { merged } = mergeListAndDetail({ status: "live" }, { status: "paused", terms: "T" });
++  assert.equal(merged.status, "live", "list wins, matching what the production sync stores");
++  assert.equal(merged.terms, "T", "detail fills what the list omits");
++});
++
++test("a nested credential cannot survive through rawPayload, normalizedPayload, rawRuleReference or nested arrays", async () => {
++  const poison = "nested-secret-must-not-survive";
++  const report = await certify({
++    rows: [
++      joinedCampaign(1260, {
++        // Nested object, nested array, and array-of-objects, all carrying secrets.
++        integration: {
++          credentials: { apiKey: poison },
++          settings: { apiKey: poison, timeoutMs: 30000 },
++          endpoints: [{ authorization: `Bearer ${poison}`, url: "https://api.example.com" }],
++        },
++        publishers: [{ campaignSubStatus: "live", accessToken: poison }],
++      }),
++    ],
++    adapter: fakeAdapter({
++      detailByCampaign: { 1260: { id: 1260, owner: { contactEmail: "person@example.com", secret: poison } } },
++      groupsByCampaign: {
++        1260: [{ id: "g1", name: "Standard", commission: "5%", meta: { tokens: [{ token: poison }] } }],
++      },
++    }),
++  });
++
++  const everything = JSON.stringify(report);
++  assert.ok(!everything.includes(poison), "no artifact may carry the nested credential");
++  assert.ok(!everything.includes("person@example.com"), "no artifact may carry nested PII");
++
++  // Each specific carrier the production mapper creates.
++  const normalized = report.campaignsNormalized[0].normalized;
++  // A whole credential-named subtree is redacted outright.
++  assert.equal(normalized.rawPayload.integration.credentials, REDACTED);
++  // A credential key nested inside an ordinary object is redacted in place,
++  // leaving its harmless siblings intact.
++  assert.equal(normalized.rawPayload.integration.settings.apiKey, REDACTED);
++  assert.equal(normalized.rawPayload.integration.settings.timeoutMs, 30000);
++  // Inside an array of objects.
++  assert.equal(normalized.rawPayload.integration.endpoints[0].authorization, REDACTED);
++  assert.equal(normalized.rawPayload.integration.endpoints[0].url, "https://api.example.com");
++  assert.equal(normalized.rawPayload.publishers[0].accessToken, REDACTED);
++  assert.ok(JSON.stringify(normalized.normalizedPayload).length > 0);
++
++  const rule = report.rulesNormalized[0].rules[0];
++  // `tokens` is itself a credential-shaped key, so the whole array goes.
++  assert.equal(rule.rawRuleReference.group.meta.tokens, REDACTED);
++  assert.equal(rule.metadata.commissionGroupId, "g1", "ordinary rule evidence survives sanitization");
++
++  // And the ordinary campaign evidence is untouched.
++  assert.equal(normalized.rawPayload.publishers[0].campaignSubStatus, "live");
++  assert.equal(report.campaignsRaw[0].raw.campaignName, "Campaign 1260");
++});
++
++test("campaign list and detail envelopes are read safely and fail closed when unrecognised", () => {
++  assert.deepEqual(extractCampaignRows([{ id: 1 }]).rows, [{ id: 1 }]);
++  assert.deepEqual(extractCampaignRows({ response: [{ id: 2 }] }).rows, [{ id: 2 }]);
++  assert.deepEqual(extractCampaignRows({ data: { results: [{ id: 3 }] } }).rows, [{ id: 3 }]);
++  assert.deepEqual(extractCampaignRows({ id: 4 }).rows, [{ id: 4 }]);
++  assert.deepEqual(extractCampaignRows(null).rows, []);
++
++  // An unrecognised non-empty envelope must never read as "zero campaigns".
++  assert.throws(() => extractCampaignRows({ unexpected: { shape: true } }), /envelope not recognised/);
++
++  assert.deepEqual(extractCampaignDetail({ data: { id: 9 } }), { id: 9 });
++  assert.deepEqual(extractCampaignDetail([{ id: 10 }]), { id: 10 });
++  assert.deepEqual(extractCampaignDetail({ id: 11 }), { id: 11 });
++  assert.equal(extractCampaignDetail(null), null);
++});
++
++
++/* ------------------------------------------------------------------ *
++ * Rule 1 — list/detail conflict must be REVIEW_REQUIRED
++ * ------------------------------------------------------------------ */
++
++test("a conflicting list/detail value becomes REVIEW_REQUIRED, not LIVE_VERIFIED", async () => {
++  const report = await certify({
++    rows: [joinedCampaign(2100, { status: "live" })],
++    adapter: fakeAdapter({ detailByCampaign: { 2100: { id: 2100, status: "paused" } } }),
++  });
++
++  const field = report.fieldReport.fields.find((entry) => entry.mboField === "campaignStatus");
++
++  assert.equal(field.status, "REVIEW_REQUIRED");
++  assert.equal(field.statusReason, "supplier_list_detail_conflict");
++  assert.equal(field.listDetailConflict, true);
++  assert.equal(field.listSourcePath, "list:$.status");
++  assert.equal(field.listValue, "live");
++  assert.equal(field.detailSourcePath, "detail:$.status");
++  assert.equal(field.detailValue, "paused");
++  // Production precedence is untouched: the canonical value is still the list one.
++  assert.equal(field.normalizedValue, "ACTIVE");
++
++  const conflict = report.fieldReport.fieldConflicts.find((entry) => entry.mboField === "campaignStatus");
++  assert.ok(conflict, "the conflict is recorded in fieldConflicts");
++  assert.equal(conflict.reason, "supplier_list_detail_conflict");
++  assert.equal(String(conflict.campaignId), "2100");
++});
++
++test("the conflict rule covers identity, relationship, geography, money, dates, URLs and terms", async () => {
++  const report = await certify({
++    rows: [
++      joinedCampaign(2110, {
++        advertiserId: "LIST-1",
++        status: "live",
++        publishers: [{ campaignSubStatus: "live" }],
++        markets: [{ name: "Singapore" }],
++        currencyCode: "USD",
++        startDate: "2026-01-01",
++        endDate: "2026-06-01",
++        trackingURL: "https://track.example.com/list",
++        deepLinkURL: "https://shop.example.com/list",
++        commissionCost: "5%",
++        terms: "List terms",
++        campaignName: "List name",
++        advertiserName: "List advertiser",
++      }),
++    ],
++    adapter: fakeAdapter({
++      detailByCampaign: {
++        2110: {
++          id: 2110,
++          advertiserId: "DETAIL-1",
++          status: "paused",
++          publishers: [{ campaignSubStatus: "pending" }],
++          markets: [{ name: "Malaysia" }],
++          currencyCode: "SGD",
++          startDate: "2026-02-01",
++          endDate: "2026-07-01",
++          trackingURL: "https://track.example.com/detail",
++          deepLinkURL: "https://shop.example.com/detail",
++          commissionCost: "9%",
++          terms: "Detail terms",
++          campaignName: "Detail name",
++          advertiserName: "Detail advertiser",
++        },
++      },
++    }),
++  });
++
++  const byField = new Map(report.fieldReport.fields.filter((f) => f.scope === "campaign").map((f) => [f.mboField, f]));
++  const mustReview = [
++    "supplierMerchantId",
++    "campaignStatus",
++    "relationshipStatus",
++    "isJoined",
++    "countries",
++    "currency",
++    "startDate",
++    "endDate",
++    "supplierTrackingUrl",
++    "destinationUrl",
++    "campaignCommissionSummary",
++    "terms",
++    "campaignName",
++    "merchantName",
++  ];
++
++  for (const mboField of mustReview) {
++    const field = byField.get(mboField);
++    assert.ok(field, `${mboField} is certified`);
++    assert.equal(field.status, "REVIEW_REQUIRED", `${mboField} must be REVIEW_REQUIRED on conflict`);
++    assert.equal(field.statusReason, "supplier_list_detail_conflict", `${mboField} reason`);
++    assert.ok(field.listValue !== null && field.detailValue !== null, `${mboField} keeps both supplier values`);
++  }
++
++  assert.equal(report.fieldReport.fieldConflicts.length >= mustReview.length, true);
++});
++
++test("formatting-only differences are not conflicts", async () => {
++  const report = await certify({
++    rows: [joinedCampaign(2120, { status: "live", startDate: "2026-01-01" })],
++    adapter: fakeAdapter({
++      detailByCampaign: { 2120: { id: 2120, status: " LIVE ", startDate: "2026-01-01T00:00:00.000Z" } },
++    }),
++  });
++
++  const status = report.fieldReport.fields.find((entry) => entry.mboField === "campaignStatus");
++  const startDate = report.fieldReport.fields.find((entry) => entry.mboField === "startDate");
++
++  assert.equal(status.listDetailConflict, false, "case and whitespace are not a material difference");
++  assert.equal(status.status, "LIVE_VERIFIED");
++  assert.equal(startDate.listDetailConflict, false, "the same instant in two formats is not a conflict");
++  assert.equal(report.fieldReport.fieldConflicts.length, 0);
++});
++
++test("materiallyDiffer ignores formatting but catches real disagreement", () => {
++  assert.equal(materiallyDiffer("live", " LIVE "), false);
++  assert.equal(materiallyDiffer("2026-01-01", "2026-01-01T00:00:00.000Z"), false);
++  assert.equal(materiallyDiffer(["SG"], ["SG"]), false);
++  assert.equal(materiallyDiffer(5, 5), false);
++  assert.equal(materiallyDiffer("live", "paused"), true);
++  assert.equal(materiallyDiffer(["SG"], ["MY"]), true);
++  assert.equal(materiallyDiffer("2026-01-01", "2026-02-01"), true);
++  // Date.parse accepts these as 2001-01-01; they must still read as different.
++  assert.equal(materiallyDiffer("LIST-1", "DETAIL-1"), true);
++  assert.equal(materiallyDiffer("ADV-7", "ADV-8"), true);
++  // A value present on only one side is not a conflict; it is coverage.
++  assert.equal(materiallyDiffer(null, "paused"), false);
++  assert.equal(materiallyDiffer("live", undefined), false);
++});
++
++/* ------------------------------------------------------------------ *
++ * Rule 2 — a failed detail request cannot prove absence
++ * ------------------------------------------------------------------ */
++
++test("terms absent from the list with a failed detail request is VERIFY_LIVE, never NOT_AVAILABLE_FROM_ENDPOINT", async () => {
++  const error = new Error("detail unavailable");
++  error.response = { status: 500 };
++  const listRow = joinedCampaign(2200);
++  delete listRow.terms;
++
++  const report = await certify({ rows: [listRow], adapter: fakeAdapter({ detailError: error }) });
++
++  const terms = report.fieldReport.fields.find((entry) => entry.mboField === "terms");
++
++  assert.equal(terms.rawValuePresent, false);
++  assert.equal(terms.status, "VERIFY_LIVE");
++  assert.notEqual(terms.status, "NOT_AVAILABLE_FROM_ENDPOINT");
++  assert.equal(terms.statusReason, "campaign_detail_request_failed");
++  assert.equal(report.meta.detailRequestFailures.length, 1);
++});
++
++test("a failed detail request also blocks NOT_AVAILABLE_FROM_ENDPOINT for capability probes", async () => {
++  const error = new Error("detail unavailable");
++  error.response = { status: 503 };
++
++  const report = await certify({ rows: [joinedCampaign(2210)], adapter: fakeAdapter({ detailError: error }) });
++
++  for (const mboField of ["couponCapability", "productCapability"]) {
++    const field = report.fieldReport.fields.find((entry) => entry.mboField === mboField);
++    assert.equal(field.status, "VERIFY_LIVE", `${mboField} cannot be proven absent`);
++    assert.equal(field.statusReason, "campaign_detail_request_failed");
++  }
++
++  assert.equal(
++    report.fieldReport.fields.filter((f) => f.scope === "campaign" && f.status === "NOT_AVAILABLE_FROM_ENDPOINT").length,
++    0,
++    "nothing may be declared unavailable while an endpoint went unanswered",
++  );
++});
++
++test("NOT_AVAILABLE_FROM_ENDPOINT still applies when both endpoints answered and the field was absent", async () => {
++  const report = await certify({
++    rows: [joinedCampaign(2220)],
++    adapter: fakeAdapter({ detailByCampaign: { 2220: { id: 2220, description: "Present" } } }),
++  });
++
++  const productCapability = report.fieldReport.fields.find((entry) => entry.mboField === "productCapability");
++
++  assert.equal(report.meta.detailRequestFailures.length, 0);
++  assert.equal(productCapability.status, "NOT_AVAILABLE_FROM_ENDPOINT");
++  assert.equal(productCapability.statusReason, null);
++});
++
++/* ------------------------------------------------------------------ *
++ * Rule 3 — retry wraps ONE request and never paginates
++ * ------------------------------------------------------------------ */
++
++test("the single /campaigns request is retried on 5xx without ever advancing the offset", async () => {
++  const rows = Array.from({ length: 5 }, (_, index) => joinedCampaign(5000 + index));
++  const calls = [];
++  let failuresLeft = 2;
++
++  const httpClient = {
++    async get(url, config = {}) {
++      calls.push({ url, params: config.params ?? {} });
++      if (failuresLeft > 0) {
++        failuresLeft -= 1;
++        const error = new Error("upstream 503");
++        error.response = { status: 503 };
++        throw error;
++      }
++      return { status: 200, data: { response: rows, hasMore: true } };
++    },
++  };
++
++  const page = await fetchCampaignListPage({
++    httpClient,
++    agencyId: "118",
++    contactId: "9001",
++    limit: MAX_CERTIFIED_CAMPAIGNS,
++    delayMs: 1,
++  });
++
++  assert.equal(calls.length, 3, "two failures plus one success");
++  assert.equal(page.attempts, 3);
++  assert.equal(page.maxAttempts, CAMPAIGN_LIST_MAX_ATTEMPTS);
++  assert.equal(page.rows.length, MAX_CERTIFIED_CAMPAIGNS);
++
++  // Every attempt is the SAME page: offset never moves, limit never grows.
++  assert.ok(calls.every((call) => call.url === "/campaigns"));
++  assert.ok(calls.every((call) => call.params.offset === 0), "offset stays 0 — retries are not pagination");
++  assert.ok(calls.every((call) => call.params.limit === MAX_CERTIFIED_CAMPAIGNS));
++  assert.ok(calls.length <= CAMPAIGN_LIST_MAX_ATTEMPTS, "never more attempts than the documented budget");
++});
++
++test("a non-retryable status is not retried", async () => {
++  const calls = [];
++  const httpClient = {
++    async get(url, config = {}) {
++      calls.push({ url, params: config.params ?? {} });
++      const error = new Error("forbidden");
++      error.response = { status: 403 };
++      throw error;
++    },
++  };
++
++  await assert.rejects(
++    () => fetchCampaignListPage({ httpClient, agencyId: "118", contactId: "9001", delayMs: 1 }),
++    /forbidden/,
++  );
++  assert.equal(calls.length, 1, "a 403 is final; one request only");
++});
++
++
++/* ------------------------------------------------------------------ *
++ * Review item 1 & 2 — rule lineage must not come from array position
++ * ------------------------------------------------------------------ */
++
++test("REGRESSION: a fan-out rule is traced to its own group, never the group at the same array index", async () => {
++  // Group A fans out into two band rules, so rules[2] is group B while
++  // groups[2] does not exist. Index-based lineage would mis-attribute rule 2.
++  const groupA = {
++    id: "A",
++    name: "Banded A",
++    bandType: "orderValue",
++    bands: [{ lower: 0, upper: 100, commission: "3%" }, { lower: 100, commission: "7%" }],
++  };
++  const groupB = { id: "B", name: "Ordinary B", commission: "11%" };
++
++  const report = await certify({
++    rows: [joinedCampaign(3100)],
++    adapter: fakeAdapter({ groupsByCampaign: { 3100: [groupA, groupB] } }),
++  });
++
++  const [entry] = report.rulesNormalized;
++  assert.equal(entry.ruleCount, 3, "A-band-1, A-band-2, B");
++
++  const lineage = report.fieldReport.ruleLineage;
++  assert.equal(lineage.length, 3);
++  assert.deepEqual(lineage.map((item) => item.sourceGroupId), ["A", "A", "B"]);
++  assert.deepEqual(lineage.map((item) => item.bandIndex), [0, 1, null]);
++  assert.ok(lineage.every((item) => item.resolvedBy === "rawRuleReference.group"), "production lineage is primary");
++
++  // The third rule resolves to group B even though groups[2] is undefined.
++  const third = outcomeEvidenceFor(entry.rules[2], [groupA, groupB]);
++  assert.equal(third.group.id, "B");
++  assert.equal(third.band, null);
++
++  const first = outcomeEvidenceFor(entry.rules[0], [groupA, groupB]);
++  const second = outcomeEvidenceFor(entry.rules[1], [groupA, groupB]);
++  assert.equal(first.group.id, "A");
++  assert.equal(second.group.id, "A", "band 2 is still group A, not group B");
++  assert.equal(first.band.commission, "3%");
++  assert.equal(second.band.commission, "7%");
++  assert.equal(second.sourcePath, "commission-groups[0].bands[1]");
++});
++
++test("REGRESSION: a band rate is certified from its own band evidence, not left VERIFY_LIVE", async () => {
++  const groupA = {
++    id: "A",
++    name: "Banded A",
++    bandType: "orderValue",
++    bands: [{ lower: 0, upper: 100, commission: "3%" }, { lower: 100, commission: "7%" }],
++  };
++  const groupB = { id: "B", name: "Ordinary B", commission: "11%" };
++
++  const report = await certify({
++    rows: [joinedCampaign(3110)],
++    adapter: fakeAdapter({ groupsByCampaign: { 3110: [groupA, groupB] } }),
++  });
++
++  const rates = report.fieldReport.fields.filter((f) => f.scope === "commission" && f.mboField === "ratePercent");
++  assert.equal(rates.length, 3);
++
++  // Each band rate traces to its OWN band, not to the group-level value.
++  assert.equal(rates[0].normalizedValue, 3);
++  assert.equal(rates[0].rawSourceOrigin, "band");
++  assert.equal(rates[0].qualifiedRawSourcePath, "commission-groups[0].bands[0].commission");
++  assert.equal(rates[0].rawValuePresent, true, "band evidence is found, not missing");
++
++  assert.equal(rates[1].normalizedValue, 7);
++  assert.equal(rates[1].rawSourceOrigin, "band");
++  assert.equal(rates[1].qualifiedRawSourcePath, "commission-groups[0].bands[1].commission");
++  assert.equal(rates[1].rawValuePresent, true);
++
++  // Band evidence is located, but production still withholds verification of
++  // band selection, so the certification must not claim more than the mapper.
++  assert.equal(rates[0].status, "REVIEW_REQUIRED");
++  assert.equal(rates[0].statusReason, "band_selection_semantics_not_verified_live");
++  assert.equal(rates[1].status, "REVIEW_REQUIRED");
++
++  // The ordinary, unambiguous rule traces to the group level and IS verified.
++  assert.equal(rates[2].normalizedValue, 11);
++  assert.equal(rates[2].rawSourceOrigin, "group");
++  assert.equal(rates[2].qualifiedRawSourcePath, "commission-groups[1].commission");
++  assert.equal(rates[2].status, "LIVE_VERIFIED");
++
++  // Identity still comes from the owning group, per rule.
++  const groupIds = report.fieldReport.fields.filter((f) => f.mboField === "sourceGroupId");
++  assert.deepEqual(groupIds.map((f) => f.normalizedValue), ["A", "A", "B"]);
++});
++
++test("the sourceGroupId fallback is used only when production lineage is absent", () => {
++  const groups = [{ id: "A", commission: "5%" }, { id: "B", commission: "9%" }];
++  const withoutLineage = { sourceGroupId: "B", sourcePath: "commission-groups[1]", rawRuleReference: null };
++
++  const evidence = outcomeEvidenceFor(withoutLineage, groups);
++  assert.equal(evidence.group.id, "B");
++  assert.equal(evidence.resolvedBy, "sourceGroupId_fallback");
++
++  const unresolvable = outcomeEvidenceFor({ sourceGroupId: "ZZZ", rawRuleReference: null }, groups);
++  assert.deepEqual(unresolvable.group, {});
++  assert.equal(unresolvable.resolvedBy, "unresolved");
++});
++
++/* ------------------------------------------------------------------ *
++ * Review item 3 — average commission rules
++ * ------------------------------------------------------------------ */
++
++test("average commission follows the locked MBO rules", () => {
++  const percent = (rate) => ({ commissionType: "PERCENTAGE", ratePercent: rate, fixedAmount: null, currency: null, basis: "PERCENT_OF_SALE" });
++  const fixed = (amount, currency, basis) => ({ commissionType: "FIXED", ratePercent: null, fixedAmount: amount, currency, basis });
++
++  // 5% + 15% → 10%
++  assert.equal(averageCommissionDisplay([percent(5), percent(15)]).display, "10%");
++  // 0% + 10% → 5%, explicit zero included in the mean
++  const withZero = averageCommissionDisplay([percent(0), percent(10)]);
++  assert.equal(withZero.display, "5%");
++  assert.equal(withZero.value, 5);
++  assert.equal(withZero.mixed, false);
++
++  // USD 5/order + USD 15/order → USD 10/order
++  const sameBasis = averageCommissionDisplay([fixed(5, "USD", "FIXED_PER_ORDER"), fixed(15, "USD", "FIXED_PER_ORDER")]);
++  assert.equal(sameBasis.display, "USD 10/order");
++  assert.equal(sameBasis.value, 10);
++  assert.equal(sameBasis.currency, "USD");
++  assert.equal(sameBasis.basis, "FIXED_PER_ORDER");
++  assert.equal(sameBasis.mixed, false);
++
++  // USD 5/order + EUR 5/order → MIXED
++  const twoCurrencies = averageCommissionDisplay([fixed(5, "USD", "FIXED_PER_ORDER"), fixed(5, "EUR", "FIXED_PER_ORDER")]);
++  assert.equal(twoCurrencies.display, "MIXED");
++  assert.equal(twoCurrencies.mixedReason, "mixed_currencies");
++
++  // USD 5/item + USD 5/order → MIXED
++  const twoBases = averageCommissionDisplay([fixed(5, "USD", "FIXED_PER_ITEM"), fixed(5, "USD", "FIXED_PER_ORDER")]);
++  assert.equal(twoBases.display, "MIXED");
++  assert.equal(twoBases.mixedReason, "mixed_bases");
++
++  // 5% + USD 5 → MIXED
++  const twoKinds = averageCommissionDisplay([percent(5), fixed(5, "USD", "FIXED_AMOUNT")]);
++  assert.equal(twoKinds.display, "MIXED");
++  assert.equal(twoKinds.mixedReason, "mixed_commission_types");
++
++  // A single fixed item-based outcome renders its basis.
++  assert.equal(averageCommissionDisplay([fixed(4, "USD", "FIXED_PER_ITEM")]).display, "USD 4/item");
++  // An unknown basis cannot be averaged into a meaningful figure.
++  assert.equal(averageCommissionDisplay([fixed(4, "USD", "UNKNOWN")]).mixedReason, "fixed_basis_unknown");
++
++  // Never a payout input, in every branch.
++  for (const outcomes of [[percent(5)], [fixed(5, "USD", "FIXED_PER_ORDER")], [percent(5), fixed(5, "USD", "FIXED_AMOUNT")]]) {
++    assert.equal(commissionPresentation(outcomes.map((o) => ({ ...o }))).averageUsableAsFinancialInput, false);
++  }
++});
++
++/* ------------------------------------------------------------------ *
++ * Review item 4 — sanitization of primitives and error messages
++ * ------------------------------------------------------------------ */
++
++test("a secret in a primitive array element is redacted", () => {
++  const { value, redactions } = sanitizeDeep({ notes: ["Bearer real-secret", "harmless note"] });
++
++  assert.equal(value.notes[0], REDACTED);
++  assert.equal(value.notes[1], "harmless note", "ordinary array evidence survives");
++  assert.ok(redactions.some((entry) => entry.path === "$.notes[0]" && entry.reason === "secret_value_pattern"));
++
++  // And a bare string handed straight in.
++  assert.equal(sanitizeDeep("Bearer real-secret").value, REDACTED);
++});
++
++test("supplier error messages are scrubbed and stored as a whitelist", () => {
++  assert.equal(
++    sanitizeErrorMessage("Request failed: GET /campaigns?apikey=REALKEY123&limit=5"),
++    "Request failed: GET /campaigns?apikey=[REDACTED]&limit=5",
++  );
++  assert.equal(sanitizeErrorMessage("bad header Bearer REALTOKEN"), "bad header Bearer [REDACTED]");
++  assert.equal(sanitizeErrorMessage("db postgres://u:realpw@host/db"), "db postgres://u:[REDACTED]@host/db");
++  assert.ok(sanitizeErrorMessage("x".repeat(500)).length <= 301);
++
++  const axiosLike = new Error("connect failed for apikey=REALKEY123");
++  axiosLike.code = "ECONNRESET";
++  axiosLike.response = { status: 502, headers: { authorization: "Bearer REALTOKEN" }, data: { secret: "REALKEY123" } };
++  axiosLike.config = { headers: { apikey: "REALKEY123" }, url: "https://host/campaigns?apikey=REALKEY123" };
++  axiosLike.request = { _header: "GET /campaigns\nauthorization: Bearer REALTOKEN" };
++
++  const record = safeRequestFailure("77", axiosLike);
++
++  assert.deepEqual(Object.keys(record).sort(), ["campaignId", "code", "httpStatus", "message"]);
++  assert.equal(record.campaignId, "77");
++  assert.equal(record.httpStatus, 502);
++  assert.equal(record.code, "ECONNRESET");
++  assert.ok(!JSON.stringify(record).includes("REALKEY123"), "no api key survives");
++  assert.ok(!JSON.stringify(record).includes("REALTOKEN"), "no bearer token survives");
++  assert.equal(record.config, undefined);
++  assert.equal(record.request, undefined);
++});
++
++test("a secret in a failing request cannot reach any artifact", async () => {
++  const detailError = new Error("detail failed: https://host/campaigns/1?apikey=REALKEY123");
++  detailError.response = { status: 502, headers: { authorization: "Bearer REALTOKEN" } };
++  detailError.config = { headers: { apikey: "REALKEY123" } };
++
++  const report = await certify({
++    rows: [joinedCampaign(3200, { notes: ["Bearer REALTOKEN"] })],
++    adapter: fakeAdapter({ detailError }),
++  });
++
++  const everything = JSON.stringify(report);
++  assert.ok(!everything.includes("REALKEY123"), "no api key anywhere in the report");
++  assert.ok(!everything.includes("REALTOKEN"), "no bearer token anywhere in the report");
++  assert.equal(report.meta.detailRequestFailures[0].httpStatus, 502);
++  assert.match(report.meta.detailRequestFailures[0].message, /apikey=\[REDACTED\]/);
++
++  const markdown = renderSummaryMarkdown(report);
++  assert.ok(!markdown.includes("REALKEY123") && !markdown.includes("REALTOKEN"), "nor in the summary");
++});
++
++/* ------------------------------------------------------------------ *
++ * Review item 5 — campaign status evidence precedence
++ * ------------------------------------------------------------------ */
++
++test("campaign status evidence follows production precedence, not the top-level status", async () => {
++  const report = await certify({
++    rows: [joinedCampaign(3300, { advertiserCampaignStatus: "paused", status: "live" })],
++  });
++
++  const field = report.fieldReport.fields.find((entry) => entry.mboField === "campaignStatus");
++
++  assert.equal(field.normalizedValue, "PAUSED", "production used the advertiser status");
++  assert.equal(field.rawSourcePath, "advertiserCampaignStatus");
++  assert.notEqual(field.rawSourcePath, "status");
++  assert.equal(field.listValue, "paused");
++  assert.equal(field.status, "LIVE_VERIFIED");
++
++  // Path selection mirrors the mapper's own fallthrough.
++  assert.deepEqual(campaignStatusEvidencePaths({ advertiserCampaignStatus: "paused", status: "live" }), ["advertiserCampaignStatus"]);
++  assert.deepEqual(campaignStatusEvidencePaths({ advertiser_campaign_status: "live" }), ["advertiser_campaign_status"]);
++  // An advertiser value production cannot normalize is not the evidence.
++  assert.deepEqual(campaignStatusEvidencePaths({ advertiserCampaignStatus: "???", status: "live" }), ["status", "campaignStatus", "subStatus"]);
++  assert.deepEqual(campaignStatusEvidencePaths({ status: "live" }), ["status", "campaignStatus", "subStatus"]);
++});
++
++/* ------------------------------------------------------------------ *
++ * Review item 6 — relationship evidence comes from production
++ * ------------------------------------------------------------------ */
++
++test("relationship evidence is taken from the production mapper's own evidenceSource", () => {
++  assert.deepEqual(relationshipEvidencePaths({ rejectedDate: "2026-01-05", publishers: [{ campaignSubStatus: "live" }] }), ["rejectedDate"]);
++  assert.deepEqual(relationshipEvidencePaths({ publishers: [{ campaignSubStatus: "live" }] }), ["publishers[].campaignSubStatus"]);
++  assert.deepEqual(relationshipEvidencePaths({ publisherEligibility: "eligible" }), ["publisherEligibility"]);
++  assert.deepEqual(relationshipEvidencePaths({ status: "live" }), ["status"]);
++  assert.deepEqual(relationshipEvidencePaths({ status: "paused", cancelledDate: "2026-02-01" }), ["cancelledDate"]);
++});
++
++test("a rejected campaign traces relationship evidence to rejectedDate, not the publisher block", async () => {
++  const report = await certify({
++    rows: [joinedCampaign(3400, { rejectedDate: "2026-01-05" })],
++    scope: "all",
++  });
++
++  const relationship = report.fieldReport.fields.find((entry) => entry.mboField === "relationshipStatus");
++  const isJoined = report.fieldReport.fields.find((entry) => entry.mboField === "isJoined");
++
++  assert.equal(relationship.normalizedValue, "NOT_JOINED");
++  assert.equal(relationship.rawSourcePath, "rejectedDate");
++  assert.equal(relationship.listValue, "2026-01-05");
++  assert.equal(isJoined.rawSourcePath, "rejectedDate");
++  assert.equal(isJoined.normalizedValue, false);
++});
++
++test("a joined campaign traces relationship evidence to the publisher sub-status", async () => {
++  const report = await certify({ rows: [joinedCampaign(3410)] });
++
++  const relationship = report.fieldReport.fields.find((entry) => entry.mboField === "relationshipStatus");
++
++  assert.equal(relationship.normalizedValue, "JOINED");
++  assert.equal(relationship.rawSourcePath, "publishers[].campaignSubStatus");
++  assert.equal(relationship.status, "LIVE_VERIFIED");
++});
++
++/* ------------------------------------------------------------------ *
++ * Review item 7 — request counting
++ * ------------------------------------------------------------------ */
++
++test("retries are counted as outbound requests while the page count stays 1", async () => {
++  const rows = Array.from({ length: 5 }, (_, index) => joinedCampaign(6000 + index));
++  let failuresLeft = 2;
++  const calls = [];
++  const httpClient = {
++    async get(url, config = {}) {
++      calls.push({ url, params: config.params ?? {} });
++      if (failuresLeft > 0) {
++        failuresLeft -= 1;
++        const error = new Error("upstream 503");
++        error.response = { status: 503 };
++        throw error;
++      }
++      return { status: 200, data: { response: rows, hasMore: true } };
++    },
++  };
++
++  const report = await runCertification({
++    httpClient,
++    adapter: fakeAdapter(),
++    region: "sea",
++    accountLabel: "default",
++    selectCampaigns: selectOptimiseCommissionGroupCampaigns,
++    now: () => new Date("2026-09-09T00:00:00.000Z"),
++    listRetryDelayMs: 1,
++  });
++
++  assert.equal(calls.length, 3, "two 503s then a success");
++  assert.equal(report.meta.campaignListRequests, 3, "actual outbound attempts");
++  assert.equal(report.meta.campaignListPages, 1, "still one logical page");
++  assert.equal(report.meta.campaignListPage.attempts, 3);
++
++  const markdown = renderSummaryMarkdown(report);
++  assert.match(markdown, /Campaign-list pages: 1/);
++  assert.match(markdown, /Outbound GET \/campaigns requests, retries included: 3/);
++});
++
++/* ------------------------------------------------------------------ *
++ * Review item 8 — evidence cannot be written outside certification-output
++ * ------------------------------------------------------------------ */
++
++test("evidence output is confined to certification-output/", () => {
++  const inside = path.join(EVIDENCE_ROOT, "optimise", "sea", "run-1");
++  assert.equal(resolveOutputDir(inside), inside);
++  assert.equal(resolveOutputDir(EVIDENCE_ROOT), EVIDENCE_ROOT);
++
++  for (const bad of ["/tmp/evidence", path.join(EVIDENCE_ROOT, "..", "src"), path.join(EVIDENCE_ROOT, "..", "..", "escape"), `${EVIDENCE_ROOT}-sibling`]) {
++    assert.throws(() => resolveOutputDir(bad), /Refusing to write supplier evidence outside/, `must reject ${bad}`);
++  }
++
++  assert.ok(EVIDENCE_ROOT.endsWith(`${path.sep}certification-output`));
++});
++
++
++/* ------------------------------------------------------------------ *
++ * Final review 1 — semantic conflicts across DIFFERENT raw paths
++ * ------------------------------------------------------------------ */
++
++test("A) list status=live vs detail advertiserCampaignStatus=paused is a semantic conflict", async () => {
++  const listRow = joinedCampaign(4100, { status: "live" });
++  delete listRow.advertiserCampaignStatus;
++
++  const report = await certify({
++    rows: [listRow],
++    adapter: fakeAdapter({ detailByCampaign: { 4100: { id: 4100, advertiserCampaignStatus: "paused" } } }),
++  });
++
++  const field = report.fieldReport.fields.find((entry) => entry.mboField === "campaignStatus");
++
++  // The two responses share no raw path, so only a semantic comparison finds this.
++  assert.equal(field.status, "REVIEW_REQUIRED");
++  assert.equal(field.statusReason, "supplier_list_detail_conflict");
++  assert.equal(field.conflictKind, "semantic");
++  assert.equal(field.listSemanticValue, "ACTIVE");
++  assert.equal(field.detailSemanticValue, "PAUSED");
++
++  // Both sides keep their own evidence source and value.
++  assert.equal(field.listSourcePath, "list:$.status");
++  assert.equal(field.listValue, "live");
++  assert.equal(field.detailSourcePath, "detail:$.advertiserCampaignStatus");
++  assert.equal(field.detailValue, "paused");
++
++  // The merged canonical value is preserved untouched (detail wins here because
++  // production prefers advertiserCampaignStatus on the merged payload).
++  assert.equal(field.normalizedValue, "PAUSED");
++
++  const conflict = report.fieldReport.fieldConflicts.find((entry) => entry.mboField === "campaignStatus");
++  assert.ok(conflict);
++  assert.equal(conflict.listSemanticValue, "ACTIVE");
++  assert.equal(conflict.detailSemanticValue, "PAUSED");
++});
++
++test("B) list publishers live vs detail rejectedDate is a relationship conflict", async () => {
++  const report = await certify({
++    rows: [joinedCampaign(4110)],
++    adapter: fakeAdapter({ detailByCampaign: { 4110: { id: 4110, rejectedDate: "2026-03-01" } } }),
++  });
++
++  const relationship = report.fieldReport.fields.find((entry) => entry.mboField === "relationshipStatus");
++  const isJoined = report.fieldReport.fields.find((entry) => entry.mboField === "isJoined");
++
++  assert.equal(relationship.status, "REVIEW_REQUIRED");
++  assert.equal(relationship.statusReason, "supplier_list_detail_conflict");
++  assert.equal(relationship.conflictKind, "semantic");
++  assert.equal(relationship.listSemanticValue, "JOINED");
++  assert.equal(relationship.detailSemanticValue, "NOT_JOINED");
++  assert.equal(relationship.listSourcePath, "list:$.publishers[].campaignSubStatus");
++  assert.equal(relationship.detailSourcePath, "detail:$.rejectedDate");
++
++  assert.equal(isJoined.status, "REVIEW_REQUIRED");
++  assert.equal(isJoined.statusReason, "supplier_list_detail_conflict");
++  assert.equal(isJoined.listSemanticValue, true);
++  assert.equal(isJoined.detailSemanticValue, false);
++});
++
++test("semantic agreement through different spellings is NOT a conflict", async () => {
++  const listRow = joinedCampaign(4120, { status: "live" });
++
++  const report = await certify({
++    rows: [listRow],
++    // Different raw field, same production meaning (ACTIVE).
++    adapter: fakeAdapter({ detailByCampaign: { 4120: { id: 4120, advertiserCampaignStatus: "active" } } }),
++  });
++
++  const field = report.fieldReport.fields.find((entry) => entry.mboField === "campaignStatus");
++  assert.equal(field.listDetailConflict, false, "same meaning, different wording, is agreement");
++  assert.equal(field.status, "LIVE_VERIFIED");
++  assert.equal(field.listSemanticValue, "ACTIVE");
++  assert.equal(field.detailSemanticValue, "ACTIVE");
++});
++
++test("semanticComparison only compares when BOTH responses carry sufficient evidence", () => {
++  const statusSpec = { evidenceResolver: "campaignStatus", mboField: "campaignStatus" };
++  const relationshipSpec = { evidenceResolver: "relationship", mboField: "relationshipStatus" };
++
++  assert.equal(semanticComparison(statusSpec, { status: "live" }, {}).comparable, false, "no detail evidence");
++  assert.equal(semanticComparison(statusSpec, {}, { status: "paused" }).comparable, false, "no list evidence");
++
++  const both = semanticComparison(statusSpec, { status: "live" }, { advertiserCampaignStatus: "paused" });
++  assert.equal(both.comparable, true);
++  assert.equal(both.differs, true);
++
++  assert.equal(semanticComparison(relationshipSpec, { publishers: [{ campaignSubStatus: "live" }] }, {}).comparable, false);
++  const rel = semanticComparison(relationshipSpec, { publishers: [{ campaignSubStatus: "live" }] }, { rejectedDate: "2026-03-01" });
++  assert.equal(rel.comparable, true);
++  assert.equal(rel.listSemantic, "JOINED");
++  assert.equal(rel.detailSemantic, "NOT_JOINED");
++
++  // A spec with no resolver is never compared semantically.
++  assert.equal(semanticComparison({ mboField: "campaignName" }, { a: 1 }, { a: 2 }).comparable, false);
++});
++
++/* ------------------------------------------------------------------ *
++ * Final review 2 — production review reasons must reach the verdict
++ * ------------------------------------------------------------------ */
++
++test("a bare numeric commission is REVIEW_REQUIRED, never LIVE_VERIFIED", async () => {
++  // 8.5 with no %, currency or unit. Production parses ratePercent 8.5 but
++  // records commission_unit_not_explicit.
++  const report = await certify({
++    rows: [joinedCampaign(4200)],
++    adapter: fakeAdapter({ groupsByCampaign: { 4200: [{ id: "N", name: "Bare", commission: 8.5 }] } }),
++  });
++
++  const rule = report.rulesNormalized[0].rules[0];
++  assert.equal(rule.ratePercent, 8.5, "production still parses the number");
++  assert.deepEqual(rule.metadata.reviewReasons, ["commission_unit_not_explicit"]);
++
++  const byField = new Map(report.fieldReport.fields.filter((f) => f.scope === "commission").map((f) => [f.mboField, f]));
++  for (const mboField of ["commissionType", "supplierRuleType", "ratePercent", "basis"]) {
++    assert.equal(byField.get(mboField).status, "REVIEW_REQUIRED", `${mboField} must not be verified`);
++    assert.equal(byField.get(mboField).statusReason, "commission_unit_not_explicit");
++  }
++  assert.notEqual(byField.get("ratePercent").status, "LIVE_VERIFIED");
++});
++
++test("a banded rule keeps band selection unverified", async () => {
++  const report = await certify({
++    rows: [joinedCampaign(4210)],
++    adapter: fakeAdapter({
++      groupsByCampaign: {
++        4210: [{ id: "B", name: "Banded", bandType: "orderValue", bands: [{ lower: 0, upper: 100, commission: "3%" }, { lower: 100, commission: "7%" }] }],
++      },
++    }),
++  });
++
++  const byField = report.fieldReport.fields.filter((f) => f.scope === "commission");
++  for (const mboField of ["ratePercent", "bands", "couponOrTier"]) {
++    const entries = byField.filter((f) => f.mboField === mboField);
++    assert.ok(entries.length > 0, `${mboField} certified`);
++    for (const entry of entries) {
++      assert.equal(entry.status, "REVIEW_REQUIRED", `${mboField} must reflect unverified band selection`);
++      assert.equal(entry.statusReason, "band_selection_semantics_not_verified_live");
++    }
++  }
++});
++
++test("a condition-bearing rule keeps its condition semantics unverified", async () => {
++  const report = await certify({
++    rows: [joinedCampaign(4220)],
++    adapter: fakeAdapter({
++      groupsByCampaign: {
++        4220: [{ id: "C", name: "Cond", commission: "5%", conditions: [{ type: "newCustomer", value: true }] }],
++      },
++    }),
++  });
++
++  const rule = report.rulesNormalized[0].rules[0];
++  assert.ok(rule.metadata.reviewReasons.includes("optimise_condition_semantics_not_verified_live"));
++
++  const conditions = report.fieldReport.fields.find((f) => f.scope === "commission" && f.mboField === "conditions");
++  assert.equal(conditions.status, "REVIEW_REQUIRED");
++  assert.equal(conditions.statusReason, "optimise_condition_semantics_not_verified_live");
++  assert.notEqual(conditions.status, "LIVE_VERIFIED");
++});
++
++test("an unambiguous rule is still LIVE_VERIFIED", async () => {
++  const report = await certify({
++    rows: [joinedCampaign(4230)],
++    adapter: fakeAdapter({ groupsByCampaign: { 4230: [{ id: "P", name: "Plain", commission: "11%" }] } }),
++  });
++
++  const rule = report.rulesNormalized[0].rules[0];
++  assert.deepEqual(rule.metadata.reviewReasons, [], "production raised nothing");
++
++  const rate = report.fieldReport.fields.find((f) => f.scope === "commission" && f.mboField === "ratePercent");
++  assert.equal(rate.status, "LIVE_VERIFIED");
++  assert.equal(rate.statusReason, null);
++});
++
++test("review reasons map to the fields they make unsafe", () => {
++  assert.equal(reviewReasonForField("ratePercent", ["commission_unit_not_explicit"]), "commission_unit_not_explicit");
++  assert.equal(reviewReasonForField("basis", ["payout_basis_unknown"]), "payout_basis_unknown");
++  assert.equal(reviewReasonForField("currency", ["fixed_payout_currency_missing"]), "fixed_payout_currency_missing");
++  assert.equal(reviewReasonForField("sourceGroupId", ["supplier_group_id_missing"]), "supplier_group_id_missing");
++  assert.equal(reviewReasonForField("bands", ["band_identity_insufficient"]), "band_identity_insufficient");
++  // Unrelated fields are untouched by an unrelated reason.
++  assert.equal(reviewReasonForField("sourceGroupName", ["commission_unit_not_explicit"]), null);
++  assert.equal(reviewReasonForField("ratePercent", []), null);
++  assert.ok(Object.keys(REVIEW_REASON_FIELDS).includes("commission_unit_not_explicit"));
++});
++
++/* ------------------------------------------------------------------ *
++ * Final review 3 — deep list/detail merge
++ * ------------------------------------------------------------------ */
++
++test("detail fills nested leaves the list omits, and the list leaf still wins", () => {
++  const { merged, conflicts } = mergeListAndDetail(
++    { landingPage: { id: 12 }, vertical: { primary: "Retail" } },
++    { landingPage: { websiteUrl: "https://brand.com", id: 99 }, vertical: { secondary: "Fashion" } },
++  );
++
++  assert.equal(merged.landingPage.id, 12, "list leaf wins the real conflict");
++  assert.equal(merged.landingPage.websiteUrl, "https://brand.com", "detail-only nested leaf survives");
++  assert.equal(merged.vertical.primary, "Retail");
++  assert.equal(merged.vertical.secondary, "Fashion");
++
++  const idConflict = conflicts.find((entry) => entry.key === "landingPage.id");
++  assert.ok(idConflict, "the leaf conflict is recorded at its path");
++  assert.equal(idConflict.listValue, 12);
++  assert.equal(idConflict.detailValue, 99);
++});
++
++test("arrays stay whole supplier values and are never element-merged", () => {
++  const { merged } = mergeListAndDetail(
++    { markets: [{ name: "Singapore" }] },
++    { markets: [{ name: "Malaysia" }, { name: "Thailand" }] },
++  );
++
++  assert.deepEqual(merged.markets, [{ name: "Singapore" }], "the list array is kept intact, not unioned");
++
++  const detailOnly = mergeListAndDetail({}, { markets: [{ name: "Malaysia" }] });
++  assert.deepEqual(detailOnly.merged.markets, [{ name: "Malaysia" }], "a detail-only array is taken whole");
++});
++
++test("REGRESSION: a detail-only landingPage.websiteUrl reaches production mapping and is not a false MAPPING_GAP", async () => {
++  const listRow = joinedCampaign(4300, { landingPage: { id: 12 } });
++  delete listRow.deepLinkURL;
++
++  const report = await certify({
++    rows: [listRow],
++    adapter: fakeAdapter({
++      detailByCampaign: { 4300: { id: 4300, landingPage: { websiteUrl: "https://brand.com" } } },
++    }),
++  });
++
++  // The merged payload handed to mapOptimiseCampaign carries both leaves.
++  const normalized = report.campaignsNormalized[0].normalized;
++  assert.equal(normalized.rawPayload.landingPage.id, 12);
++  assert.equal(normalized.rawPayload.landingPage.websiteUrl, "https://brand.com");
++
++  const destinationUrl = report.fieldReport.fields.find((entry) => entry.mboField === "destinationUrl");
++  assert.equal(destinationUrl.normalizedValue, "https://brand.com", "production mapped the detail-only leaf");
++  assert.equal(destinationUrl.rawSourceOrigin, "detail");
++  assert.equal(destinationUrl.qualifiedRawSourcePath, "detail:$.landingPage.websiteUrl");
++  assert.equal(destinationUrl.status, "LIVE_VERIFIED");
++  assert.notEqual(destinationUrl.status, "MAPPING_GAP");
++
++  assert.equal(
++    report.fieldReport.mappingGaps.some((gap) => gap.proposedMboStandardField === "destinationUrl"),
++    false,
++    "no phantom gap for a leaf the shallow merge would have dropped",
++  );
++});
