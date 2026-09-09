@@ -4,6 +4,11 @@ import {
   PREVIEW_CERTIFICATION_ROUTE,
   optimiseCertificationPreviewHandler,
 } from "./internal/optimiseCertificationPreview.js";
+// TEMPORARY — preview-only, read-only Optimise identifier audit (remove with the route below).
+import {
+  PREVIEW_IDENTIFIER_AUDIT_ROUTE,
+  optimiseIdentifierAuditPreviewHandler,
+} from "./internal/optimiseIdentifierAuditPreview.js";
 import { PERMISSIONS } from "../auth/permissions.js";
 import { getEntities, getEntitySummaryHandler } from "../controllers/entities.controller.js";
 import {
@@ -318,6 +323,13 @@ router.get("/health", (_req, res) => res.json({ ok: true }));
 // evidence has been captured. It 404s outside VERCEL_ENV=preview and without a
 // matching x-certification-token, and performs read-only supplier GETs.
 router.post(PREVIEW_CERTIFICATION_ROUTE, optimiseCertificationPreviewHandler);
+
+// TEMPORARY — Preview-only, READ-ONLY Optimise persisted-identifier audit.
+// Remove this route and src/routes/internal/optimiseIdentifierAuditPreview.js
+// once the audit has been captured. Same gate as the certification route above;
+// runs SELECT/CTE statements only, loads the database layer only after the gate,
+// and makes no supplier API call.
+router.post(PREVIEW_IDENTIFIER_AUDIT_ROUTE, optimiseIdentifierAuditPreviewHandler);
 
 router.post("/auth/send-otp", authRateLimiter, sendOtpHandler);
 router.post("/auth/verify-otp", authRateLimiter, verifyOtpHandler);
