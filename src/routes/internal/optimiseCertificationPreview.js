@@ -65,7 +65,8 @@ function notFound(res) {
 function scrubFailures(failures = [], sanitizeErrorMessage) {
   if (!Array.isArray(failures) || typeof sanitizeErrorMessage !== "function") return [];
   return failures.map((failure) => ({
-    campaignId: failure?.campaignId ?? null,
+    identifier: failure?.identifier ?? null,
+    identifierKind: failure?.identifierKind ?? null,
     httpStatus: typeof failure?.httpStatus === "number" ? failure.httpStatus : null,
     code: failure?.code ? sanitizeErrorMessage(failure.code, { maxLength: 60 }) : null,
     message: sanitizeErrorMessage(failure?.message ?? ""),
@@ -73,11 +74,13 @@ function scrubFailures(failures = [], sanitizeErrorMessage) {
 }
 
 async function loadDefaultDependencies() {
-  const [certificationCore, adapterModule, credentialsModule, syncModule, httpModule] = await Promise.all([
+  // Deliberately does NOT load the production commission-group sync job: the
+  // certification uses its own selector, and importing that job would pull Prisma
+  // into this read-only endpoint for no reason.
+  const [certificationCore, adapterModule, credentialsModule, httpModule] = await Promise.all([
     import("../../../scripts/lib/optimiseCertification.mjs"),
     import("../../adapters/optimise.adapter.js"),
     import("../../modules/integrations/optimiseCredentials.js"),
-    import("../../jobs/optimiseCommissionGroupSync.js"),
     import("../../core/httpClient.js"),
   ]);
 
@@ -88,7 +91,6 @@ async function loadDefaultDependencies() {
     sanitizeErrorMessage: certificationCore.sanitizeErrorMessage,
     createOptimiseAdapter: adapterModule.createOptimiseAdapter,
     resolveOptimiseCredentials: credentialsModule.resolveOptimiseCredentials,
-    selectOptimiseCommissionGroupCampaigns: syncModule.selectOptimiseCommissionGroupCampaigns,
     createHttpClient: httpModule.createHttpClient,
   };
 }
@@ -123,7 +125,6 @@ export function createOptimiseCertificationPreviewHandler({
         sanitizeErrorMessage,
         createOptimiseAdapter,
         resolveOptimiseCredentials,
-        selectOptimiseCommissionGroupCampaigns,
         createHttpClient,
       } = await loadDependencies();
 
@@ -178,7 +179,6 @@ export function createOptimiseCertificationPreviewHandler({
         accountLabel: FORCED_ACCOUNT_LABEL,
         scope: "joined",
         maxCampaigns: FORCED_MAX_CAMPAIGNS,
-        selectCampaigns: selectOptimiseCommissionGroupCampaigns,
       });
 
       // Raw and normalized supplier payloads are deliberately NOT returned:
@@ -192,7 +192,10 @@ export function createOptimiseCertificationPreviewHandler({
           generatedAt: new Date().toISOString(),
           campaignListPages: certification.meta.campaignListPages,
           campaignListRequests: certification.meta.campaignListRequests,
-          campaignDetailsFetched: certification.meta.campaignDetailsFetched,
+          detailRequestsIssued: certification.meta.detailRequestsIssued,
+          campaignDetailResponsesSucceeded: certification.meta.campaignDetailResponsesSucceeded,
+          campaignRowsWithDetailEvidence: certification.meta.campaignRowsWithDetailEvidence,
+          rowsReusingCachedDetail: certification.meta.rowsReusingCachedDetail,
           commissionGroupsFetched: certification.meta.commissionGroupsFetched,
           normalizedRuleCount: certification.meta.normalizedRuleCount,
           detailRequestFailures: scrubFailures(certification.meta.detailRequestFailures, sanitizeErrorMessage),

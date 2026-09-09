@@ -47,16 +47,14 @@ export const REGION_ENV_NAMES = Object.freeze({
  */
 async function loadProductionModules() {
   try {
-    const [adapterModule, credentialsModule, syncModule, httpModule] = await Promise.all([
+    const [adapterModule, credentialsModule, httpModule] = await Promise.all([
       import("../src/adapters/optimise.adapter.js"),
       import("../src/modules/integrations/optimiseCredentials.js"),
-      import("../src/jobs/optimiseCommissionGroupSync.js"),
       import("../src/core/httpClient.js"),
     ]);
     return {
       createOptimiseAdapter: adapterModule.createOptimiseAdapter,
       resolveOptimiseCredentials: credentialsModule.resolveOptimiseCredentials,
-      selectOptimiseCommissionGroupCampaigns: syncModule.selectOptimiseCommissionGroupCampaigns,
       createHttpClient: httpModule.createHttpClient,
     };
   } catch (error) {
@@ -233,8 +231,7 @@ export async function main(argv = process.argv.slice(2)) {
     }
   }
 
-  const { createOptimiseAdapter, createHttpClient, resolveOptimiseCredentials, selectOptimiseCommissionGroupCampaigns } =
-    await loadProductionModules();
+  const { createOptimiseAdapter, createHttpClient, resolveOptimiseCredentials } = await loadProductionModules();
 
   const credentials = await resolveOptimiseCredentials(region, accountLabel);
   const report = credentialReport(credentials, region);
@@ -285,7 +282,6 @@ export async function main(argv = process.argv.slice(2)) {
     accountLabel: safeAccountLabel(credentials.accountLabel),
     scope,
     maxCampaigns,
-    selectCampaigns: selectOptimiseCommissionGroupCampaigns,
   });
 
   const ignore = await ensureGitignored();
@@ -299,7 +295,12 @@ export async function main(argv = process.argv.slice(2)) {
   console.log(`Outbound GET /campaigns requests, retries included: ${certification.meta.campaignListRequests}`);
   console.log(`Campaign rows returned by that page: ${certification.meta.campaignListPage.rowsReturnedBySupplier} (limit ${certification.meta.campaignListPage.requestedLimit})`);
   console.log(`Campaigns certified: ${certification.meta.campaignsCertified}`);
-  console.log(`Campaign detail responses fetched: ${certification.meta.campaignDetailsFetched}`);
+  console.log(
+    `Campaign detail requests issued: ${certification.meta.detailRequestsIssued} · responses succeeded: ${certification.meta.campaignDetailResponsesSucceeded}`,
+  );
+  console.log(
+    `Campaign rows with detail evidence: ${certification.meta.campaignRowsWithDetailEvidence} (reused cached: ${certification.meta.rowsReusingCachedDetail})`,
+  );
   console.log(`Commission groups fetched: ${certification.meta.commissionGroupsFetched}`);
   console.log(`Normalized SupplierCommissionRule records: ${certification.meta.normalizedRuleCount}`);
   console.log(`Values redacted: ${certification.meta.redactionCount}`);

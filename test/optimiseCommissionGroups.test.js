@@ -8,6 +8,7 @@ import { describe, it } from "node:test";
 process.env.OPTIMISE_MIN_INTERVAL_MS = "0";
 const { createOptimiseAdapter, extractCommissionGroupRows } = await import("../src/adapters/optimise.adapter.js");
 const { createHttpClient } = await import("../src/core/httpClient.js");
+const { optimiseCampaignIdentifiers } = await import("../src/modules/supplier/optimiseCampaignIdentifiers.js");
 const {
   OPTIMISE_VERIFY_LIVE_GATE,
   mapOptimiseCommissionGroupCandidates,
@@ -1049,5 +1050,63 @@ describe("Optimise commission groups — array-order-independent band and condit
       CONTEXT,
     );
     assert.equal(collapsed.length, 1);
+  });
+});
+
+
+describe("Optimise identifier namespaces", () => {
+  it("keeps productId, campaignId and generic id in separate namespaces", () => {
+    assert.deepEqual(
+      optimiseCampaignIdentifiers({ id: "AAA", campaignId: "BBB", productId: "CCC", legacyId: "DDD" }),
+      { productId: "CCC", campaignId: "BBB", genericId: "AAA", legacyId: "DDD" },
+    );
+
+    // snake_case campaign id is the same namespace as campaignId.
+    assert.equal(optimiseCampaignIdentifiers({ campaign_id: "SNAKE" }).campaignId, "SNAKE");
+    // A generic id is NEVER promoted into another namespace.
+    assert.deepEqual(optimiseCampaignIdentifiers({ id: "ONLY" }), {
+      productId: null,
+      campaignId: null,
+      genericId: "ONLY",
+      legacyId: null,
+    });
+    // Values unusable as a path segment are rejected per namespace.
+    assert.deepEqual(optimiseCampaignIdentifiers({ productId: "3/x", campaignId: " 7 " }), {
+      productId: null,
+      campaignId: "7",
+      genericId: null,
+      legacyId: null,
+    });
+    assert.deepEqual(optimiseCampaignIdentifiers({}), {
+      productId: null,
+      campaignId: null,
+      genericId: null,
+      legacyId: null,
+    });
+  });
+
+  it("REGRESSION: production commission-group selection and metrics are unchanged", () => {
+    // Same rows and expectations as the production contract test above: adding the
+    // identifier helper must not alter which campaigns production requests.
+    const rows = [
+      { id: 1, publishers: [{ campaignSubStatus: "approved" }] },
+      { id: "1", publishers: [{ campaignSubStatus: "approved" }] },
+      { id: 2, status: "notapplied" },
+      { campaignId: "3/x", publishers: [{ campaignSubStatus: "approved" }] },
+      { id: 4, publishers: [{ campaignSubStatus: "approved" }] },
+      { id: 5, publishers: [{ campaignSubStatus: "approved" }] },
+    ];
+
+    const joined = selectOptimiseCommissionGroupCampaigns(rows, { scope: "joined", maxCampaigns: 2 });
+    assert.deepEqual(joined.campaigns.map((c) => c.campaignId), ["1", "4"]);
+    assert.equal(joined.campaignsInspected, 6);
+    assert.equal(joined.skippedDuplicate, 1);
+    assert.equal(joined.skippedNoId, 1);
+    assert.equal(joined.skippedByScope, 1);
+    assert.equal(joined.skippedByCap, 1);
+
+    // The production selector still emits its own shape: one campaignId per entry.
+    assert.ok(joined.campaigns.every((c) => typeof c.campaignId === "string"));
+    assert.ok(joined.campaigns.every((c) => !("identifiers" in c)), "production shape is not the certification shape");
   });
 });

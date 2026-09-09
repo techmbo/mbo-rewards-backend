@@ -242,11 +242,18 @@ export function extractCommissionGroupRows(responseData) {
   throw error;
 }
 
-function assertCampaignId(campaignId) {
-  const text = campaignId == null ? "" : String(campaignId).trim();
+/**
+ * Validate a value destined for a URL path segment.
+ *
+ * Optimise keys its endpoints by DIFFERENT identifiers — detail by productId,
+ * commission-groups by campaignId — so the label is required: an error must name
+ * the identifier that was actually wrong, not a generic "campaignId".
+ */
+function assertPathIdentifier(value, { label, code }) {
+  const text = value == null ? "" : String(value).trim();
   if (!text || /[\/\s?#]/.test(text)) {
-    const error = new Error(`Invalid Optimise campaignId for commission-groups: ${JSON.stringify(campaignId)}`);
-    error.code = "optimise_commission_groups_invalid_campaign_id";
+    const error = new Error(`Invalid Optimise ${label}: ${JSON.stringify(value)}`);
+    error.code = code;
     throw error;
   }
   return text;
@@ -374,9 +381,20 @@ export function createOptimiseAdapter({
         ...params,
       });
     },
-    fetchCampaignDetail(campaignId) {
+    /**
+     * Campaign detail: GET /campaigns/{productId}.
+     *
+     * Optimise keys this endpoint by productId, NOT by campaignId. Callers must
+     * pass an explicit productId; a campaignId or a generic `id` addresses a
+     * different namespace and must never be substituted here.
+     */
+    fetchCampaignDetail(productId) {
+      const id = assertPathIdentifier(productId, {
+        label: "productId for campaign detail",
+        code: "optimise_campaign_detail_invalid_product_id",
+      });
       return requestWithRetry(() =>
-        httpClient.get(`/campaigns/${campaignId}`, {
+        httpClient.get(`/campaigns/${encodeURIComponent(id)}`, {
           params: commonParams,
         }),
       ).then((res) => res.data);
@@ -390,7 +408,10 @@ export function createOptimiseAdapter({
      * @returns {Promise<{ campaignId: string, groups: object[], envelopeKind: string, httpStatus: number|null, fetchedAt: Date }>}
      */
     async fetchCommissionGroups(campaignId) {
-      const id = assertCampaignId(campaignId);
+      const id = assertPathIdentifier(campaignId, {
+        label: "campaignId for commission-groups",
+        code: "optimise_commission_groups_invalid_campaign_id",
+      });
       const response = await requestWithOptimiseLimits(() =>
         httpClient.get(`/campaigns/${encodeURIComponent(id)}/commission-groups`, {
           params: commonParams,

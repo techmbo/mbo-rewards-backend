@@ -16,6 +16,7 @@ import {
   mapOptimiseCampaignLifecycle,
   mapOptimisePublisherRelationship,
 } from "../../src/modules/supplier/mappers/optimise.mapper.js";
+import { optimiseCampaignIdentifiers } from "../../src/modules/supplier/optimiseCampaignIdentifiers.js";
 import { normalizeCampaignStatus } from "../../src/modules/supplier/mappers/status.js";
 import { mapOptimiseCommissionGroupCandidates } from "../../src/modules/commercial/optimiseCommissionGroup.mapper.js";
 
@@ -146,11 +147,14 @@ export function sanitizeErrorMessage(message, { maxLength = 300 } = {}) {
  * whitelist: no error.config, no error.request, no headers, no response body —
  * all of which carry the Authorization header on an Axios error.
  */
-export function safeRequestFailure(campaignId, error) {
+export function safeRequestFailure(identifier, error, { identifierKind = "campaignId" } = {}) {
   const status = error?.response?.status;
   const code = error?.code;
   return {
-    campaignId: String(campaignId),
+    // NOT named campaignId: campaign detail fails against a productId, so the
+    // field must say which namespace the failing identifier came from.
+    identifier: String(identifier),
+    identifierKind,
     httpStatus: typeof status === "number" ? status : null,
     code: typeof code === "string" ? sanitizeErrorMessage(code, { maxLength: 60 }) : null,
     message: sanitizeErrorMessage(error?.message ?? error),
@@ -633,6 +637,84 @@ export function readFirstPathAcrossSources({ listRaw, detailRaw, paths = [] }) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Certification-only campaign selection
+ * ------------------------------------------------------------------ */
+
+/**
+ * Select campaigns for CERTIFICATION.
+ *
+ * Deliberately separate from selectOptimiseCommissionGroupCampaigns, which is a
+ * production helper with its own contract and metrics. This one carries the SOURCE
+ * ROW and all four identifier namespaces forward, so nothing downstream has to
+ * rediscover a row from an opaque scalar — two rows may legitimately carry the same
+ * string in different namespaces.
+ */
+export function selectCertificationCampaigns(rows = [], { scope = "joined", maxCampaigns = MAX_CERTIFIED_CAMPAIGNS } = {}) {
+  const list = Array.isArray(rows) ? rows : [];
+  const selected = [];
+  let skippedByScope = 0;
+  let skippedByCap = 0;
+  let skippedNoIdentifier = 0;
+
+  list.forEach((row, rowIndex) => {
+    const identifiers = optimiseCampaignIdentifiers(row ?? {});
+
+    // A row carrying no usable identifier in ANY namespace cannot be certified.
+    if (!identifiers.productId && !identifiers.campaignId && !identifiers.genericId && !identifiers.legacyId) {
+      skippedNoIdentifier += 1;
+      return;
+    }
+
+    if (scope === "joined" && mapOptimisePublisherRelationship(row ?? {})?.isJoined !== true) {
+      skippedByScope += 1;
+      return;
+    }
+
+    if (selected.length >= maxCampaigns) {
+      skippedByCap += 1;
+      return;
+    }
+
+    selected.push({ rowIndex, row: row ?? {}, identifiers, currency: campaignCurrencyOf(row ?? {}) });
+  });
+
+  return {
+    campaigns: selected,
+    campaignsInspected: list.length,
+    skippedNoIdentifier,
+    skippedByScope,
+    skippedByCap,
+  };
+}
+
+/** Campaign currency, mirroring the production helper's tolerance. */
+function campaignCurrencyOf(raw = {}) {
+  const value =
+    raw?.currencyCode ?? raw?.currency_code ?? raw?.commissionCurrency ?? raw?.currency ?? raw?.currencySymbol ?? null;
+  if (value == null || value === "") return null;
+  const code = String(typeof value === "object" ? (value.code ?? value.currencyCode ?? "") : value)
+    .trim()
+    .toUpperCase()
+    .slice(0, 3);
+  return /^[A-Z]{3}$/.test(code) ? code : null;
+}
+
+/** Namespace NAMES present on a row — never their values. */
+export function presentNamespaces(identifiers = {}) {
+  return ["productId", "campaignId", "genericId", "legacyId"].filter((key) => identifiers?.[key] != null);
+}
+
+/** A campaign label for reporting only. Never dispatched to any endpoint. */
+export function certificationCampaignLabel(identifiers = {}, rowIndex = 0) {
+  const parts = [];
+  if (identifiers.productId) parts.push(`productId=${identifiers.productId}`);
+  if (identifiers.campaignId) parts.push(`campaignId=${identifiers.campaignId}`);
+  if (!parts.length && identifiers.genericId) parts.push(`id=${identifiers.genericId}`);
+  if (!parts.length && identifiers.legacyId) parts.push(`legacyId=${identifiers.legacyId}`);
+  return parts.length ? parts.join(" ") : `row[${rowIndex}]`;
+}
+
+/* ------------------------------------------------------------------ *
  * Production-aligned evidence resolvers
  * ------------------------------------------------------------------ */
 
@@ -733,11 +815,11 @@ export function networkSourceFor(region) {
  * shape the production sync stores and the mapper expects. No supplier value is
  * altered: `rawData` is the untouched response object.
  */
-export function campaignEntityFor({ region, accountLabel = "default", campaignId, raw }) {
+export function campaignEntityFor({ region, accountLabel = "default", supplierCampaignIdentity, raw }) {
   const networkSource = networkSourceFor(region);
   return {
     networkSource,
-    externalId: `${accountLabel}:${networkSource}-campaign-${campaignId}`,
+    externalId: `${accountLabel}:${networkSource}-campaign-${supplierCampaignIdentity}`,
     rawData: raw,
   };
 }
@@ -905,7 +987,16 @@ export function outcomeEvidenceFor(rule, groups = []) {
  * Certification
  * ------------------------------------------------------------------ */
 
-function certifyCampaignFields({ listRaw, detailRaw, merged, detailFetchFailed = false, normalized, region, accountLabel }) {
+function certifyCampaignFields({
+  listRaw,
+  detailRaw,
+  merged,
+  detailFetchFailed = false,
+  detailUnknownReason = "campaign_detail_request_failed",
+  normalized,
+  region,
+  accountLabel,
+}) {
   return CAMPAIGN_FIELD_SPECS.map((spec) => {
     // Paths are resolved against the merged payload production actually mapped,
     // so the traced evidence is the field production used, not a lookalike.
@@ -952,8 +1043,11 @@ function certifyCampaignFields({ listRaw, detailRaw, merged, detailFetchFailed =
       status = "REVIEW_REQUIRED";
       statusReason = "supplier_list_detail_conflict";
     } else if (detailUnknown) {
+      // Distinguish "we asked and it failed" from "we never asked because the
+      // required identifier was absent". Both block absence claims; only one is
+      // a supplier fault.
       status = "VERIFY_LIVE";
-      statusReason = "campaign_detail_request_failed";
+      statusReason = detailUnknownReason;
     } else if (spec.normalizedKey === null) {
       // Capability probes: evidence in EITHER response counts. Only absence from
       // both successfully queried responses means the endpoints do not carry it.
@@ -1103,7 +1197,6 @@ export async function runCertification({
   accountLabel = "default",
   scope = "joined",
   maxCampaigns = MAX_CERTIFIED_CAMPAIGNS,
-  selectCampaigns,
   now = () => new Date(),
   listRetryDelayMs = 750,
 }) {
@@ -1127,10 +1220,10 @@ export async function runCertification({
   });
   const rows = page.rows;
 
-  let selection = selectCampaigns(rows, { scope, maxCampaigns: cap });
+  let selection = selectCertificationCampaigns(rows, { scope, maxCampaigns: cap });
   let effectiveScope = scope;
   if (selection.campaigns.length === 0 && scope === "joined") {
-    selection = selectCampaigns(rows, { scope: "all", maxCampaigns: cap });
+    selection = selectCertificationCampaigns(rows, { scope: "all", maxCampaigns: cap });
     effectiveScope = "all-fallback";
   }
   const selected = selection.campaigns.slice(0, cap);
@@ -1150,63 +1243,123 @@ export async function runCertification({
   const redactions = [];
   const endpointsCalled = ["GET /campaigns (single page, offset=0)"];
 
-  const rowById = new Map();
-  for (const row of rows) {
-    const id = row?.id ?? row?.campaignId ?? row?.productId ?? row?.legacyId ?? row?.campaign_id;
-    if (id !== undefined && id !== null) rowById.set(String(id), row);
-  }
+  // Per-namespace request dedupe. Two rows sharing a campaignId must not produce
+  // two commission-group calls, and two rows sharing a productId must not produce
+  // two detail calls — but a scalar repeated ACROSS namespaces is unrelated and
+  // must never collide, which is why these are tracked separately.
+  //
+  // Detail is a CACHE, not a seen-set: rows sharing a productId describe the same
+  // supplier resource, so every one of them must receive that single response.
+  // Dropping the evidence for the second row would manufacture a false absence.
+  const detailResultsByProductId = new Map(); // productId -> { detailRaw, failed }
+  const requestedCampaignIds = new Set();
+  let duplicateDetailRequestsSkipped = 0;
+  let duplicateCommissionRequestsSkipped = 0;
+  let rowsReusingCachedDetail = 0;
+  const identifierDiagnostics = [];
 
-  for (const { campaignId, currency } of selected) {
-    const listRaw = rowById.get(String(campaignId)) ?? {};
-    const sanitizedList = sanitizeDeep(listRaw, { path: `$.campaigns.${campaignId}` });
+  for (const { rowIndex, row, identifiers, currency } of selected) {
+    // The source row travels with the selection; it is never rediscovered from a scalar.
+    const listRaw = row ?? {};
+    // Display/grouping key ONLY. Never a supplier identifier, never dispatched.
+    // Every emitted record also carries `identifiers` with the explicit namespaces.
+    const campaignKey = certificationCampaignLabel(identifiers, rowIndex);
+    const campaignIdentifiers = { ...identifiers };
+
+    /**
+     * The value production's resolveOptimiseCampaignId would embed in the staged
+     * Entity.externalId. Certification must mirror the CURRENT production identity
+     * to report what production actually derives — this is not an endpoint call, so
+     * it is the one place the production coalesce is intentionally reproduced.
+     */
+    const productionIdentityId =
+      listRaw?.id ?? listRaw?.campaignId ?? listRaw?.productId ?? listRaw?.legacyId ?? listRaw?.campaign_id ?? null;
+    const sanitizedList = sanitizeDeep(listRaw, { path: `$.campaigns.${campaignKey}` });
     redactions.push(...sanitizedList.redactions);
-    campaignsRaw.push({ campaignId, raw: sanitizedList.value });
+    campaignsRaw.push({ campaignKey, identifiers: campaignIdentifiers, raw: sanitizedList.value });
 
-    // GET /campaigns/{id} — read-only detail evidence.
+    // GET /campaigns/{productId} — read-only detail evidence.
+    // Runs ONLY with an explicit productId. No other namespace is substituted.
     let detailRaw = null;
-    try {
-      endpointsCalled.push(`GET /campaigns/${campaignId}`);
-      // eslint-disable-next-line no-await-in-loop
-      const detailResponse = await adapter.fetchCampaignDetail(campaignId);
-      detailRaw = extractCampaignDetail(detailResponse);
-    } catch (error) {
-      detailRequestFailures.push(safeRequestFailure(campaignId, error));
+    let detailIdentifierMissing = false;
+    let detailRequestFailed = false;
+    if (!identifiers.productId) {
+      detailIdentifierMissing = true;
+      identifierDiagnostics.push({
+        campaign: campaignKey,
+        rowIndex,
+        endpoint: "GET /campaigns/{productId}",
+        missingIdentifier: "productId",
+        status: "REVIEW_REQUIRED",
+        reason: "campaign_detail_identifier_missing",
+        identifiersPresent: presentNamespaces(identifiers),
+        detail: "Campaign detail was not requested: no explicit productId. id/legacyId are evidence only and are never substituted.",
+      });
+    } else if (detailResultsByProductId.has(identifiers.productId)) {
+      // Same supplier resource: reuse the one response, issue no second request.
+      const cached = detailResultsByProductId.get(identifiers.productId);
+      detailRaw = cached.detailRaw;
+      detailRequestFailed = cached.failed;
+      duplicateDetailRequestsSkipped += 1;
+      rowsReusingCachedDetail += 1;
+    } else {
+      let failed = false;
+      try {
+        endpointsCalled.push(`GET /campaigns/${identifiers.productId}`);
+        // eslint-disable-next-line no-await-in-loop
+        const detailResponse = await adapter.fetchCampaignDetail(identifiers.productId);
+        detailRaw = extractCampaignDetail(detailResponse);
+      } catch (error) {
+        failed = true;
+        detailRequestFailed = true;
+        detailRequestFailures.push(safeRequestFailure(identifiers.productId, error, { identifierKind: "productId" }));
+      }
+      detailResultsByProductId.set(identifiers.productId, { detailRaw, failed });
     }
 
-    const sanitizedDetail = sanitizeDeep(detailRaw, { path: `$.campaignDetails.${campaignId}` });
+    const sanitizedDetail = sanitizeDeep(detailRaw, { path: `$.campaignDetails.${campaignKey}` });
     redactions.push(...sanitizedDetail.redactions);
     campaignDetailsRaw.push({
-      campaignId,
+      campaignKey,
+      identifiers: campaignIdentifiers,
       fetched: detailRaw !== null,
       raw: sanitizedDetail.value,
     });
 
     const { merged, detailOnlyKeys, conflicts } = mergeListAndDetail(listRaw, detailRaw);
-    if (conflicts.length) sourceConflicts.push({ campaignId, conflicts });
+    if (conflicts.length) sourceConflicts.push({ campaignKey, identifiers: campaignIdentifiers, conflicts });
 
-    const entity = campaignEntityFor({ region, accountLabel, campaignId, raw: merged });
+    const entity = campaignEntityFor({ region, accountLabel, supplierCampaignIdentity: productionIdentityId, raw: merged });
     const normalized = mapOptimiseCampaign(entity);
-    const sanitizedNormalized = sanitizeDeep(normalized, { path: `$.normalized.${campaignId}` });
+    const sanitizedNormalized = sanitizeDeep(normalized, { path: `$.normalized.${campaignKey}` });
     redactions.push(...sanitizedNormalized.redactions);
     campaignsNormalized.push({
-      campaignId,
+      campaignKey,
+      identifiers: campaignIdentifiers,
       detailOnlyKeys,
       // Written whole: truncating evidence to a summary string would defeat the
       // purpose of a certification artifact.
       normalized: sanitizedNormalized.value,
     });
 
-    const detailFetchFailed = detailRequestFailures.some((entry) => String(entry.campaignId) === String(campaignId));
+    // A skipped detail request proves nothing about absence, exactly like a failed
+    // one: fields missing from the list must not become NOT_AVAILABLE_FROM_ENDPOINT.
+    // A row reusing a cached FAILURE inherits that state; a row reusing a cached
+    // SUCCESS is treated exactly as if it had made the request itself.
+    const detailFetchFailed = detailIdentifierMissing || detailRequestFailed;
     const campaignEntries = certifyCampaignFields({
       listRaw,
       detailRaw,
       merged,
       detailFetchFailed,
+      detailUnknownReason: detailIdentifierMissing
+        ? "campaign_detail_identifier_missing"
+        : "campaign_detail_request_failed",
       normalized,
       region,
       accountLabel,
     });
-    fieldEntries.push(...campaignEntries.map((entry) => ({ ...entry, campaignId })));
+    fieldEntries.push(...campaignEntries.map((entry) => ({ ...entry, campaignKey, identifiers: campaignIdentifiers })));
     mappingGaps.push(
       ...campaignEntries
         .filter((entry) => entry.status === "MAPPING_GAP")
@@ -1222,7 +1375,7 @@ export async function runCertification({
             proposedMboStandardField: entry.mboField,
             conceptKind: classifyConcept(entry.mboField),
             scope: "campaign",
-            campaignId,
+            campaignKey,
             whyRealGap:
               "Supplier returned a usable value on this path but the production normalization produced no canonical value.",
             proposedMinimalCorrection: `Review the campaign mapper for "${entry.mboField}"; do not change production mapping until this gap is accepted.`,
@@ -1230,26 +1383,47 @@ export async function runCertification({
         }),
     );
 
-    newConcepts.push(...discoverNewConcepts(listRaw, { scope: "campaign-list" }).map((c) => ({ ...c, campaignId })));
+    newConcepts.push(...discoverNewConcepts(listRaw, { scope: "campaign-list" }).map((c) => ({ ...c, campaignKey })));
     if (detailRaw) {
-      newConcepts.push(...discoverNewConcepts(detailRaw, { scope: "campaign-detail" }).map((c) => ({ ...c, campaignId })));
+      newConcepts.push(...discoverNewConcepts(detailRaw, { scope: "campaign-detail" }).map((c) => ({ ...c, campaignKey })));
     }
+
+    // GET /campaigns/{campaignId}/commission-groups — explicit campaignId only.
+    if (!identifiers.campaignId) {
+      identifierDiagnostics.push({
+        campaign: campaignKey,
+        rowIndex,
+        endpoint: "GET /campaigns/{campaignId}/commission-groups",
+        missingIdentifier: "campaignId",
+        status: "REVIEW_REQUIRED",
+        reason: "commission_groups_identifier_missing",
+        identifiersPresent: presentNamespaces(identifiers),
+        detail: "Commission groups were not requested: no explicit campaignId. productId/id/legacyId are never substituted.",
+      });
+      continue;
+    }
+    if (requestedCampaignIds.has(identifiers.campaignId)) {
+      duplicateCommissionRequestsSkipped += 1;
+      continue;
+    }
+    requestedCampaignIds.add(identifiers.campaignId);
 
     let result;
     try {
-      endpointsCalled.push(`GET /campaigns/${campaignId}/commission-groups`);
+      endpointsCalled.push(`GET /campaigns/${identifiers.campaignId}/commission-groups`);
       // eslint-disable-next-line no-await-in-loop
-      result = await adapter.fetchCommissionGroups(campaignId);
+      result = await adapter.fetchCommissionGroups(identifiers.campaignId);
     } catch (error) {
-      commissionRequestFailures.push(safeRequestFailure(campaignId, error));
+      commissionRequestFailures.push(safeRequestFailure(identifiers.campaignId, error, { identifierKind: "campaignId" }));
       continue;
     }
 
     const groups = Array.isArray(result?.groups) ? result.groups : [];
-    const sanitizedGroups = sanitizeDeep(groups, { path: `$.commissionGroups.${campaignId}` });
+    const sanitizedGroups = sanitizeDeep(groups, { path: `$.commissionGroups.${campaignKey}` });
     redactions.push(...sanitizedGroups.redactions);
     groupsRaw.push({
-      campaignId,
+      campaignKey,
+      campaignId: identifiers.campaignId,
       envelopeKind: result?.envelopeKind ?? null,
       httpStatus: result?.httpStatus ?? null,
       groupCount: groups.length,
@@ -1257,17 +1431,18 @@ export async function runCertification({
     });
 
     const rules = mapOptimiseCommissionGroupCandidates(groups, {
-      sourceCampaignId: String(campaignId),
+      sourceCampaignId: String(identifiers.campaignId),
       networkSource,
       sourceAccountLabel: accountLabel,
       currency: currency ?? null,
       fetchedAt: result?.fetchedAt ?? null,
     });
 
-    const sanitizedRules = sanitizeDeep(rules, { path: `$.rules.${campaignId}` });
+    const sanitizedRules = sanitizeDeep(rules, { path: `$.rules.${campaignKey}` });
     redactions.push(...sanitizedRules.redactions);
     rulesNormalized.push({
-      campaignId,
+      campaignKey,
+      campaignId: identifiers.campaignId,
       ruleCount: rules.length,
       rules: sanitizedRules.value,
       presentation: commissionPresentation(rules),
@@ -1283,7 +1458,8 @@ export async function runCertification({
         rule,
       });
       ruleLineage.push({
-        campaignId,
+        campaignKey,
+        campaignId: identifiers.campaignId,
         outcomeKey: rule.outcomeKey,
         sourceGroupId: rule.sourceGroupId,
         sourceGroupName: rule.sourceGroupName,
@@ -1291,7 +1467,7 @@ export async function runCertification({
         sourcePath: evidence.sourcePath,
         resolvedBy: evidence.resolvedBy,
       });
-      fieldEntries.push(...entries.map((entry) => ({ ...entry, campaignId })));
+      fieldEntries.push(...entries.map((entry) => ({ ...entry, campaignKey, identifiers: campaignIdentifiers })));
       mappingGaps.push(
         ...entries
           .filter((entry) => entry.status === "MAPPING_GAP")
@@ -1307,7 +1483,7 @@ export async function runCertification({
             proposedMboStandardField: entry.mboField,
             conceptKind: classifyConcept(entry.mboField),
             scope: "commission",
-            campaignId,
+            campaignKey,
             whyRealGap:
               "Supplier returned a usable value on this path but the production normalization produced no canonical value.",
             proposedMinimalCorrection: `Review the commission mapper for "${entry.mboField}"; do not change production mapping until this gap is accepted.`,
@@ -1325,7 +1501,7 @@ export async function runCertification({
             "bands", "band", "tiers", "bandType", "conditions", "condition", "rules",
             "effectiveFrom", "effectiveUntil", "startDate", "endDate", "type", "commissionType",
           ]),
-        }).map((concept) => ({ ...concept, campaignId, groupIndex: index })),
+        }).map((concept) => ({ ...concept, campaignKey, groupIndex: index })),
       );
     });
   }
@@ -1334,6 +1510,24 @@ export async function runCertification({
 
   const statusCounts = Object.fromEntries(FIELD_STATUS.map((status) => [status, 0]));
   for (const entry of fieldEntries) statusCounts[entry.status] += 1;
+
+  // Identifier diagnostics stay structurally separate from field statuses, but they
+  // are counted and surfaced so a run can never read as fully verified while an
+  // endpoint identity is unresolved.
+  const identifierDiagnosticCounts = Object.fromEntries(FIELD_STATUS.map((status) => [status, 0]));
+  for (const diagnostic of identifierDiagnostics) {
+    if (diagnostic.status in identifierDiagnosticCounts) identifierDiagnosticCounts[diagnostic.status] += 1;
+  }
+  const identifierReviewRequiredCount = identifierDiagnosticCounts.REVIEW_REQUIRED;
+  // Identifier-only condition. Deliberately NOT called "fullyVerified": it says
+  // nothing about REVIEW_REQUIRED / VERIFY_LIVE / MAPPING_GAP field statuses.
+  //
+  // Zero certified campaigns cannot RESOLVE anything: with nothing selected there
+  // are no diagnostics either, so a bare count of zero would read as success on an
+  // empty run. Resolution is only established when at least one campaign was certified.
+  const certifiedCampaignCount = campaignsRaw.length;
+  const identifiersFullyResolved = certifiedCampaignCount > 0 && identifierReviewRequiredCount === 0;
+  const identifierResolutionEstablished = certifiedCampaignCount > 0;
 
   return {
     meta: {
@@ -1364,14 +1558,33 @@ export async function runCertification({
         note: "Exactly one GET /campaigns page is requested. Campaigns beyond this page are never fetched, so scope=joined selects only from these rows.",
       },
       campaignsCertified: campaignsRaw.length,
-      campaignDetailsFetched: campaignDetailsRaw.filter((entry) => entry.fetched).length,
+      // Detail metrics are deliberately four DISTINCT numbers. One request can
+      // serve several rows, so "requests" and "rows with evidence" are not the
+      // same quantity and must never be reported under one name.
+      /** Unique productId HTTP requests attempted. */
+      detailRequestsIssued: detailResultsByProductId.size,
+      /** Unique productId requests that returned a usable payload. */
+      campaignDetailResponsesSucceeded: [...detailResultsByProductId.values()].filter(
+        (entry) => !entry.failed && entry.detailRaw !== null,
+      ).length,
+      /** Certified rows holding a detail payload, cached reuse included. */
+      campaignRowsWithDetailEvidence: campaignDetailsRaw.filter((entry) => entry.fetched).length,
+      /** Rows that reused an already-requested productId result. */
+      rowsReusingCachedDetail,
       campaignSelection: {
         campaignsInspected: selection.campaignsInspected,
-        skippedNoId: selection.skippedNoId,
+        skippedNoIdentifier: selection.skippedNoIdentifier,
         skippedByScope: selection.skippedByScope,
-        skippedDuplicate: selection.skippedDuplicate,
         skippedByCap: selection.skippedByCap,
       },
+      identifierDiagnosticCounts,
+      identifierReviewRequiredCount,
+      identifierEndpointsSkipped: identifierDiagnostics.length,
+      duplicateDetailRequestsSkipped,
+      duplicateCommissionRequestsSkipped,
+      commissionGroupRequestsIssued: requestedCampaignIds.size,
+      identifiersFullyResolved,
+      identifierResolutionEstablished,
       commissionGroupsFetched: groupsRaw.reduce((sum, entry) => sum + entry.groupCount, 0),
       normalizedRuleCount: rulesNormalized.reduce((sum, entry) => sum + entry.ruleCount, 0),
       detailRequestFailures,
@@ -1394,11 +1607,15 @@ export async function runCertification({
         note: "Campaign-level summary commission never overwrites detailed commission-group truth.",
       },
       fields: fieldEntries,
+      identifierDiagnostics,
+      identifierDiagnosticCounts,
+      identifierReviewRequiredCount,
       ruleLineage,
       fieldConflicts: fieldEntries
         .filter((entry) => entry.listDetailConflict)
         .map((entry) => ({
-          campaignId: entry.campaignId,
+          campaignKey: entry.campaignKey,
+          identifiers: entry.identifiers,
           mboField: entry.mboField,
           listSourcePath: entry.listSourcePath,
           listValue: entry.listValue,
@@ -1439,12 +1656,33 @@ export function renderSummaryMarkdown(report) {
   lines.push(`- Outbound GET /campaigns requests, retries included: ${meta.campaignListRequests}`);
   lines.push(`- Campaign rows returned by that page: ${meta.campaignListPage.rowsReturnedBySupplier} (limit ${meta.campaignListPage.requestedLimit})`);
   lines.push(`- Campaigns certified: ${meta.campaignsCertified} (cap ${meta.maxCampaigns})`);
-  lines.push(`- Campaign detail responses fetched: ${meta.campaignDetailsFetched} (failures: ${meta.detailRequestFailures.length})`);
+  lines.push(
+    `- Campaign detail requests issued: ${meta.detailRequestsIssued} · responses succeeded: ${meta.campaignDetailResponsesSucceeded} · failures: ${meta.detailRequestFailures.length}`,
+  );
+  lines.push(
+    `- Campaign rows with detail evidence: ${meta.campaignRowsWithDetailEvidence} (rows reusing a cached detail result: ${meta.rowsReusingCachedDetail})`,
+  );
   lines.push(`- Campaign list attempts used: ${meta.campaignListPage.attempts} of a maximum ${meta.campaignListPage.maxAttempts}`);
   lines.push(`- Commission groups fetched: ${meta.commissionGroupsFetched}`);
   lines.push(`- Normalized SupplierCommissionRule records: ${meta.normalizedRuleCount}`);
   lines.push(`- Database writes: ${meta.writesPerformed} · Supplier mutations: ${meta.supplierMutations}`);
   lines.push(`- Values redacted: ${meta.redactionCount}`);
+  lines.push("");
+  if (!meta.identifierResolutionEstablished) {
+    lines.push("> **NO CERTIFIABLE CAMPAIGN ROWS — endpoint identifier resolution not established.**");
+    lines.push("> No campaign was certified, so nothing can be concluded about endpoint identity.");
+    lines.push("");
+  } else if (meta.identifierReviewRequiredCount > 0) {
+    lines.push(`> **ENDPOINT IDENTITY UNRESOLVED — ${meta.identifierReviewRequiredCount} REVIEW_REQUIRED identifier diagnostic(s).**`);
+    lines.push("> One or more supplier endpoints were skipped because the identifier they require was absent.");
+    lines.push("> This campaign sample is NOT fully verified. See \"Identifier diagnostics\" below.");
+    lines.push("");
+  } else {
+    lines.push("- Identifier diagnostics: none — every certified campaign had the identifier each endpoint requires.");
+    lines.push("");
+  }
+  lines.push(`- Commission-group requests issued: ${meta.commissionGroupRequestsIssued} (duplicates skipped: ${meta.duplicateCommissionRequestsSkipped})`);
+  lines.push(`- Endpoint identifiers fully resolved: ${meta.identifiersFullyResolved}`);
   lines.push("");
   lines.push("## Endpoints called");
   lines.push("");
@@ -1455,6 +1693,25 @@ export function renderSummaryMarkdown(report) {
   lines.push("| Status | Count |");
   lines.push("| --- | ---: |");
   for (const status of FIELD_STATUS) lines.push(`| ${status} | ${counts[status]} |`);
+  lines.push("");
+
+  lines.push("## Identifier diagnostics");
+  lines.push("");
+  if (!meta.identifierResolutionEstablished) {
+    lines.push("No certifiable campaign rows; endpoint identifier resolution not established.");
+  } else if (fieldReport.identifierDiagnostics.length === 0) {
+    lines.push("Every certified campaign carried the identifier each endpoint requires.");
+  } else {
+    lines.push("| Campaign | Endpoint | Missing identifier | Namespaces present | Status |");
+    lines.push("| --- | --- | --- | --- | --- |");
+    for (const diagnostic of fieldReport.identifierDiagnostics) {
+      lines.push(
+        `| ${diagnostic.campaign} | \`${diagnostic.endpoint}\` | **${diagnostic.missingIdentifier}** | ${diagnostic.identifiersPresent.join(", ") || "none"} | ${diagnostic.status} |`,
+      );
+    }
+    lines.push("");
+    lines.push("No identifier was substituted across namespaces; the endpoints above were not called.");
+  }
   lines.push("");
 
   lines.push("## Mapping gaps");
@@ -1490,7 +1747,7 @@ export function renderSummaryMarkdown(report) {
     lines.push("");
     for (const conflict of fieldReport.fieldConflicts) {
       lines.push(
-        `- Campaign ${conflict.campaignId} · **${conflict.mboField}** — ${conflict.listSourcePath} = \`${JSON.stringify(conflict.listValue)}\`, ${conflict.detailSourcePath} = \`${JSON.stringify(conflict.detailValue)}\`, canonical value kept: \`${JSON.stringify(conflict.normalizedValue)}\` (${conflict.reason})`,
+        `- Campaign ${conflict.campaignKey} · **${conflict.mboField}** — ${conflict.listSourcePath} = \`${JSON.stringify(conflict.listValue)}\`, ${conflict.detailSourcePath} = \`${JSON.stringify(conflict.detailValue)}\`, canonical value kept: \`${JSON.stringify(conflict.normalizedValue)}\` (${conflict.reason})`,
       );
     }
     lines.push("");
@@ -1502,7 +1759,7 @@ export function renderSummaryMarkdown(report) {
     lines.push("");
     for (const entry of meta.listDetailConflicts) {
       for (const conflict of entry.conflicts) {
-        lines.push(`- Campaign ${entry.campaignId} · \`${conflict.key}\` — list: \`${JSON.stringify(conflict.listValue)}\`, detail: \`${JSON.stringify(conflict.detailValue)}\``);
+        lines.push(`- Campaign ${entry.campaignKey} · \`${conflict.key}\` — list: \`${JSON.stringify(conflict.listValue)}\`, detail: \`${JSON.stringify(conflict.detailValue)}\``);
       }
     }
   }
@@ -1512,7 +1769,7 @@ export function renderSummaryMarkdown(report) {
   lines.push("");
   for (const entry of rulesNormalized) {
     const presentation = entry.presentation;
-    lines.push(`### Campaign ${entry.campaignId}`);
+    lines.push(`### Campaign ${entry.campaignKey}`);
     lines.push("");
     lines.push(`- Distinct outcomes: ${presentation.outcomeCount} (Commission 1..${presentation.outcomeCount})`);
     lines.push(`- MIXED: ${presentation.mixed}`);

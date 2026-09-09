@@ -26,6 +26,8 @@ import {
   sanitizeErrorMessage,
   fetchCampaignListPage,
   materiallyDiffer,
+  presentNamespaces,
+  selectCertificationCampaigns,
   extractCampaignDetail,
   extractCampaignRows,
   mergeListAndDetail,
@@ -52,11 +54,19 @@ import {
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CORE_PATH = path.join(here, "..", "scripts", "lib", "optimiseCertification.mjs");
+const ROUTE_SOURCE_PATH = path.join(here, "..", "src", "routes", "internal", "optimiseCertificationPreview.js");
 const CLI_PATH = path.join(here, "..", "scripts", "certify-optimise-live.mjs");
+
+/** joinedCampaign() puts campaignId in its own namespace; use this to key fixtures. */
+const campaignKey = (id) => String(Number(id) + 500000);
 
 function joinedCampaign(id, overrides = {}) {
   return {
+    // Distinct by construction: productId = id, campaignId = id + 500000, so a
+    // cross-namespace substitution is immediately visible in any assertion.
     id,
+    productId: String(id),
+    campaignId: String(Number(id) + 500000),
     campaignName: `Campaign ${id}`,
     advertiserName: `Advertiser ${id}`,
     status: "live",
@@ -97,10 +107,10 @@ function fakeAdapter({ groupsByCampaign = {}, detailByCampaign = {}, detailError
     calls,
     agencyId: "118",
     contactId: "9001",
-    async fetchCampaignDetail(campaignId) {
-      calls.fetchCampaignDetail.push(String(campaignId));
+    async fetchCampaignDetail(productId) {
+      calls.fetchCampaignDetail.push(String(productId));
       if (detailError) throw detailError;
-      return detailByCampaign[String(campaignId)] ?? null;
+      return detailByCampaign[String(productId)] ?? null;
     },
     async fetchCommissionGroups(campaignId) {
       calls.fetchCommissionGroups.push(String(campaignId));
@@ -122,7 +132,6 @@ function certify({ rows, adapter = fakeAdapter(), httpClient = null, envelope = 
     adapter,
     region: "sea",
     accountLabel: "default",
-    selectCampaigns: selectOptimiseCommissionGroupCampaigns,
     now: () => new Date("2026-09-09T00:00:00.000Z"),
     ...options,
   });
@@ -257,7 +266,7 @@ test("sanitizer removes credential-shaped fields but preserves campaign evidence
 test("explicit zero commission survives into the certification output", async () => {
   const report = await certify({
     rows: [joinedCampaign(300)],
-    adapter: fakeAdapter({ groupsByCampaign: { 300: [{ id: "gz", name: "Zero Group", commission: "0%" }] } }),
+    adapter: fakeAdapter({ groupsByCampaign: { [campaignKey(300)]: [{ id: "gz", name: "Zero Group", commission: "0%" }] } }),
   });
   const [entry] = report.rulesNormalized;
 
@@ -279,7 +288,7 @@ test("multiple commission outcomes stay separate and are never flattened or aver
     rows: [joinedCampaign(400)],
     adapter: fakeAdapter({
       groupsByCampaign: {
-        400: [
+        [campaignKey(400)]: [
           { id: "g1", name: "Standard", commission: "5%" },
           { id: "g2", name: "Premium", commission: "12%" },
           { id: "g3", name: "Flat", commission: "USD 8" },
@@ -322,7 +331,7 @@ test("banded groups keep one canonical rule per band", async () => {
     rows: [joinedCampaign(500)],
     adapter: fakeAdapter({
       groupsByCampaign: {
-        500: [
+        [campaignKey(500)]: [
           {
             id: "gb",
             name: "Banded",
@@ -344,7 +353,7 @@ test("banded groups keep one canonical rule per band", async () => {
 test("detailed commission groups are RULE_DEFINITION and campaign summary is SUMMARY_ONLY", async () => {
   const report = await certify({
     rows: [joinedCampaign(600, { commissionCost: "7%" })],
-    adapter: fakeAdapter({ groupsByCampaign: { 600: [{ id: "g1", name: "Standard", commission: "5%" }] } }),
+    adapter: fakeAdapter({ groupsByCampaign: { [campaignKey(600)]: [{ id: "g1", name: "Standard", commission: "5%" }] } }),
   });
 
   const summaryField = report.fieldReport.fields.find((field) => field.mboField === "campaignCommissionSummary");
@@ -420,7 +429,7 @@ test("a complete credential set is reported without printing any value", () => {
 test("every emitted field status and authority class is a member of the enum", async () => {
   const report = await certify({
     rows: [joinedCampaign(700)],
-    adapter: fakeAdapter({ groupsByCampaign: { 700: [{ id: "g1", name: "Standard", commission: "5%" }] } }),
+    adapter: fakeAdapter({ groupsByCampaign: { [campaignKey(700)]: [{ id: "g1", name: "Standard", commission: "5%" }] } }),
   });
 
   assert.ok(report.fieldReport.fields.length > 0);
@@ -505,7 +514,7 @@ test("the summary renders the counts, authority rule and gap review posture", as
   const markdown = renderSummaryMarkdown(
     await certify({
       rows: [joinedCampaign(900)],
-      adapter: fakeAdapter({ groupsByCampaign: { 900: [{ id: "g1", name: "Standard", commission: "5%" }] } }),
+      adapter: fakeAdapter({ groupsByCampaign: { [campaignKey(900)]: [{ id: "g1", name: "Standard", commission: "5%" }] } }),
     }),
   );
 
@@ -513,7 +522,8 @@ test("the summary renders the counts, authority rule and gap review posture", as
   assert.match(markdown, /Database writes: 0 · Supplier mutations: 0/);
   assert.match(markdown, /LIVE_VERIFIED/);
   assert.match(markdown, /display only, never a financial input/);
-  assert.match(markdown, /GET \/campaigns\/900\/commission-groups/);
+  assert.match(markdown, /GET \/campaigns\/500900\/commission-groups/, "commission groups use the campaignId namespace");
+  assert.match(markdown, /GET \/campaigns\/900\b/, "detail uses the productId namespace");
 });
 
 test("a failed commission-group request is recorded, never silently treated as empty", async () => {
@@ -545,7 +555,7 @@ test("the six evidence artifacts are written and carry no credential values", as
 
   const report = await certify({
     rows: [joinedCampaign(950, { apikey: "must-not-reach-disk", contactEmail: "person@example.com" })],
-    adapter: fakeAdapter({ groupsByCampaign: { 950: [{ id: "g1", name: "Standard", commission: "5%" }] } }),
+    adapter: fakeAdapter({ groupsByCampaign: { [campaignKey(950)]: [{ id: "g1", name: "Standard", commission: "5%" }] } }),
   });
 
   const dir = await mkdtemp(path.join(os.tmpdir(), "optimise-cert-"));
@@ -594,7 +604,9 @@ test("campaign detail is fetched for every selected campaign and preserved separ
   assert.equal(report.campaignDetailsRaw.length, 1);
   assert.equal(report.campaignDetailsRaw[0].fetched, true);
   assert.equal(report.campaignDetailsRaw[0].raw.description, "Detail-only description");
-  assert.equal(report.meta.campaignDetailsFetched, 1);
+  assert.equal(report.meta.detailRequestsIssued, 1);
+  assert.equal(report.meta.campaignDetailResponsesSucceeded, 1);
+  assert.equal(report.meta.campaignRowsWithDetailEvidence, 1);
 
   // List and detail stay in separate artifacts.
   assert.equal(report.campaignsRaw[0].raw.description, undefined);
@@ -659,6 +671,7 @@ test("a failed campaign-detail request is recorded and never invented", async ()
 
   assert.equal(report.meta.detailRequestFailures.length, 1);
   assert.equal(report.meta.detailRequestFailures[0].httpStatus, 404);
+  assert.equal(report.meta.detailRequestFailures[0].identifierKind, "productId", "detail fails against a productId, not a campaignId");
   assert.equal(report.campaignDetailsRaw[0].fetched, false);
   assert.equal(report.campaignDetailsRaw[0].raw, null);
   // Certification still proceeds on the list evidence alone.
@@ -699,7 +712,7 @@ test("a nested credential cannot survive through rawPayload, normalizedPayload, 
     adapter: fakeAdapter({
       detailByCampaign: { 1260: { id: 1260, owner: { contactEmail: "person@example.com", secret: poison } } },
       groupsByCampaign: {
-        1260: [{ id: "g1", name: "Standard", commission: "5%", meta: { tokens: [{ token: poison }] } }],
+        [campaignKey(1260)]: [{ id: "g1", name: "Standard", commission: "5%", meta: { tokens: [{ token: poison }] } }],
       },
     }),
   });
@@ -774,7 +787,8 @@ test("a conflicting list/detail value becomes REVIEW_REQUIRED, not LIVE_VERIFIED
   const conflict = report.fieldReport.fieldConflicts.find((entry) => entry.mboField === "campaignStatus");
   assert.ok(conflict, "the conflict is recorded in fieldConflicts");
   assert.equal(conflict.reason, "supplier_list_detail_conflict");
-  assert.equal(String(conflict.campaignId), "2100");
+  // The reporting label names both namespaces; the identifiers are explicit.
+  assert.equal(conflict.campaignKey, "productId=2100 campaignId=502100");
 });
 
 test("the conflict rule covers identity, relationship, geography, money, dates, URLs and terms", async () => {
@@ -1011,7 +1025,7 @@ test("REGRESSION: a fan-out rule is traced to its own group, never the group at 
 
   const report = await certify({
     rows: [joinedCampaign(3100)],
-    adapter: fakeAdapter({ groupsByCampaign: { 3100: [groupA, groupB] } }),
+    adapter: fakeAdapter({ groupsByCampaign: { [campaignKey(3100)]: [groupA, groupB] } }),
   });
 
   const [entry] = report.rulesNormalized;
@@ -1048,7 +1062,7 @@ test("REGRESSION: a band rate is certified from its own band evidence, not left 
 
   const report = await certify({
     rows: [joinedCampaign(3110)],
-    adapter: fakeAdapter({ groupsByCampaign: { 3110: [groupA, groupB] } }),
+    adapter: fakeAdapter({ groupsByCampaign: { [campaignKey(3110)]: [groupA, groupB] } }),
   });
 
   const rates = report.fieldReport.fields.filter((f) => f.scope === "commission" && f.mboField === "ratePercent");
@@ -1177,8 +1191,9 @@ test("supplier error messages are scrubbed and stored as a whitelist", () => {
 
   const record = safeRequestFailure("77", axiosLike);
 
-  assert.deepEqual(Object.keys(record).sort(), ["campaignId", "code", "httpStatus", "message"]);
-  assert.equal(record.campaignId, "77");
+  assert.deepEqual(Object.keys(record).sort(), ["code", "httpStatus", "identifier", "identifierKind", "message"]);
+  assert.equal(record.identifier, "77");
+  assert.equal(record.identifierKind, "campaignId");
   assert.equal(record.httpStatus, 502);
   assert.equal(record.code, "ECONNRESET");
   assert.ok(!JSON.stringify(record).includes("REALKEY123"), "no api key survives");
@@ -1296,7 +1311,6 @@ test("retries are counted as outbound requests while the page count stays 1", as
     adapter: fakeAdapter(),
     region: "sea",
     accountLabel: "default",
-    selectCampaigns: selectOptimiseCommissionGroupCampaigns,
     now: () => new Date("2026-09-09T00:00:00.000Z"),
     listRetryDelayMs: 1,
   });
@@ -1435,7 +1449,7 @@ test("a bare numeric commission is REVIEW_REQUIRED, never LIVE_VERIFIED", async 
   // records commission_unit_not_explicit.
   const report = await certify({
     rows: [joinedCampaign(4200)],
-    adapter: fakeAdapter({ groupsByCampaign: { 4200: [{ id: "N", name: "Bare", commission: 8.5 }] } }),
+    adapter: fakeAdapter({ groupsByCampaign: { [campaignKey(4200)]: [{ id: "N", name: "Bare", commission: 8.5 }] } }),
   });
 
   const rule = report.rulesNormalized[0].rules[0];
@@ -1455,7 +1469,7 @@ test("a banded rule keeps band selection unverified", async () => {
     rows: [joinedCampaign(4210)],
     adapter: fakeAdapter({
       groupsByCampaign: {
-        4210: [{ id: "B", name: "Banded", bandType: "orderValue", bands: [{ lower: 0, upper: 100, commission: "3%" }, { lower: 100, commission: "7%" }] }],
+        [campaignKey(4210)]: [{ id: "B", name: "Banded", bandType: "orderValue", bands: [{ lower: 0, upper: 100, commission: "3%" }, { lower: 100, commission: "7%" }] }],
       },
     }),
   });
@@ -1476,7 +1490,7 @@ test("a condition-bearing rule keeps its condition semantics unverified", async 
     rows: [joinedCampaign(4220)],
     adapter: fakeAdapter({
       groupsByCampaign: {
-        4220: [{ id: "C", name: "Cond", commission: "5%", conditions: [{ type: "newCustomer", value: true }] }],
+        [campaignKey(4220)]: [{ id: "C", name: "Cond", commission: "5%", conditions: [{ type: "newCustomer", value: true }] }],
       },
     }),
   });
@@ -1493,7 +1507,7 @@ test("a condition-bearing rule keeps its condition semantics unverified", async 
 test("an unambiguous rule is still LIVE_VERIFIED", async () => {
   const report = await certify({
     rows: [joinedCampaign(4230)],
-    adapter: fakeAdapter({ groupsByCampaign: { 4230: [{ id: "P", name: "Plain", commission: "11%" }] } }),
+    adapter: fakeAdapter({ groupsByCampaign: { [campaignKey(4230)]: [{ id: "P", name: "Plain", commission: "11%" }] } }),
   });
 
   const rule = report.rulesNormalized[0].rules[0];
@@ -1577,4 +1591,457 @@ test("REGRESSION: a detail-only landingPage.websiteUrl reaches production mappin
     false,
     "no phantom gap for a leaf the shallow merge would have dropped",
   );
+});
+
+
+/* ------------------------------------------------------------------ *
+ * Identifier namespaces — Optimise keys its two endpoints differently
+ * ------------------------------------------------------------------ */
+
+/** A row whose three identifiers are all different, with no scope filtering surprises. */
+function tripleIdRow({ id, campaignId, productId, ...rest }) {
+  return {
+    id,
+    campaignId,
+    productId,
+    campaignName: `Campaign ${id}`,
+    publishers: [{ campaignSubStatus: "live" }],
+    currencyCode: "USD",
+    ...rest,
+  };
+}
+
+test("id, campaignId and productId all different: each endpoint gets its own namespace", async () => {
+  const adapter = fakeAdapter();
+  const report = await certify({
+    rows: [tripleIdRow({ id: "AAA", campaignId: "BBB", productId: "CCC" })],
+    adapter,
+  });
+
+  assert.deepEqual(adapter.calls.fetchCampaignDetail, ["CCC"], "detail uses productId");
+  assert.deepEqual(adapter.calls.fetchCommissionGroups, ["BBB"], "commission groups use campaignId");
+
+  // The generic id is dispatched nowhere.
+  const dispatched = [...adapter.calls.fetchCampaignDetail, ...adapter.calls.fetchCommissionGroups];
+  assert.ok(!dispatched.includes("AAA"), "generic id is never dispatched");
+  assert.ok(report.meta.endpointsCalled.includes("GET /campaigns/CCC"));
+  assert.ok(report.meta.endpointsCalled.includes("GET /campaigns/BBB/commission-groups"));
+  assert.ok(!report.meta.endpointsCalled.some((e) => e.includes("AAA")));
+  assert.equal(report.fieldReport.identifierDiagnostics.length, 0);
+});
+
+test("two rows sharing a campaignId issue only ONE commission-group request", async () => {
+  const adapter = fakeAdapter();
+  const report = await certify({
+    rows: [
+      tripleIdRow({ id: "1", campaignId: "SHARED", productId: "P1" }),
+      tripleIdRow({ id: "2", campaignId: "SHARED", productId: "P2" }),
+    ],
+    adapter,
+  });
+
+  assert.deepEqual(adapter.calls.fetchCommissionGroups, ["SHARED"], "deduped by campaignId");
+  // Detail is NOT deduped away: the productIds differ, so both are legitimate.
+  assert.deepEqual(adapter.calls.fetchCampaignDetail.sort(), ["P1", "P2"]);
+  assert.equal(report.meta.duplicateCommissionRequestsSkipped, 1);
+  assert.equal(report.meta.duplicateDetailRequestsSkipped, 0);
+  assert.equal(report.meta.commissionGroupRequestsIssued, 1);
+  assert.equal(report.meta.detailRequestsIssued, 2);
+});
+
+test("two rows sharing a productId issue only ONE detail request", async () => {
+  const adapter = fakeAdapter();
+  const report = await certify({
+    rows: [
+      tripleIdRow({ id: "1", campaignId: "C1", productId: "SHARED" }),
+      tripleIdRow({ id: "2", campaignId: "C2", productId: "SHARED" }),
+    ],
+    adapter,
+  });
+
+  assert.deepEqual(adapter.calls.fetchCampaignDetail, ["SHARED"], "deduped by productId");
+  assert.deepEqual(adapter.calls.fetchCommissionGroups.sort(), ["C1", "C2"]);
+  assert.equal(report.meta.duplicateDetailRequestsSkipped, 1);
+  assert.equal(report.meta.duplicateCommissionRequestsSkipped, 0);
+});
+
+test("the same scalar in DIFFERENT namespaces on different rows must not collide", async () => {
+  // Row A's productId and Row B's campaignId are both "123" and mean different things.
+  const rowA = tripleIdRow({ id: "A", campaignId: "CA", productId: "123", campaignName: "Row A" });
+  const rowB = tripleIdRow({ id: "B", campaignId: "123", productId: "PB", campaignName: "Row B" });
+
+  const adapter = fakeAdapter({
+    detailByCampaign: { 123: { id: "A", terms: "Terms belonging to row A" }, PB: { id: "B", terms: "Terms belonging to row B" } },
+  });
+
+  const report = await certify({ rows: [rowA, rowB], adapter });
+
+  assert.deepEqual(adapter.calls.fetchCampaignDetail.sort(), ["123", "PB"]);
+  assert.deepEqual(adapter.calls.fetchCommissionGroups.sort(), ["123", "CA"]);
+
+  // Each certified campaign kept ITS OWN source row — no lookup collision.
+  assert.equal(report.campaignsRaw.length, 2);
+  const names = report.campaignsRaw.map((entry) => entry.raw.campaignName);
+  assert.deepEqual(names, ["Row A", "Row B"], "rows travel with the selection, not via a shared id map");
+
+  const termsEntries = report.fieldReport.fields.filter((f) => f.mboField === "terms");
+  assert.equal(termsEntries[0].normalizedValue, "Terms belonging to row A");
+  assert.equal(termsEntries[1].normalizedValue, "Terms belonging to row B");
+});
+
+test("productId missing: detail is skipped with a diagnostic, commission groups still run", async () => {
+  const adapter = fakeAdapter();
+  const row = tripleIdRow({ id: "X1", campaignId: "C9", productId: undefined });
+  delete row.productId;
+
+  const report = await certify({ rows: [row], adapter });
+
+  assert.deepEqual(adapter.calls.fetchCampaignDetail, [], "detail not called");
+  assert.deepEqual(adapter.calls.fetchCommissionGroups, ["C9"], "commission groups still run");
+
+  const diagnostics = report.fieldReport.identifierDiagnostics;
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].missingIdentifier, "productId");
+  assert.equal(diagnostics[0].endpoint, "GET /campaigns/{productId}");
+  assert.equal(diagnostics[0].status, "REVIEW_REQUIRED");
+  assert.deepEqual(diagnostics[0].identifiersPresent, ["campaignId", "genericId"]);
+});
+
+test("campaignId missing: commission groups skipped with a diagnostic, detail still runs", async () => {
+  const adapter = fakeAdapter();
+  const row = tripleIdRow({ id: "X2", campaignId: undefined, productId: "P9" });
+  delete row.campaignId;
+
+  const report = await certify({ rows: [row], adapter });
+
+  assert.deepEqual(adapter.calls.fetchCampaignDetail, ["P9"], "detail still runs");
+  assert.deepEqual(adapter.calls.fetchCommissionGroups, [], "commission groups not called");
+
+  const diagnostics = report.fieldReport.identifierDiagnostics;
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].missingIdentifier, "campaignId");
+  assert.equal(diagnostics[0].endpoint, "GET /campaigns/{campaignId}/commission-groups");
+  assert.equal(diagnostics[0].status, "REVIEW_REQUIRED");
+});
+
+test("only a generic id present: NEITHER endpoint is called, with two diagnostics", async () => {
+  const adapter = fakeAdapter();
+  const row = { id: "ONLY-ID", campaignName: "Bare", publishers: [{ campaignSubStatus: "live" }] };
+
+  const report = await certify({ rows: [row], adapter });
+
+  assert.deepEqual(adapter.calls.fetchCampaignDetail, [], "generic id is not a productId");
+  assert.deepEqual(adapter.calls.fetchCommissionGroups, [], "generic id is not a campaignId");
+
+  const diagnostics = report.fieldReport.identifierDiagnostics;
+  assert.equal(diagnostics.length, 2);
+  assert.deepEqual(diagnostics.map((d) => d.missingIdentifier).sort(), ["campaignId", "productId"]);
+  assert.ok(diagnostics.every((d) => d.status === "REVIEW_REQUIRED"));
+  assert.ok(diagnostics.every((d) => d.identifiersPresent.includes("genericId")));
+  assert.equal(report.meta.endpointsCalled.filter((e) => e.includes("ONLY-ID")).length, 0);
+});
+
+test("legacyId is evidence only and is never dispatched", async () => {
+  const adapter = fakeAdapter();
+  const row = { id: "G1", legacyId: "L1", campaignName: "Legacy", publishers: [{ campaignSubStatus: "live" }] };
+
+  await certify({ rows: [row], adapter });
+
+  const dispatched = [...adapter.calls.fetchCampaignDetail, ...adapter.calls.fetchCommissionGroups];
+  assert.deepEqual(dispatched, [], "neither id nor legacyId reaches an endpoint");
+  assert.deepEqual(presentNamespaces({ genericId: "G1", legacyId: "L1", productId: null, campaignId: null }), ["genericId", "legacyId"]);
+});
+
+test("a skipped detail request never lets a field read as NOT_AVAILABLE_FROM_ENDPOINT", async () => {
+  const adapter = fakeAdapter();
+  const row = tripleIdRow({ id: "X3", campaignId: "C3", productId: undefined });
+  delete row.productId;
+  delete row.terms;
+
+  const report = await certify({ rows: [row], adapter });
+
+  const terms = report.fieldReport.fields.find((f) => f.mboField === "terms");
+  assert.equal(terms.rawValuePresent, false);
+  assert.equal(terms.status, "VERIFY_LIVE");
+  assert.notEqual(terms.status, "NOT_AVAILABLE_FROM_ENDPOINT");
+  assert.equal(terms.statusReason, "campaign_detail_identifier_missing");
+
+  assert.equal(
+    report.fieldReport.fields.filter((f) => f.scope === "campaign" && f.status === "NOT_AVAILABLE_FROM_ENDPOINT").length,
+    0,
+    "absence is never inferred from an endpoint we chose not to call",
+  );
+});
+
+test("identifier REVIEW_REQUIRED is counted and shown, never hidden behind clean field counts", async () => {
+  const adapter = fakeAdapter();
+  const row = { id: "ONLY-ID", campaignName: "Bare", publishers: [{ campaignSubStatus: "live" }] };
+
+  const report = await certify({ rows: [row], adapter });
+
+  assert.equal(report.fieldReport.identifierReviewRequiredCount, 2);
+  assert.equal(report.fieldReport.identifierDiagnosticCounts.REVIEW_REQUIRED, 2);
+  assert.equal(report.meta.identifierReviewRequiredCount, 2);
+  assert.equal(report.meta.identifierEndpointsSkipped, 2);
+  assert.equal(report.meta.identifiersFullyResolved, false, "a run with unresolved endpoint identity is not fully verified");
+
+  const markdown = renderSummaryMarkdown(report);
+  assert.match(markdown, /ENDPOINT IDENTITY UNRESOLVED — 2 REVIEW_REQUIRED identifier diagnostic\(s\)/);
+  assert.match(markdown, /NOT fully verified/);
+  assert.match(markdown, /## Identifier diagnostics/);
+  assert.match(markdown, /GET \/campaigns\/\{productId\}/);
+  assert.match(markdown, /GET \/campaigns\/\{campaignId\}\/commission-groups/);
+  assert.match(markdown, /No identifier was substituted across namespaces/);
+
+  // A clean run says so, and says it is fully verified.
+  const cleanReport = await certify({ rows: [tripleIdRow({ id: "A", campaignId: "B", productId: "C" })] });
+  assert.equal(cleanReport.meta.identifiersFullyResolved, true);
+  assert.match(renderSummaryMarkdown(cleanReport), /Identifier diagnostics: none/);
+});
+
+test("the certification selector carries rows and namespaces, and never dedupes across them", () => {
+  const rows = [
+    { id: "1", productId: "P", campaignId: "C", publishers: [{ campaignSubStatus: "live" }] },
+    { id: "2", productId: "P", campaignId: "C", publishers: [{ campaignSubStatus: "live" }] },
+    { name: "no identifiers at all", publishers: [{ campaignSubStatus: "live" }] },
+    { id: "3", status: "notapplied" },
+  ];
+
+  const joined = selectCertificationCampaigns(rows, { scope: "joined", maxCampaigns: 5 });
+
+  // Selection does NOT dedupe: request-level dedupe happens per namespace at dispatch.
+  assert.equal(joined.campaigns.length, 2, "both identical-identifier rows are kept as rows");
+  assert.equal(joined.skippedNoIdentifier, 1);
+  assert.equal(joined.skippedByScope, 1);
+  assert.equal(joined.campaignsInspected, 4);
+
+  const [first] = joined.campaigns;
+  assert.equal(first.rowIndex, 0);
+  assert.equal(first.row, rows[0], "the source row travels by reference");
+  assert.deepEqual(first.identifiers, { productId: "P", campaignId: "C", genericId: "1", legacyId: null });
+
+  const capped = selectCertificationCampaigns(rows, { scope: "all", maxCampaigns: 1 });
+  assert.equal(capped.campaigns.length, 1);
+  assert.equal(capped.skippedByCap, 2);
+});
+
+test("the certified canonical identity mirrors production, never the display key", async () => {
+  // campaignEntityFor must receive the value production's resolveOptimiseCampaignId
+  // would embed in Entity.externalId — not the human-readable campaignKey.
+  const report = await certify({
+    rows: [tripleIdRow({ id: "PROD-ID", campaignId: "CMP", productId: "PRD" })],
+  });
+
+  const supplierCampaignId = report.fieldReport.fields.find((f) => f.mboField === "supplierCampaignId");
+  assert.equal(supplierCampaignId.normalizedValue, "PROD-ID", "production coalesces id first; certification reports that");
+  assert.ok(
+    !String(supplierCampaignId.normalizedValue).includes("="),
+    "the display key must never leak into canonical identity",
+  );
+
+  const [campaign] = report.campaignsRaw;
+  assert.equal(campaign.campaignKey, "productId=PRD campaignId=CMP");
+  assert.deepEqual(campaign.identifiers, { productId: "PRD", campaignId: "CMP", genericId: "PROD-ID", legacyId: null });
+  assert.equal(campaign.campaignId, undefined, "no field named campaignId holds a non-campaignId value");
+});
+
+test("every emitted campaignId field holds ONLY the explicit supplier campaignId", async () => {
+  const report = await certify({
+    rows: [tripleIdRow({ id: "I", campaignId: "C", productId: "P" })],
+    adapter: fakeAdapter({ groupsByCampaign: { C: [{ id: "g1", name: "Standard", commission: "5%" }] } }),
+  });
+
+  // Records that legitimately carry campaignId carry the supplier value.
+  assert.equal(report.groupsRaw[0].campaignId, "C");
+  assert.equal(report.rulesNormalized[0].campaignId, "C");
+  assert.equal(report.fieldReport.ruleLineage[0].campaignId, "C");
+
+  // Records keyed for display carry campaignKey plus explicit identifiers.
+  assert.equal(report.campaignsNormalized[0].campaignKey, "productId=P campaignId=C");
+  assert.equal(report.campaignDetailsRaw[0].campaignKey, "productId=P campaignId=C");
+  for (const entry of report.fieldReport.fields) {
+    assert.equal(entry.campaignId, undefined, `${entry.mboField} must not carry a campaignId label`);
+    assert.equal(entry.campaignKey, "productId=P campaignId=C");
+    assert.deepEqual(entry.identifiers, { productId: "P", campaignId: "C", genericId: "I", legacyId: null });
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * Shared productId: one request, but every row keeps the evidence
+ * ------------------------------------------------------------------ */
+
+test("rows sharing a productId all receive the single detail response", async () => {
+  const adapter = fakeAdapter({
+    detailByCampaign: { P: { id: "P", terms: "Detail-only terms", landingPage: { websiteUrl: "https://brand.example/p" } } },
+  });
+
+  const report = await certify({
+    rows: [
+      tripleIdRow({ id: "1", campaignId: "C1", productId: "P" }),
+      tripleIdRow({ id: "2", campaignId: "C2", productId: "P" }),
+    ],
+    adapter,
+  });
+
+  assert.deepEqual(adapter.calls.fetchCampaignDetail, ["P"], "exactly one detail request");
+  assert.deepEqual(adapter.calls.fetchCommissionGroups.sort(), ["C1", "C2"]);
+  assert.equal(report.meta.detailRequestsIssued, 1);
+  assert.equal(report.meta.rowsReusingCachedDetail, 1);
+  assert.equal(report.meta.campaignsCertified, 2);
+
+  // BOTH rows carry the detail payload — the deduplicated row must not lose it.
+  assert.equal(report.campaignDetailsRaw.length, 2);
+  for (const entry of report.campaignDetailsRaw) {
+    assert.equal(entry.fetched, true, "a cached row still counts as fetched");
+    assert.equal(entry.raw.terms, "Detail-only terms");
+  }
+  // One shared productId: 1 request, 1 successful response, 2 rows with evidence.
+  assert.equal(report.meta.detailRequestsIssued, 1, "one unique productId request attempted");
+  assert.equal(report.meta.campaignDetailResponsesSucceeded, 1, "one successful response");
+  assert.equal(report.meta.campaignRowsWithDetailEvidence, 2, "both rows hold detail evidence");
+  assert.equal(report.meta.rowsReusingCachedDetail, 1, "one row reused the cached result");
+
+  // BOTH rows normalize and certify the detail-only fields.
+  const terms = report.fieldReport.fields.filter((f) => f.mboField === "terms");
+  assert.equal(terms.length, 2);
+  for (const field of terms) {
+    assert.equal(field.normalizedValue, "Detail-only terms");
+    assert.equal(field.rawSourceOrigin, "detail");
+    assert.equal(field.status, "LIVE_VERIFIED");
+    assert.notEqual(field.status, "NOT_AVAILABLE_FROM_ENDPOINT");
+  }
+
+  const destination = report.fieldReport.fields.filter((f) => f.mboField === "destinationUrl");
+  assert.equal(destination.length, 2);
+  for (const field of destination) {
+    assert.equal(field.normalizedValue, "https://brand.example/p");
+    assert.equal(field.status, "LIVE_VERIFIED");
+  }
+
+  // And nothing is falsely declared absent on the deduplicated row.
+  assert.equal(
+    report.fieldReport.fields.filter((f) => f.scope === "campaign" && f.status === "NOT_AVAILABLE_FROM_ENDPOINT" && f.mboField === "terms").length,
+    0,
+  );
+});
+
+test("a shared-productId detail FAILURE is inherited by every row that reuses it", async () => {
+  const error = new Error("detail unavailable");
+  error.response = { status: 403 };
+  const adapter = fakeAdapter({ detailError: error });
+
+  const rowA = tripleIdRow({ id: "1", campaignId: "C1", productId: "P" });
+  const rowB = tripleIdRow({ id: "2", campaignId: "C2", productId: "P" });
+  delete rowA.terms;
+  delete rowB.terms;
+
+  const report = await certify({ rows: [rowA, rowB], adapter });
+
+  assert.deepEqual(adapter.calls.fetchCampaignDetail, ["P"], "the failure is not retried per row");
+  assert.equal(report.meta.detailRequestFailures.length, 1);
+  assert.equal(report.meta.detailRequestFailures[0].identifierKind, "productId");
+  assert.equal(report.meta.rowsReusingCachedDetail, 1);
+
+  // BOTH rows must remain VERIFY_LIVE — absence is never inferred from a failure.
+  const terms = report.fieldReport.fields.filter((f) => f.mboField === "terms");
+  assert.equal(terms.length, 2);
+  for (const field of terms) {
+    assert.equal(field.status, "VERIFY_LIVE");
+    assert.equal(field.statusReason, "campaign_detail_request_failed");
+    assert.notEqual(field.status, "NOT_AVAILABLE_FROM_ENDPOINT");
+  }
+  assert.equal(
+    report.fieldReport.fields.filter((f) => f.scope === "campaign" && f.status === "NOT_AVAILABLE_FROM_ENDPOINT").length,
+    0,
+    "a cached failure blocks absence claims on every sharing row",
+  );
+});
+
+/* ------------------------------------------------------------------ *
+ * Zero certified campaigns cannot resolve anything
+ * ------------------------------------------------------------------ */
+
+test("no certifiable rows: identifier resolution is NOT established", async () => {
+  const adapter = fakeAdapter();
+  // Rows with no usable identifier in any namespace.
+  const rows = [
+    { campaignName: "No identifiers", publishers: [{ campaignSubStatus: "live" }] },
+    { campaignName: "Also none", status: "live" },
+  ];
+
+  const report = await certify({ rows, adapter });
+
+  assert.equal(report.meta.campaignsCertified, 0);
+  assert.deepEqual(adapter.calls.fetchCampaignDetail, []);
+  assert.deepEqual(adapter.calls.fetchCommissionGroups, []);
+  assert.equal(report.fieldReport.identifierDiagnostics.length, 0, "nothing was selected, so nothing was diagnosed");
+  assert.equal(report.meta.identifierReviewRequiredCount, 0);
+
+  // The bare count is zero, but resolution must NOT read as achieved.
+  assert.notEqual(report.meta.identifiersFullyResolved, true);
+  assert.equal(report.meta.identifiersFullyResolved, false);
+  assert.equal(report.meta.identifierResolutionEstablished, false);
+
+  const markdown = renderSummaryMarkdown(report);
+  assert.match(markdown, /NO CERTIFIABLE CAMPAIGN ROWS/);
+  assert.match(markdown, /endpoint identifier resolution not established/i);
+  assert.ok(
+    !markdown.includes("every endpoint had its required identifier"),
+    "an empty run must never claim every endpoint had its identifier",
+  );
+  assert.equal(report.meta.identifierResolutionEstablished, false);
+});
+
+test("detail metrics report requests, successes and rows as SEPARATE numbers", async () => {
+  const adapter = fakeAdapter({ detailByCampaign: { P: { id: "P", terms: "Shared detail terms" } } });
+
+  const report = await certify({
+    rows: [
+      tripleIdRow({ id: "1", campaignId: "C1", productId: "P" }),
+      tripleIdRow({ id: "2", campaignId: "C2", productId: "P" }),
+    ],
+    adapter,
+  });
+
+  // The exact scenario: 2 rows, 1 shared productId, 1 request, 1 success, 2 rows with evidence.
+  assert.equal(report.meta.campaignsCertified, 2);
+  assert.equal(report.meta.detailRequestsIssued, 1);
+  assert.equal(report.meta.campaignDetailResponsesSucceeded, 1);
+  assert.equal(report.meta.campaignRowsWithDetailEvidence, 2);
+  assert.equal(report.meta.rowsReusingCachedDetail, 1);
+  assert.equal(adapter.calls.fetchCampaignDetail.length, 1);
+
+  // Rows-with-evidence must never be labelled as responses fetched.
+  const markdown = renderSummaryMarkdown(report);
+  assert.match(markdown, /Campaign detail requests issued: 1 · responses succeeded: 1 · failures: 0/);
+  assert.match(markdown, /Campaign rows with detail evidence: 2 \(rows reusing a cached detail result: 1\)/);
+  assert.ok(!markdown.includes("Campaign detail responses fetched: 2"), "rows are never reported as responses");
+  assert.ok(!/responses fetched/i.test(markdown), "the ambiguous wording is gone entirely");
+});
+
+test("a failed shared request counts as a request but not a success, and yields no evidence", async () => {
+  const error = new Error("detail unavailable");
+  error.response = { status: 403 };
+  const adapter = fakeAdapter({ detailError: error });
+
+  const report = await certify({
+    rows: [
+      tripleIdRow({ id: "1", campaignId: "C1", productId: "P" }),
+      tripleIdRow({ id: "2", campaignId: "C2", productId: "P" }),
+    ],
+    adapter,
+  });
+
+  assert.equal(report.meta.detailRequestsIssued, 1, "attempted once");
+  assert.equal(report.meta.campaignDetailResponsesSucceeded, 0, "no successful response");
+  assert.equal(report.meta.campaignRowsWithDetailEvidence, 0, "no row holds detail evidence");
+  assert.equal(report.meta.rowsReusingCachedDetail, 1, "the second row still reused the cached outcome");
+  assert.equal(report.meta.detailRequestFailures.length, 1);
+});
+
+test("the preview wrapper does not load the production sync job or Prisma to build its dependencies", () => {
+  const source = fs.readFileSync(ROUTE_SOURCE_PATH, "utf8");
+  assert.ok(!/optimiseCommissionGroupSync/.test(source), "no production commission-group sync import");
+  assert.ok(!/syncModule/.test(source), "no residual sync module binding");
+  assert.ok(!/database\/prisma/.test(source), "no direct prisma import");
 });

@@ -27,6 +27,14 @@ export function optimiseCommissionGroupSyncConfig(env = process.env) {
   };
 }
 
+/**
+ * PRODUCTION commission-group selection key. Unchanged on purpose.
+ *
+ * This still coalesces id/campaignId/productId. Narrowing it to an explicit
+ * campaignId would change which campaigns the production sync requests, so it is
+ * deliberately left alone until the persisted-identifier audit shows whether these
+ * fields ever disagree in real data. The certification path does NOT use this.
+ */
 function campaignIdOf(raw = {}) {
   const value = raw?.id ?? raw?.campaignId ?? raw?.productId ?? raw?.legacyId ?? raw?.campaign_id;
   if (value === undefined || value === null) return null;
