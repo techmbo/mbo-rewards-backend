@@ -27,18 +27,34 @@ export function optimiseCommissionGroupSyncConfig(env = process.env) {
   };
 }
 
-function campaignIdOf(raw = {}) {
-  const value = raw?.id ?? raw?.campaignId ?? raw?.productId ?? raw?.legacyId ?? raw?.campaign_id;
-  if (value === undefined || value === null) return null;
-  const text = String(value).trim();
-  if (!text || /[\\/\s?#]/.test(text)) return null;
-  return text;
+/**
+ * The identifier GET /campaigns/{campaignId}/commission-groups requires.
+ *
+ * Optimise campaign rows carry several identifier namespaces, and live certification
+ * plus the production identifier audit proved they are NOT interchangeable:
+ *   productId  → GET /campaigns/{productId}                    (campaign detail)
+ *   campaignId → GET /campaigns/{campaignId}/commission-groups
+ * Only an explicit campaignId (or its snake_case form, campaign_id) may be dispatched
+ * here. `id`, `productId` and `legacyId` are never used as a fallback: a row without an
+ * explicit campaignId is skipped (skippedNoId) rather than requested under a foreign
+ * identifier. This is request selection only — persisted campaign identity
+ * (resolveOptimiseCampaignId / SupplierCampaign.supplierCampaignId) is untouched.
+ */
+function commissionGroupCampaignIdOf(raw = {}) {
+  for (const value of [raw?.campaignId, raw?.campaign_id]) {
+    if (value === undefined || value === null) continue;
+    const text = String(value).trim();
+    if (!text) continue;
+    return /[\\/\s?#]/.test(text) ? null : text;
+  }
+  return null;
 }
 
 /**
  * Select the campaigns whose commission groups are requested.
  * scope=joined (default): only campaigns whose publisher relationship is verified JOINED.
- * scope=all: every campaign with a safe id. Duplicates are collapsed; a cap bounds requests.
+ * scope=all: every campaign with a safe explicit campaignId. Duplicates are collapsed;
+ * a cap bounds requests.
  */
 export function selectOptimiseCommissionGroupCampaigns(campaignRows = [], { scope = "joined", maxCampaigns = 200 } = {}) {
   const selected = [];
@@ -49,7 +65,7 @@ export function selectOptimiseCommissionGroupCampaigns(campaignRows = [], { scop
   let skippedByCap = 0;
 
   for (const raw of Array.isArray(campaignRows) ? campaignRows : []) {
-    const campaignId = campaignIdOf(raw);
+    const campaignId = commissionGroupCampaignIdOf(raw);
     if (!campaignId) {
       skippedNoId += 1;
       continue;
