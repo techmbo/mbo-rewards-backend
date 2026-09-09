@@ -246,28 +246,10 @@ describe("Optimise commission groups — resource registration", () => {
     assert.deepEqual(metadata.failures[0].campaignIds, ["777"]);
   });
 
-  it("selects applicable campaign ids safely (joined scope, dedupe, cap) and honours config", () => {
-    const rows = [
-      { id: 1, publishers: [{ campaignSubStatus: "approved" }] },
-      { id: "1", publishers: [{ campaignSubStatus: "approved" }] },
-      { id: 2, status: "notapplied" },
-      { campaignId: "3/x", publishers: [{ campaignSubStatus: "approved" }] },
-      { id: 4, publishers: [{ campaignSubStatus: "approved" }] },
-      { id: 5, publishers: [{ campaignSubStatus: "approved" }] },
-    ];
-    const joined = selectOptimiseCommissionGroupCampaigns(rows, { scope: "joined", maxCampaigns: 2 });
-    assert.deepEqual(joined.campaigns.map((c) => c.campaignId), ["1", "4"]);
-    assert.equal(joined.campaignsInspected, 6);
-    assert.equal(joined.skippedDuplicate, 1);
-    assert.equal(joined.skippedNoId, 1);
-    assert.equal(joined.skippedByScope, 1);
-    assert.equal(joined.skippedByCap, 1);
-
-    const all = selectOptimiseCommissionGroupCampaigns(rows, { scope: "all", maxCampaigns: 10 });
-    assert.deepEqual(all.campaigns.map((c) => c.campaignId), ["1", "2", "4", "5"]);
-
+  it("honours sync config", () => {
     const config = optimiseCommissionGroupSyncConfig({ OPTIMISE_COMMISSION_GROUPS_ENABLED: "false", OPTIMISE_COMMISSION_GROUPS_SCOPE: "all", OPTIMISE_COMMISSION_GROUPS_MAX_CAMPAIGNS: "25" });
     assert.deepEqual(config, { enabled: false, scope: "all", maxCampaigns: 25 });
+    assert.deepEqual(optimiseCommissionGroupSyncConfig({}), { enabled: true, scope: "joined", maxCampaigns: 200 });
   });
 
   it("fetches sequentially through the adapter and preserves per-campaign failures", async () => {
@@ -296,6 +278,183 @@ describe("Optimise commission groups — resource registration", () => {
     assert.deepEqual(result.campaignScope.failures.map((f) => [f.campaignId, f.httpStatus, f.message]), [["2", 500, "upstream down"]]);
     assert.equal(result.byCampaign.get("2").status, "FAILED");
     assert.deepEqual(result.rows.map((r) => [r.campaignId, r.sourceCampaignId, r.record_source]), [["1", "1", "commission_group"], ["3", "3", "commission_group"]]);
+  });
+});
+
+/**
+ * Live-certified namespace facts (production identifier audit + live API):
+ *   GET /campaigns/57316                     = campaign detail        (productId)
+ *   GET /campaigns/7340528/commission-groups = commission groups      (campaignId)
+ * The same Optimise row carries campaignId=7340528 AND productId=57316. Only the
+ * explicit campaignId / campaign_id may be dispatched to the commission-group endpoint.
+ */
+describe("Optimise commission groups — commission-group campaignId namespace", () => {
+  const approved = [{ campaignSubStatus: "approved" }];
+  const liveRow = { campaignId: "7340528", productId: "57316", publishers: approved };
+  const select = (rows, options = { scope: "joined", maxCampaigns: 200 }) => selectOptimiseCommissionGroupCampaigns(rows, options);
+  const selectedIds = (selection) => selection.campaigns.map((c) => c.campaignId);
+
+  function spyAdapter() {
+    const requested = [];
+    return {
+      requested,
+      async fetchCommissionGroups(campaignId) {
+        requested.push(campaignId);
+        return { campaignId, groups: [{ id: `G-${campaignId}`, commission: "5%" }], fetchedAt: new Date(), httpStatus: 200 };
+      },
+    };
+  }
+
+  it("1. the live-certified row selects campaignId 7340528 — never productId 57316", () => {
+    const selection = select([liveRow]);
+    assert.deepEqual(selectedIds(selection), ["7340528"]);
+    assert.ok(!selectedIds(selection).includes("57316"), "productId must never be sent to commission-groups");
+    assert.equal(selection.skippedNoId, 0);
+    assert.equal(selection.campaignsInspected, 1);
+  });
+
+  it("2. campaign_id (snake_case) is an explicit campaignId, including when campaignId is blank", () => {
+    assert.deepEqual(selectedIds(select([{ campaign_id: "7340528", productId: "57316", publishers: approved }])), ["7340528"]);
+    assert.deepEqual(selectedIds(select([{ campaignId: "", campaign_id: "7340528", productId: "57316", publishers: approved }])), ["7340528"]);
+    assert.deepEqual(selectedIds(select([{ campaignId: "   ", campaign_id: 7340528, publishers: approved }])), ["7340528"]);
+    // camelCase wins when both are present
+    assert.deepEqual(selectedIds(select([{ campaignId: "7340528", campaign_id: "1", publishers: approved }])), ["7340528"]);
+  });
+
+  it("3. productId alone is NOT a commission-group identifier: skipped, skippedNoId increments", () => {
+    const selection = select([{ productId: "57316", publishers: approved }]);
+    assert.deepEqual(selection.campaigns, []);
+    assert.equal(selection.skippedNoId, 1);
+    assert.equal(selection.skippedByScope, 0);
+    // scope=all does not resurrect it either
+    assert.equal(select([{ productId: "57316" }], { scope: "all", maxCampaigns: 10 }).skippedNoId, 1);
+  });
+
+  it("4. generic id alone is NOT a commission-group identifier: skipped, skippedNoId increments", () => {
+    const selection = select([{ id: "7340528", publishers: approved }, { id: 7340528, publishers: approved }]);
+    assert.deepEqual(selection.campaigns, []);
+    assert.equal(selection.skippedNoId, 2);
+    assert.equal(selection.skippedDuplicate, 0, "rows with no usable id are not counted as duplicates of each other");
+  });
+
+  it("5. legacyId alone is NOT a commission-group identifier: skipped, skippedNoId increments", () => {
+    const selection = select([{ legacyId: "7340528", publishers: approved }]);
+    assert.deepEqual(selection.campaigns, []);
+    assert.equal(selection.skippedNoId, 1);
+    // id + productId + legacyId together, still no campaignId → still skipped
+    assert.equal(select([{ id: "1", productId: "57316", legacyId: "9", publishers: approved }]).skippedNoId, 1);
+  });
+
+  it("6. campaignId wins when id, campaignId and productId are all different", () => {
+    const selection = select([{ id: "111", campaignId: "7340528", productId: "57316", legacyId: "999", publishers: approved }]);
+    assert.deepEqual(selectedIds(selection), ["7340528"]);
+    // the previous id-first precedence would have produced "111"
+    assert.ok(!selectedIds(selection).includes("111"));
+  });
+
+  it("7. duplicate rows sharing a campaignId but different productIds select one campaign; skippedDuplicate increments", () => {
+    const selection = select([
+      { campaignId: "7340528", productId: "57316", publishers: approved },
+      { campaignId: "7340528", productId: "57317", publishers: approved },
+      { campaignId: 7340528, productId: "57318", publishers: approved },
+    ]);
+    assert.deepEqual(selectedIds(selection), ["7340528"]);
+    assert.equal(selection.skippedDuplicate, 2);
+    assert.equal(selection.campaignsInspected, 3);
+    // different campaignIds under one productId are distinct requests
+    assert.deepEqual(
+      selectedIds(select([{ campaignId: "1", productId: "57316", publishers: approved }, { campaignId: "2", productId: "57316", publishers: approved }])),
+      ["1", "2"],
+    );
+  });
+
+  it("8. an unsafe campaignId (slash / space / query / fragment) is skipped as no usable campaignId; no supplier request", async () => {
+    const rows = [
+      { campaignId: "3/x", publishers: approved },
+      { campaignId: "1/../x", publishers: approved },
+      { campaignId: "7340528 1", publishers: approved },
+      { campaignId: "7340528?x=1", publishers: approved },
+      { campaignId: "7340528#f", publishers: approved },
+      { campaignId: "\\7340528", publishers: approved },
+      { campaign_id: "3/x", publishers: approved },
+    ];
+    const selection = select(rows);
+    assert.deepEqual(selection.campaigns, []);
+    assert.equal(selection.skippedNoId, rows.length);
+
+    const adapter = spyAdapter();
+    const result = await fetchOptimiseCommissionGroups({ adapter, campaigns: selection.campaigns });
+    assert.deepEqual(adapter.requested, []);
+    assert.equal(result.campaignScope.requestsAttempted, 0);
+  });
+
+  it("9. joined-scope behaviour is unchanged", () => {
+    const rows = [
+      { campaignId: "1", productId: "10", publishers: approved },
+      { campaignId: "2", productId: "20", status: "notapplied" },
+      { campaignId: "3", productId: "30", publishers: [{ campaignSubStatus: "pending" }] },
+      { campaignId: "4", productId: "40" },
+      { productId: "50", publishers: approved },
+    ];
+    const joined = select(rows, { scope: "joined", maxCampaigns: 200 });
+    assert.deepEqual(selectedIds(joined), ["1"]);
+    assert.equal(joined.skippedByScope, 3);
+    assert.equal(joined.skippedNoId, 1);
+    assert.equal(joined.skippedDuplicate, 0);
+    assert.equal(joined.skippedByCap, 0);
+    assert.equal(joined.campaignsInspected, 5);
+    assert.deepEqual(joined.campaigns[0], { campaignId: "1", currency: null });
+  });
+
+  it("10. scope=all behaviour is unchanged", () => {
+    const rows = [
+      { campaignId: "1", productId: "10", publishers: approved, currencyCode: "usd" },
+      { campaignId: "2", productId: "20", status: "notapplied" },
+      { campaignId: "3", productId: "30", publishers: [{ campaignSubStatus: "pending" }] },
+      { productId: "50", publishers: approved },
+    ];
+    const all = select(rows, { scope: "all", maxCampaigns: 10 });
+    assert.deepEqual(selectedIds(all), ["1", "2", "3"]);
+    assert.equal(all.skippedByScope, 0);
+    assert.equal(all.skippedNoId, 1, "productId-only rows are skipped even in scope=all");
+    assert.equal(all.campaigns[0].currency, "USD", "currency selection unchanged");
+  });
+
+  it("11. maxCampaigns cap and metrics are unchanged", () => {
+    const rows = ["1", "2", "3", "4", "5"].map((campaignId) => ({ campaignId, productId: `p${campaignId}`, publishers: approved }));
+    const capped = select([...rows, rows[0]], { scope: "joined", maxCampaigns: 2 });
+    assert.deepEqual(selectedIds(capped), ["1", "2"]);
+    assert.equal(capped.skippedByCap, 3);
+    assert.equal(capped.skippedDuplicate, 1);
+    assert.equal(capped.campaignsInspected, 6);
+    assert.equal(capped.skippedNoId, 0);
+    assert.equal(capped.skippedByScope, 0);
+  });
+
+  it("12. fetchOptimiseCommissionGroups passes exactly the selected campaignId to adapter.fetchCommissionGroups", async () => {
+    const selection = select([liveRow, { campaignId: "1", productId: "2", publishers: approved }]);
+    const adapter = spyAdapter();
+
+    const result = await fetchOptimiseCommissionGroups({ adapter, campaigns: selection.campaigns });
+
+    assert.deepEqual(adapter.requested, ["7340528", "1"]);
+    assert.ok(!adapter.requested.includes("57316"));
+    assert.deepEqual([...result.byCampaign.keys()], ["7340528", "1"]);
+    assert.deepEqual(result.rows.map((r) => [r.campaignId, r.sourceCampaignId]), [["7340528", "7340528"], ["1", "1"]]);
+    assert.equal(result.campaignScope.requestsAttempted, 2);
+    assert.equal(result.campaignScope.requestsSucceeded, 2);
+    assert.ok(!JSON.stringify(result.rows).includes("57316"), "productId never enters commission-group evidence as a campaign id");
+  });
+
+  it("13. the selection helper reads only campaignId / campaign_id (source guard)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("../src/jobs/optimiseCommissionGroupSync.js", import.meta.url), "utf8");
+    const start = source.indexOf("function commissionGroupCampaignIdOf");
+    assert.ok(start > 0, "helper is named for the endpoint it serves");
+    const body = source.slice(start, source.indexOf("\n}\n", start));
+    assert.ok(!/campaignIdOf\(raw/.test(source.replace(/commissionGroupCampaignIdOf/g, "")), "the old ambiguous helper is gone");
+    assert.ok(!/raw\?\.id\b|productId|legacyId/.test(body), "no id / productId / legacyId fallback in the commission-group helper");
+    assert.match(body, /raw\?\.campaignId, raw\?\.campaign_id/);
   });
 });
 
