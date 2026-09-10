@@ -933,7 +933,7 @@ VITE_API_BASE_URL="http://localhost:4000/api"
 
 | Group | Examples |
 |-------|----------|
-| App URLs | `PORT`, `BACKEND_URL`, `FRONTEND_URL`, `TRACKING_BASE_URL` |
+| App URLs | `PORT`, `BACKEND_URL`, `FRONTEND_URL`, `FRONTEND_ORIGINS`, `ADMIN_FRONTEND_ORIGIN` (optional single extra CORS origin for the admin frontend), `TRACKING_BASE_URL` |
 | Bootstrap admin | `ADMIN_EMAIL`, `ADMIN_PASSWORD` |
 | Networks | Boostiny/Optimise/Trackier base URLs, rate limits, report windows |
 | Sync | concurrency, refresh hours, `FAST_SYNC`, scheduler, `AUTO_PROMOTE_AFTER_SYNC` |
