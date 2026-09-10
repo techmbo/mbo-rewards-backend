@@ -134,3 +134,77 @@ export function dayBounds(reportDate) {
   end.setUTCMilliseconds(end.getUTCMilliseconds() - 1);
   return { start, end };
 }
+
+const DATE_ONLY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+const ISO_DATETIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})$/;
+
+function invalidReportDate(message) {
+  const error = new Error(message);
+  error.statusCode = 400;
+  error.code = "invalid_report_date_range";
+  return error;
+}
+
+/**
+ * Canonical parser for a report date boundary supplied by a caller.
+ *
+ * Accepts, and only accepts:
+ *   - a valid Date instance,
+ *   - a date-only "YYYY-MM-DD" string, read as that UTC calendar day,
+ *   - an ISO-8601 datetime string with an explicit offset or Z.
+ * Anything else (invalid Date, impossible calendar date, locale or slash
+ * formats, numbers, empty) throws a 400 instead of being silently coerced —
+ * a wrong boundary here would delete the wrong DailyReport rows.
+ *
+ * @returns {Date} the instant the input denotes (not yet day-normalized)
+ */
+export function parseReportDateInput(value, label = "date") {
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) throw invalidReportDate(`${label} is an invalid Date.`);
+    return new Date(value.getTime());
+  }
+  if (typeof value !== "string" || value.trim() === "") {
+    throw invalidReportDate(`${label} must be a Date, a YYYY-MM-DD string or an ISO-8601 datetime string.`);
+  }
+  const text = value.trim();
+  const dateOnly = DATE_ONLY_PATTERN.exec(text);
+  if (dateOnly) {
+    const [, year, month, day] = dateOnly.map(Number);
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    // Date.UTC silently rolls impossible dates (2026-02-30 → March 2); reject those.
+    if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1 || parsed.getUTCDate() !== day) {
+      throw invalidReportDate(`${label} "${text}" is not a valid calendar date.`);
+    }
+    return parsed;
+  }
+  if (ISO_DATETIME_PATTERN.test(text)) {
+    const parsed = new Date(text);
+    if (Number.isNaN(parsed.getTime())) throw invalidReportDate(`${label} "${text}" is not a valid ISO-8601 datetime.`);
+    return parsed;
+  }
+  throw invalidReportDate(`${label} "${text}" must be YYYY-MM-DD or an ISO-8601 datetime with an offset.`);
+}
+
+/**
+ * Normalize a rebuild range to inclusive UTC calendar days: both ends become the
+ * UTC midnight of the day they fall in (the DailyReport.reportDate grain), so a
+ * delete filter and a day-by-day rebuild loop cover exactly the same rows.
+ *
+ * Missing or invalid input throws a 400. Inversion is checked on the ACTUAL
+ * parsed instants, before day normalization: "2026-09-10T20:00Z" → "2026-09-10T01:00Z"
+ * is a genuinely inverted range and is rejected even though both fall on the
+ * same report day. All of this happens before any repository call can run.
+ */
+export function normalizeReportDateRange({ from, to } = {}) {
+  if (from === undefined || from === null || to === undefined || to === null) {
+    throw invalidReportDate("from and to are required for rebuild.");
+  }
+  const parsedFrom = parseReportDateInput(from, "from");
+  const parsedTo = parseReportDateInput(to, "to");
+  if (parsedFrom.getTime() > parsedTo.getTime()) {
+    throw invalidReportDate(`from (${parsedFrom.toISOString()}) must not be after to (${parsedTo.toISOString()}).`);
+  }
+  const fromDay = toReportDate(parsedFrom);
+  const toDay = toReportDate(parsedTo);
+  return { from: fromDay, to: toDay };
+}

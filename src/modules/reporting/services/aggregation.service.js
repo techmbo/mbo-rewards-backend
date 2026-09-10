@@ -11,6 +11,7 @@ import {
   dayBounds,
   grossCommissionForConversion,
   isRejectedConversionStatus,
+  normalizeReportDateRange,
   toReportDate,
 } from "../attributionMath.js";
 import {
@@ -82,10 +83,18 @@ export class AggregationService {
    */
   async rebuild({ from, to, clientId } = {}, client = null) {
     if (!from || !to) throw fail("from and to are required for rebuild.", 400);
-    const deleted = await this.dailyReportRepo.deleteForDateRange({ from, to, clientId }, client);
+    // Canonical boundary: date-only strings (the post-sync auto-rebuild sends
+    // "YYYY-MM-DD"), Date instances and ISO datetimes all become UTC calendar-day
+    // Dates here, so the repository DateTime filter never sees a raw string and
+    // an invalid or inverted range fails before the delete below.
+    const range = normalizeReportDateRange({ from, to });
+    const deleted = await this.dailyReportRepo.deleteForDateRange(
+      { from: range.from, to: range.to, clientId },
+      client,
+    );
 
-    const cursor = new Date(from);
-    const end = new Date(to);
+    const cursor = new Date(range.from);
+    const end = range.to;
     const summaries = [];
 
     while (cursor <= end) {
