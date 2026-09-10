@@ -1,4 +1,9 @@
 import { Router } from "express";
+// TEMPORARY — preview-only, read-only staff user metadata audit (remove with the route below).
+import {
+  PREVIEW_ADMIN_USER_AUDIT_ROUTE,
+  adminUserAuditPreviewHandler,
+} from "./internal/adminUserAuditPreview.js";
 import { PERMISSIONS } from "../auth/permissions.js";
 import { getEntities, getEntitySummaryHandler } from "../controllers/entities.controller.js";
 import {
@@ -307,6 +312,14 @@ import {
 const router = Router();
 
 router.get("/health", (_req, res) => res.json({ ok: true }));
+
+// TEMPORARY — Preview-only, READ-ONLY staff user metadata audit. Remove this
+// route and src/routes/internal/adminUserAuditPreview.js once the staff-account
+// evidence has been captured. It 404s outside VERCEL_ENV=preview, fails closed
+// without ADMIN_USER_AUDIT_TOKEN, and answers 401/403 for a missing/wrong
+// x-audit-token header. It never reaches Prisma unless every gate passes and
+// can only read id/email/name/role/isActive/createdAt of non-CLIENT users.
+router.post(PREVIEW_ADMIN_USER_AUDIT_ROUTE, adminUserAuditPreviewHandler);
 
 router.post("/auth/send-otp", authRateLimiter, sendOtpHandler);
 router.post("/auth/verify-otp", authRateLimiter, verifyOtpHandler);
