@@ -63,6 +63,7 @@ const runningJobs = new Map();
 export class JobRunner {
   constructor(deps = {}) {
     this.repo = deps.repo ?? new JobRepository();
+    this.sleep = deps.sleep ?? sleep;
     this.handlers = new Map();
     this.defaultMaxAttempts = Number(process.env.JOB_MAX_ATTEMPTS || 3);
   }
@@ -140,14 +141,17 @@ export class JobRunner {
       observeJobDuration(current.jobName, (Date.now() - startedAt) / 1000);
       return current;
     } catch (error) {
-      const attempt = current.attempt + 1;
+      // `current.attempt` was already incremented by the RUNNING update above, so
+      // it IS the number of the execution that just failed. maxAttempts is the
+      // maximum number of handler executions: retry only while fewer have run.
+      const attempt = current.attempt;
       const maxAttempts = current.maxAttempts;
       const shouldRetry = attempt < maxAttempts;
 
       if (shouldRetry) {
         const delay = backoffMs(attempt);
         logger.warn({ jobId: current.id, attempt, delay }, "job failed, scheduling retry");
-        await sleep(delay);
+        await this.sleep(delay);
         current = await this.repo.update(current.id, {
           status: "PENDING",
           lastError: error.message,
