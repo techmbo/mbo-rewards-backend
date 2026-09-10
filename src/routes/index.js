@@ -1,4 +1,9 @@
 import { Router } from "express";
+// TEMPORARY — preview-only, read-only dead-letter queue audit (remove with the route below).
+import {
+  PREVIEW_DLQ_AUDIT_ROUTE,
+  deadLetterAuditPreviewHandler,
+} from "./internal/deadLetterAuditPreview.js";
 import { PERMISSIONS } from "../auth/permissions.js";
 import { getEntities, getEntitySummaryHandler } from "../controllers/entities.controller.js";
 import {
@@ -307,6 +312,14 @@ import {
 const router = Router();
 
 router.get("/health", (_req, res) => res.json({ ok: true }));
+
+// TEMPORARY — Preview-only, READ-ONLY dead-letter queue audit. Remove this route
+// and src/routes/internal/deadLetterAuditPreview.js once the DLQ evidence has
+// been captured. It 404s outside VERCEL_ENV=preview and without a matching
+// x-audit-token, loads the database layer only after that gate, issues only
+// jobRun count / groupBy / findMany reads, and never returns payload, result,
+// correlationId or raw lastError.
+router.post(PREVIEW_DLQ_AUDIT_ROUTE, deadLetterAuditPreviewHandler);
 
 router.post("/auth/send-otp", authRateLimiter, sendOtpHandler);
 router.post("/auth/verify-otp", authRateLimiter, verifyOtpHandler);
