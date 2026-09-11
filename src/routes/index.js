@@ -4,6 +4,11 @@ import {
   PREVIEW_ADMIN_USER_AUDIT_ROUTE,
   adminUserAuditPreviewHandler,
 } from "./internal/adminUserAuditPreview.js";
+// TEMPORARY — preview-only, token-gated bootstrap of one fixed ADMIN user (remove with the route below).
+import {
+  PREVIEW_ADMIN_BOOTSTRAP_ROUTE,
+  adminBootstrapPreviewHandler,
+} from "./internal/adminBootstrapPreview.js";
 import { PERMISSIONS } from "../auth/permissions.js";
 import { getEntities, getEntitySummaryHandler } from "../controllers/entities.controller.js";
 import {
@@ -320,6 +325,15 @@ router.get("/health", (_req, res) => res.json({ ok: true }));
 // x-audit-token header. It never reaches Prisma unless every gate passes and
 // can only read id/email/name/role/isActive/createdAt of non-CLIENT users.
 router.post(PREVIEW_ADMIN_USER_AUDIT_ROUTE, adminUserAuditPreviewHandler);
+
+// TEMPORARY — Preview-only, token-gated bootstrap of ONE fixed ADMIN user
+// (mbo@marketingblueocean.com). Remove this route and
+// src/routes/internal/adminBootstrapPreview.js once the owner account exists.
+// It 404s outside VERCEL_ENV=preview, fails closed without ADMIN_BOOTSTRAP_TOKEN,
+// answers 401/403 for a missing/wrong x-bootstrap-token header, hashes the
+// body password with the auth service's own hashPassword(), writes nothing when
+// the user already exists, and can never create any other user or role.
+router.post(PREVIEW_ADMIN_BOOTSTRAP_ROUTE, adminBootstrapPreviewHandler);
 
 router.post("/auth/send-otp", authRateLimiter, sendOtpHandler);
 router.post("/auth/verify-otp", authRateLimiter, verifyOtpHandler);
