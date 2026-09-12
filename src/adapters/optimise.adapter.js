@@ -228,12 +228,50 @@ export const CERTIFICATION_FEED_SAMPLE_BYTES = Number(process.env.CERTIFICATION_
 
 const SINGLE_ROW = { offset: 0, limit: 1 };
 
+/**
+ * Date parameters are per-endpoint, never shared.
+ *
+ * Optimise uses three different date vocabularies across one API, and the sync fetchers above are
+ * the evidence for which is which: /conversions takes fromDate/toDate (plus dateField,
+ * targetCurrencyCode and conversionType), /payments and /invoices take startDate/endDate, and the
+ * POST /reporting/ endpoint takes fromDate/toDate in DD/MM/YYYY rather than ISO.
+ *
+ * Certification previously spread one window carrying all four aliases into every dated endpoint.
+ * /payments and /invoices happened to contain their correct pair; /conversions received none of
+ * its own, which is what the supplier rejected. Each sample now names only the parameters its
+ * endpoint actually takes, mirroring the fetcher that is known to work in production.
+ */
+const CONVERSIONS_DATE_FIELD = String(process.env.OPTIMISE_CONVERSIONS_DATE_FIELD || "conversion").trim();
+const TARGET_CURRENCY_CODE = String(process.env.OPTIMISE_TARGET_CURRENCY_CODE || "USD").trim();
+
 const CERTIFICATION_SAMPLES = Object.freeze({
   campaigns: { method: "GET", path: () => "/campaigns", params: () => ({ ...SINGLE_ROW }) },
   voucher_codes: { method: "GET", path: () => "/vouchercodes", params: () => ({ ...SINGLE_ROW }) },
-  conversions: { method: "GET", path: () => "/conversions", params: (ctx) => ({ ...SINGLE_ROW, ...ctx.dateWindow }) },
-  payment_overview: { method: "GET", path: () => "/payments", params: (ctx) => ({ ...SINGLE_ROW, ...ctx.dateWindow }) },
-  invoices: { method: "GET", path: () => "/invoices", params: (ctx) => ({ ...SINGLE_ROW, ...ctx.dateWindow }) },
+  conversions: {
+    method: "GET",
+    path: () => "/conversions",
+    // Mirrors fetchConversions: the same five parameters, the same ISO dates, the same defaults.
+    params: (ctx) => ({
+      ...SINGLE_ROW,
+      fromDate: ctx.window.from,
+      toDate: ctx.window.to,
+      dateField: CONVERSIONS_DATE_FIELD,
+      targetCurrencyCode: TARGET_CURRENCY_CODE,
+      conversionType: "conversions",
+    }),
+  },
+  payment_overview: {
+    method: "GET",
+    path: () => "/payments",
+    // Mirrors fetchPayments: startDate/endDate, not fromDate/toDate.
+    params: (ctx) => ({ ...SINGLE_ROW, startDate: ctx.window.from, endDate: ctx.window.to }),
+  },
+  invoices: {
+    method: "GET",
+    path: () => "/invoices",
+    // Mirrors fetchInvoices: startDate/endDate.
+    params: (ctx) => ({ ...SINGLE_ROW, startDate: ctx.window.from, endDate: ctx.window.to }),
+  },
   products: { method: "GET", path: () => "/product-feeds/", params: () => ({ ...SINGLE_ROW }) },
   commission_groups: {
     method: "GET",

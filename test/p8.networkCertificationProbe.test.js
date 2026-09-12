@@ -1108,3 +1108,185 @@ describe("bounded feed parsing — shape preserving and truncation safe", () => 
     assert.ok(text.includes("name"), "the field name is still reported");
   });
 });
+
+/**
+ * The conversions probe was rejected live because certification invented its own date vocabulary.
+ * Optimise uses three across one API, and only the sync fetchers are evidence for which is which.
+ * These tests pin each sample to the parameters its endpoint actually takes.
+ */
+describe("dated samples use each endpoint's own proven parameters", () => {
+  const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+  function recorder() {
+    const requests = [];
+    return {
+      requests,
+      get: async (path, config = {}) => {
+        requests.push({ path, params: config.params });
+        return { data: [{ id: 1 }] };
+      },
+      post: async () => {
+        throw new Error("certification must never POST to a sampling endpoint");
+      },
+    };
+  }
+
+  const openLimiter = { acquireSlot: async () => {}, resetAfterRateLimit: () => {} };
+
+  function probe(httpClient) {
+    return createOptimiseAdapter({
+      apiKey: "k",
+      agencyId: "AG1",
+      contactId: "C1",
+      httpClient,
+      certificationRateLimiter: openLimiter,
+    });
+  }
+
+  const WINDOW = { window: { from: "2026-09-05", to: "2026-09-12" } };
+
+  async function paramsFor(sourceObject) {
+    const httpClient = recorder();
+    await probe(httpClient).fetchCertificationSample(sourceObject, WINDOW);
+    assert.equal(httpClient.requests.length, 1, "exactly one supplier request");
+    return httpClient.requests[0];
+  }
+
+  it("1 — conversions sends exactly the keys GET /conversions takes", async () => {
+    const { path, params } = await paramsFor("conversions");
+    assert.equal(path, "/conversions");
+    assert.deepEqual(Object.keys(params).sort(), [
+      "agencyId",
+      "contactId",
+      "conversionType",
+      "dateField",
+      "fromDate",
+      "limit",
+      "offset",
+      "targetCurrencyCode",
+      "toDate",
+    ]);
+  });
+
+  it("2 — conversions sends no date alias the endpoint does not take", async () => {
+    const { params } = await paramsFor("conversions");
+    for (const alias of ["startDate", "endDate", "dateFrom", "dateTo", "date_from", "date_to"]) {
+      assert.equal(alias in params, false, `stale alias sent: ${alias}`);
+    }
+  });
+
+  it("3 — conversions dates are ISO YYYY-MM-DD, not the reporting endpoint's DD/MM/YYYY", async () => {
+    const { params } = await paramsFor("conversions");
+    assert.match(params.fromDate, ISO_DATE);
+    assert.match(params.toDate, ISO_DATE);
+    assert.equal(params.fromDate, "2026-09-05");
+    assert.equal(params.toDate, "2026-09-12");
+    // The reporting endpoint's format must not leak into this one.
+    assert.ok(!String(params.fromDate).includes("/"), "must not be DD/MM/YYYY");
+  });
+
+  it("3b — conversions carries the same non-date defaults as production sync", async () => {
+    const { params } = await paramsFor("conversions");
+    assert.equal(params.dateField, "conversion");
+    assert.equal(params.targetCurrencyCode, "USD");
+    assert.equal(params.conversionType, "conversions");
+  });
+
+  it("4 — offset is 0", async () => {
+    for (const source of ["conversions", "payment_overview", "invoices", "campaigns"]) {
+      assert.equal((await paramsFor(source)).params.offset, 0, source);
+    }
+  });
+
+  it("5 — limit is 1", async () => {
+    for (const source of ["conversions", "payment_overview", "invoices", "campaigns"]) {
+      assert.equal((await paramsFor(source)).params.limit, 1, source);
+    }
+  });
+
+  it("6 — exactly one supplier request per dated sample", async () => {
+    for (const source of ["conversions", "payment_overview", "invoices"]) {
+      const httpClient = recorder();
+      await probe(httpClient).fetchCertificationSample(source, WINDOW);
+      assert.equal(httpClient.requests.length, 1, source);
+    }
+  });
+
+  it("7 — a rejected dated sample is not retried", async () => {
+    const error = new Error("rejected");
+    error.response = { status: 400 };
+    let calls = 0;
+    const httpClient = {
+      get: async () => {
+        calls += 1;
+        throw error;
+      },
+    };
+    await assert.rejects(() => probe(httpClient).fetchCertificationSample("conversions", WINDOW));
+    assert.equal(calls, 1, "a 400 must not be retried");
+  });
+
+  it("8 — a dated sample does not paginate", async () => {
+    // A full page is exactly one row at limit 1; the sync paginator would loop here.
+    const httpClient = recorder();
+    await probe(httpClient).fetchCertificationSample("conversions", WINDOW);
+    assert.equal(httpClient.requests.length, 1, "a full page must not trigger a second request");
+  });
+
+  it("payments and invoices use startDate/endDate, which is their own contract", async () => {
+    for (const source of ["payment_overview", "invoices"]) {
+      const { params } = await paramsFor(source);
+      assert.equal(params.startDate, "2026-09-05", source);
+      assert.equal(params.endDate, "2026-09-12", source);
+      assert.equal("fromDate" in params, false, `${source} must not send fromDate`);
+      assert.equal("dateFrom" in params, false, `${source} must not send dateFrom`);
+    }
+  });
+
+  it("the window itself is endpoint-neutral, so no alias can be spread by accident", async () => {
+    const serviceSource = (await import("node:fs")).readFileSync(
+      "src/modules/ops/networkCertification.service.js",
+      "utf8",
+    );
+    const start = serviceSource.indexOf("function defaultDateWindow");
+    const body = serviceSource.slice(start, serviceSource.indexOf("\n}", start));
+    assert.deepEqual(Object.keys({ from: 1, to: 1 }).sort(), ["from", "to"]);
+    for (const alias of ["startDate", "endDate", "dateFrom", "dateTo", "fromDate", "toDate"]) {
+      assert.ok(!body.includes(alias), `the shared window must not name ${alias}`);
+    }
+  });
+
+  it("9 — production conversion sync is unchanged", () => {
+    const start = adapterSource.indexOf("fetchConversions(params = {})");
+    const body = adapterSource.slice(start, adapterSource.indexOf("fetchPayments(params = {})", start));
+    assert.match(body, /if \(!fromDate \|\| !toDate\)/, "sync still requires fromDate/toDate");
+    assert.match(body, /dateField = "conversion"/, "sync default dateField intact");
+    assert.match(body, /targetCurrencyCode = "USD"/, "sync default currency intact");
+    assert.match(body, /conversionType = "conversions"/, "sync default type intact");
+    assert.match(body, /fetchOffsetPaginated\(httpClient, "\/conversions"/, "sync still paginates");
+    // And the reporting endpoint keeps its different date format.
+    assert.match(adapterSource, /return `\$\{day\}\/\$\{month\}\/\$\{year\}`/, "reporting stays DD/MM/YYYY");
+  });
+
+  it("10 — a supplier 4xx still reduces to REQUEST_REJECTED with no body", async () => {
+    const error = new Error("Optimise said: invalid parameter 'dateFrom' for apikey sk_live_LEAKME");
+    error.response = { status: 400, data: { errors: [{ message: "invalid parameter dateFrom" }] } };
+    const adapter = {
+      fetchCertificationSample: async () => {
+        throw error;
+      },
+    };
+    const service = new NetworkCertificationService({
+      prisma: { rawPayload: { findMany: async () => [] } },
+      adapterFactory: () => adapter,
+      credentialResolver: async () => ({ apiKey: SECRET_VALUES[0], agencyId: "AG1", contactId: "C1" }),
+    });
+    const out = await service.certify("optimise", { sourceObjects: ["conversions"], compareRaw: false });
+    assert.equal(out.results[0].statusCategory, "REQUEST_REJECTED");
+    assert.equal(out.results[0].ok, false);
+    const text = serialise(out);
+    for (const leak of ["sk_live_LEAKME", "invalid parameter", "Optimise said", "dateFrom"]) {
+      assert.ok(!text.includes(leak), `leaked: ${leak}`);
+    }
+  });
+});

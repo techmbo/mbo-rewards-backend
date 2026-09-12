@@ -109,11 +109,19 @@ export function statusCategory(error) {
   return "OK";
 }
 
+/**
+ * A neutral date window in ISO YYYY-MM-DD.
+ *
+ * Deliberately NOT named after any endpoint's parameters. An earlier version returned
+ * startDate/endDate/dateFrom/dateTo together and every dated sample spread all four, which sent
+ * /conversions four parameters and none of the two it takes. Naming the window `from`/`to` makes
+ * that impossible: each sample must map it onto its own endpoint's parameter names explicitly.
+ */
 function defaultDateWindow(days = 7) {
   const to = new Date();
   const from = new Date(to.getTime() - days * 86400000);
   const iso = (d) => d.toISOString().slice(0, 10);
-  return { startDate: iso(from), endDate: iso(to), dateFrom: iso(from), dateTo: iso(to) };
+  return { from: iso(from), to: iso(to) };
 }
 
 /**
@@ -294,7 +302,7 @@ export class NetworkCertificationService {
     if (unknown.length) throw fail(`Unknown source objects for ${key}: ${unknown.join(", ")}`, 400);
 
     const adapter = await this.buildOptimiseAdapter({ region, accountLabel });
-    const ctx = { dateWindow: defaultDateWindow(), campaignId: null };
+    const ctx = { window: defaultDateWindow(), campaignId: null };
     const results = [];
     const runDeadline = Date.now() + RUN_BUDGET_MS;
     const budgetLeft = () => runDeadline - Date.now();
