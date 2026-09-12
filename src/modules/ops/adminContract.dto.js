@@ -625,12 +625,25 @@ export function toAdminOrderDto(order, { includeFinancial = false } = {}) {
   };
 }
 
+/**
+ * Feed-level admin row.
+ *
+ * `lastError` holds whatever the ingest path caught — an ORM invocation, a driver failure, an FTP
+ * banner carrying credentials — and it used to be returned verbatim. It is now reduced at the
+ * boundary to a boolean and, where the shape is recognised, a fixed code drawn from a closed set.
+ * No provider text, no substring of it, and no length-derived hint leaves this function.
+ *
+ * `feedUrl`, `metadata`, `compressedLocation` and `aid` are likewise never returned; only the
+ * presence of a feed URL is reported.
+ */
 export function toAdminProductFeedDto(feed) {
   return {
     id: feed.id,
     supplier: feed.supplier ?? "UNKNOWN",
+    sourceAccountLabel: feed.sourceAccountLabel ?? null,
     feedName: feed.feedName ?? null,
     feedExternalId: feed.feedExternalId ?? null,
+    feedFormat: feed.feedFormat ?? null,
     status: feed.feedStatus ?? feed.status ?? "UNKNOWN",
     lastSyncAt: iso(feed.lastSyncedAt || feed.updatedAt),
     campaignSourceId: feed.campaignSourceId ?? null,
@@ -639,8 +652,49 @@ export function toAdminProductFeedDto(feed) {
     assignmentCount: feed.assignmentCount ?? 0,
     errorCount: feed.errorCount ?? 0,
     exceptionCount: feed.exceptionCount ?? 0,
-    lastError: feed.lastError ?? null,
+    hasError: hasFeedError(feed.lastError),
+    safeErrorCode: safeFeedErrorCode(feed.lastError),
+    hasFeedUrl: Boolean(String(feed.feedUrl ?? "").trim()),
+    mappingVersion: feed.mappingVersion ?? null,
+    createdAt: iso(feed.createdAt),
+    updatedAt: iso(feed.updatedAt),
   };
+}
+
+export function hasFeedError(lastError) {
+  return String(lastError ?? "").trim() !== "";
+}
+
+/**
+ * A fixed code for the few failure shapes worth telling an operator apart, or the catch-all.
+ *
+ * The returned value is always one of these literals — it is chosen by the input but never built
+ * from it, so no provider text can travel out through this function however the input is shaped.
+ */
+export const FEED_ERROR_CODES = Object.freeze([
+  "NONE",
+  "AUTH_FAILED",
+  "NOT_FOUND",
+  "TIMEOUT",
+  "NETWORK_UNREACHABLE",
+  "PARSE_FAILED",
+  "MAPPING_FAILED",
+  "UPSTREAM_ERROR",
+  "UNCLASSIFIED",
+]);
+
+export function safeFeedErrorCode(lastError) {
+  const text = String(lastError ?? "").trim();
+  if (!text) return "NONE";
+  const t = text.toLowerCase();
+  if (/\b(401|403|unauthor|forbidden|permission denied|login failed|invalid credentials|authentication)\b/.test(t)) return "AUTH_FAILED";
+  if (/\b(404|not found|no such file|enoent)\b/.test(t)) return "NOT_FOUND";
+  if (/\b(timeout|timed out|etimedout|deadline exceeded)\b/.test(t)) return "TIMEOUT";
+  if (/\b(econnrefused|enotfound|ehostunreach|enetunreach|dns|socket hang up)\b/.test(t)) return "NETWORK_UNREACHABLE";
+  if (/\b(parse|malformed|unexpected token|invalid xml|invalid json|csv)\b/.test(t)) return "PARSE_FAILED";
+  if (/\b(mapping_failed|mapping failed|missing_supplier_product_id|schema)\b/.test(t)) return "MAPPING_FAILED";
+  if (/\b(5\d\d|internal server error|bad gateway|service unavailable)\b/.test(t)) return "UPSTREAM_ERROR";
+  return "UNCLASSIFIED";
 }
 
 /** Admin 05C payment-status row — supplier payable, not client payable / not withdrawals. */

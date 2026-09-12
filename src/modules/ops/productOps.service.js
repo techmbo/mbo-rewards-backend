@@ -3,9 +3,16 @@ import { fail } from "../../core/apiResponse.js";
 import { getSupplierCapabilities, listRegisteredSuppliers, isSupplierRegistered } from "../../adapters/registry.js";
 import { getTrackingParamRule } from "../tracking/trackingParamRules.js";
 import { getSyncStatus } from "../../jobs/syncState.js";
-import { parseNetworkSource } from "../supplier/entityIdentity.js";
-import { mapPayload } from "../mapping/engine.js";
-import { ProductPromotionService } from "../product/productPromotion.service.js";
+
+/**
+ * How a product's campaign link was arrived at. A stored Product.campaignSourceId is a real
+ * relation; anything inferred from a tracking URL is not, and the two are never reported as the
+ * same thing.
+ */
+export const CAMPAIGN_LINK_NATIVE = "NATIVE_CAMPAIGN_SOURCE_FK";
+export const CAMPAIGN_LINK_DERIVED = "DERIVED_BY_TRACKING_URL_PID_MATCH";
+/** Non-enumerable marker key, so the flag never leaks into a spread or a JSON dump of the row. */
+const CAMPAIGN_LINK_PROVENANCE = Symbol("campaignLinkProvenance");
 
 function normalizeAvailabilityLabel(raw) {
   const v = String(raw ?? "").trim().toUpperCase();
@@ -67,6 +74,7 @@ export function toAdminProductListDto(product) {
     brandName: product.merchant?.displayName || product.brand || null,
     campaignName,
     campaignSourceId: product.campaignSourceId || campaignSource?.id || null,
+    campaignLinkProvenance: product[CAMPAIGN_LINK_PROVENANCE] || (product.campaignSourceId ? CAMPAIGN_LINK_NATIVE : null),
     supplierProductId: source?.supplierProductId || null,
     productName: product.title || source?.title || null,
     sku: product.sku || source?.supplierSku || null,
@@ -88,86 +96,30 @@ export function toAdminProductListDto(product) {
   };
 }
 
-/** Map staged Entity(product) → same v13 list contract when Product rows are not yet promoted. */
-export function toAdminProductListDtoFromEntity(entity) {
-  const { supplier } = parseNetworkSource(entity?.networkSource);
-  const raw = entity?.rawData && typeof entity.rawData === "object" ? entity.rawData : {};
-  let normalized = {};
-  let mappingOk = false;
-  if (supplier && supplier !== "UNKNOWN") {
-    const mapped = mapPayload({
-      supplier,
-      resourceKey: "products",
-      payload: raw,
-    });
-    mappingOk = Boolean(mapped?.success);
-    normalized = mapped?.normalizedData || {};
-  }
-
-  const supplierProductId =
-    normalized.supplierProductId ??
-    raw.Id ??
-    raw.CatalogItemId ??
-    raw.Sku ??
-    raw.SKU ??
-    raw.id ??
-    raw.sku ??
-    null;
-  const productName = normalized.title ?? raw.Name ?? raw.Title ?? raw.name ?? raw.title ?? null;
-  const sku = normalized.supplierSku ?? raw.Sku ?? raw.SKU ?? raw.sku ?? null;
-  const brandName = normalized.brand ?? raw.Brand ?? raw.brand ?? raw.Manufacturer ?? null;
-  const price = normalized.price ?? raw.Price ?? raw.CurrentPrice ?? raw.price ?? null;
-  const currency = normalized.currency ?? raw.Currency ?? raw.CurrencyCode ?? raw.currency ?? null;
-  const availability = normalizeAvailabilityLabel(
-    normalized.availabilityRaw ?? normalized.availability ?? raw.Availability ?? raw.StockStatus,
-  );
-  const campaignName =
-    raw.CampaignName ?? raw.campaign_name ?? raw.ProgramName ?? raw.AdvertiserName ?? null;
-
-  return {
-    id: entity.id,
-    networkSource: supplier !== "UNKNOWN" ? supplier : entity.networkSource || null,
-    networkAccount: null,
-    brandName: brandName != null ? String(brandName) : null,
-    campaignName: campaignName != null ? String(campaignName) : null,
-    campaignSourceId: null,
-    supplierProductId: supplierProductId != null ? String(supplierProductId) : null,
-    productName: productName != null ? String(productName) : null,
-    sku: sku != null ? String(sku) : null,
-    price: price != null && Number.isFinite(Number(price)) ? Number(price) : null,
-    currency: currency != null ? String(currency).slice(0, 3).toUpperCase() : null,
-    availability,
-    mappingStatus: mappingOk ? "MAPPED" : "NEEDS_REVIEW",
-    productFeedSource: feedSourceLabel({ supplier, raw }),
-    productFeedId: null,
-    status: null,
-    imageUrl: normalized.imageUrl ?? raw.ImageUrl ?? null,
-    url: normalized.url ?? raw.Url ?? raw.ProductUrl ?? null,
-    sources: [],
-    stagedFromEntity: true,
-  };
-}
-
 /**
  * Wave G — product admin + data quality + supplier/job health.
  */
 export class ProductOpsService {
+  // No promotion/ingestion dependency: this service is read-only, and not holding one makes that
+  // structural rather than a convention a future edit could quietly break.
   constructor(deps = {}) {
     this.db = deps.prisma ?? prisma;
-    this.promotion = deps.promotion ?? new ProductPromotionService({ prisma: this.db });
   }
 
+  /**
+   * PURE READ. This method must never write.
+   *
+   * It previously called promotion.promoteBatch() before querying, which created and updated
+   * Product and ProductSource rows and set RawPayload.processingStatus to PROMOTED — a write
+   * performed during a GET, on every page load, filter change and pagination click. Promotion now
+   * belongs only to the sync jobs and the explicit POST endpoints that already run it
+   * (waveESupplierSync for Impact, optimiseProductFeedSync for Optimise feeds,
+   * POST /ops/products/sync-feeds).
+   *
+   * The staged-Entity fallback is also gone: this endpoint returns canonical Product rows or an
+   * empty page, never unpromoted RAW rows dressed in the same contract.
+   */
   async listProducts(filters = {}, { skip = 0, take = 50 } = {}) {
-    // Promote staged Entity(product) rows into Product/ProductSource so the registry stays current.
-    try {
-      await this.promotion.promoteBatch({
-        networkSource: filters.networkSource || undefined,
-        limit: Math.min(200, Math.max(take * 2, 50)),
-      });
-    } catch {
-      // listing must still work if promotion fails
-    }
-
     const where = {};
     if (filters.merchantId) where.merchantId = filters.merchantId;
     if (filters.status) where.status = filters.status;
@@ -241,17 +193,15 @@ export class ProductOpsService {
       this.db.product.count({ where }),
     ]);
 
-    if (total > 0 || rows.length > 0) {
-      const enriched = await this.enrichMissingCampaignLinks(rows);
-      return {
-        rows: enriched.map(toAdminProductListDto),
-        total,
-        contract: "v13-products-feeds",
-      };
-    }
-
-    // Fallback: show real staged network product entities (never invent from campaign metadata).
-    return this.listStagedProductEntities(filters, { skip, take });
+    // Canonical only. An empty catalog returns an empty page: staged Entity(product) rows are a
+    // different truth level and are not served under this contract.
+    const enriched = await this.enrichMissingCampaignLinks(rows);
+    return {
+      rows: enriched.map(toAdminProductListDto),
+      total,
+      contract: "v13-products-feeds",
+      truthLevel: "CANONICAL_PRODUCT",
+    };
   }
 
   /**
@@ -309,52 +259,16 @@ export class ProductOpsService {
       const pid = String(product.sources[0].catalogId);
       const hit = byPid.get(pid);
       if (!hit) continue;
+      // In memory only. This link is inferred by matching the publisher PID inside a campaign's
+      // tracking URL; it is not a stored relation, and it used to be written back to the row from
+      // inside a GET, which both wrote during a read and turned a heuristic into something
+      // indistinguishable from a native foreign key. It is now returned with its provenance
+      // attached and persisted nowhere.
       product.campaignSourceId = hit.campaignSourceId;
       product.campaignSource = hit.campaignSource;
-      // Persist so subsequent lists and detail views stay linked.
-      this.db.product
-        .update({
-          where: { id: product.id },
-          data: {
-            campaignSourceId: hit.campaignSourceId,
-            ...(hit.merchantId && !product.merchantId ? { merchantId: hit.merchantId } : {}),
-          },
-        })
-        .catch(() => {});
+      product[CAMPAIGN_LINK_PROVENANCE] = CAMPAIGN_LINK_DERIVED;
     }
     return rows;
-  }
-
-  async listStagedProductEntities(filters = {}, { skip = 0, take = 50 } = {}) {
-    const where = { entityType: "product" };
-    if (filters.supplier) {
-      const key = String(filters.supplier).toLowerCase();
-      where.networkSource = { equals: key, mode: "insensitive" };
-    }
-    if (filters.q) {
-      const q = String(filters.q).trim();
-      where.OR = [
-        { externalId: { contains: q, mode: "insensitive" } },
-        { networkSource: { contains: q, mode: "insensitive" } },
-      ];
-    }
-
-    const [entities, total] = await Promise.all([
-      this.db.entity.findMany({
-        where,
-        orderBy: { updatedAt: "desc" },
-        skip,
-        take,
-      }),
-      this.db.entity.count({ where }),
-    ]);
-
-    return {
-      rows: entities.map(toAdminProductListDtoFromEntity),
-      total,
-      contract: "v13-products-feeds",
-      source: "entity-product",
-    };
   }
 
   async getProduct(id) {
@@ -397,13 +311,9 @@ export class ProductOpsService {
         },
       },
     });
-    if (!row) {
-      const entity = await this.db.entity.findFirst({
-        where: { id, entityType: "product" },
-      });
-      if (entity) return toAdminProductListDtoFromEntity(entity);
-      throw fail("Product not found.", 404);
-    }
+    // Canonical only, like the listing: a staged Entity(product) row is not a Product, and
+    // returning one here would reintroduce the mixed truth level under a single contract.
+    if (!row) throw fail("Product not found.", 404);
     const [enriched] = await this.enrichMissingCampaignLinks([row]);
     const dto = toAdminProductListDto(enriched || row);
     return {

@@ -1,22 +1,39 @@
 import { ok, fail } from "../core/apiResponse.js";
 import { prisma } from "../database/prisma.js";
 import { ProductFeedService, ClientProductService } from "../modules/product/productFeed.service.js";
+import { toAdminProductFeedDto } from "../modules/ops/adminContract.dto.js";
 
 const feeds = new ProductFeedService();
 const clientProducts = new ClientProductService();
 
+/**
+ * Legacy feed listing, kept for existing clients but no longer raw.
+ *
+ * It previously returned Prisma rows straight out of findMany, which exposed feedUrl (where FTP
+ * and signed-URL credentials live), the metadata blob, compressedLocation, aid and the raw
+ * lastError text. It now maps through the same safe DTO as the admin route.
+ *
+ * `total` was also the length of the page rather than a count, so a caller paging through this
+ * endpoint was told the wrong size; it is now a real count. Prefer GET /ops/admin/product-feeds,
+ * which is paginated. This route is deprecated and the header says so.
+ */
 export async function listProductFeedsHandler(req, res, next) {
   try {
     const take = Math.min(Number(req.query.limit) || 50, 200);
-    const rows = await prisma.productFeed.findMany({
-      orderBy: { updatedAt: "desc" },
-      take,
-      include: {
-        _count: { select: { feedItems: true, products: true } },
-        campaignSource: { select: { id: true, canonicalCampaignId: true } },
-      },
-    });
-    res.json(ok({ items: rows, total: rows.length }));
+    const [rows, total] = await Promise.all([
+      prisma.productFeed.findMany({
+        orderBy: { updatedAt: "desc" },
+        take,
+        include: {
+          _count: { select: { feedItems: true, products: true } },
+          campaignSource: { select: { id: true, canonicalCampaignId: true } },
+        },
+      }),
+      prisma.productFeed.count(),
+    ]);
+    res.setHeader("Deprecation", "true");
+    res.setHeader("Link", '</ops/admin/product-feeds>; rel="successor-version"');
+    res.json(ok({ items: rows.map(toAdminProductFeedDto), total, contract: "epic4-product-feed-admin" }));
   } catch (error) {
     next(error);
   }
