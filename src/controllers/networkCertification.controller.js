@@ -1,5 +1,10 @@
 import { ok, fail } from "../core/apiResponse.js";
-import { NetworkCertificationService, listProbeSourceObjects } from "../modules/ops/networkCertification.service.js";
+import {
+  DEFAULT_WINDOW_PRESET,
+  NetworkCertificationService,
+  WINDOW_PRESETS,
+  listProbeSourceObjects,
+} from "../modules/ops/networkCertification.service.js";
 
 const service = new NetworkCertificationService();
 
@@ -36,20 +41,22 @@ export async function networkCertificationCatalogHandler(_req, res, next) {
 /**
  * Validates the request body.
  *
- * Only four keys are accepted, and none of them can describe a supplier endpoint, path, query or
- * body: `sourceObjects` selects from the server-side registry by name, and the rest are scoping
- * strings. An unknown key is rejected rather than ignored, so a caller cannot smuggle a field in
- * on the assumption that some later version might read it.
+ * Only five keys are accepted, and none of them can describe a supplier endpoint, path, query or
+ * body: `sourceObjects` selects from the server-side registry by name, `windowPreset` selects a
+ * lookback by token, and the rest are scoping strings. An unknown key is rejected rather than
+ * ignored, so a caller cannot smuggle a field in on the assumption that a later version might read
+ * it — which is also what keeps `fromDate`, `startDate` and friends out: they are unknown keys and
+ * are refused with a 400 rather than reaching the supplier query.
  */
 export function parseRunBody(body = {}) {
   const input = body && typeof body === "object" && !Array.isArray(body) ? body : {};
-  const allowed = new Set(["sourceObjects", "region", "accountLabel", "compareRaw"]);
+  const allowed = new Set(["sourceObjects", "region", "accountLabel", "compareRaw", "windowPreset"]);
   const unexpected = Object.keys(input).filter((key) => !allowed.has(key));
   if (unexpected.length) {
     throw fail(`Unsupported field(s) in request body: ${unexpected.join(", ")}`, 400);
   }
 
-  const { sourceObjects, region, accountLabel, compareRaw } = input;
+  const { sourceObjects, region, accountLabel, compareRaw, windowPreset } = input;
 
   if (sourceObjects !== undefined) {
     if (!Array.isArray(sourceObjects) || sourceObjects.some((s) => typeof s !== "string")) {
@@ -67,6 +74,11 @@ export function parseRunBody(body = {}) {
   if (compareRaw !== undefined && typeof compareRaw !== "boolean") {
     throw fail("compareRaw must be a boolean.", 400);
   }
+  // A closed enum. The caller chooses between named lookbacks; it cannot express a length in days
+  // or a date, so widening the window can never become a way to shape the supplier request.
+  if (windowPreset !== undefined && !Object.hasOwn(WINDOW_PRESETS, windowPreset)) {
+    throw fail(`windowPreset must be one of: ${Object.keys(WINDOW_PRESETS).join(", ")}.`, 400);
+  }
 
   return {
     sourceObjects: sourceObjects?.length ? sourceObjects : null,
@@ -74,6 +86,7 @@ export function parseRunBody(body = {}) {
     accountLabel: accountLabel || "default",
     // Default FALSE: the stored-RAW comparison is an extra database read and is opt-in.
     compareRaw: compareRaw === true,
+    windowPreset: windowPreset ?? DEFAULT_WINDOW_PRESET,
   };
 }
 

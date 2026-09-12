@@ -7,9 +7,13 @@ process.env.FRONTEND_URL = process.env.FRONTEND_URL || "https://frontend.test";
 const { categorise, collectPaths, comparePathSets, isCredentialKey, summarisePayloads } = await import(
   "../src/modules/ops/payloadShape.js"
 );
-const { NetworkCertificationService, listProbeSourceObjects, statusCategory } = await import(
-  "../src/modules/ops/networkCertification.service.js"
-);
+const {
+  DEFAULT_WINDOW_PRESET,
+  NetworkCertificationService,
+  WINDOW_PRESETS,
+  listProbeSourceObjects,
+  statusCategory,
+} = await import("../src/modules/ops/networkCertification.service.js");
 const { PERMISSIONS, ROLE_PERMISSIONS } = await import("../src/auth/permissions.js");
 const { parseRunBody, networkCertificationCatalogHandler, networkCertificationRunHandler } = await import(
   "../src/controllers/networkCertification.controller.js"
@@ -928,6 +932,7 @@ describe("product certification — bounded two-step chain", () => {
       "compareRaw",
       "region",
       "sourceObjects",
+      "windowPreset",
     ]);
   });
 
@@ -1288,5 +1293,238 @@ describe("dated samples use each endpoint's own proven parameters", () => {
     for (const leak of ["sk_live_LEAKME", "invalid parameter", "Optimise said", "dateFrom"]) {
       assert.ok(!text.includes(leak), `leaked: ${leak}`);
     }
+  });
+});
+
+/**
+ * Widening the lookback must not become a way to shape the supplier request.
+ *
+ * The conversions query contract is pinned; the only thing a caller may vary is WHICH named
+ * lookback the service computes dates for. A preset token cannot express a date, a day count, or a
+ * parameter name, so there is nothing to smuggle.
+ */
+describe("certification window presets", () => {
+  const DAY_MS = 86400000;
+
+  /** Captures the params the adapter is asked to send, and the days the service computed. */
+  function capturingService() {
+    const seen = [];
+    const service = new NetworkCertificationService({
+      prisma: { rawPayload: { findMany: async () => [] } },
+      adapterFactory: () => ({
+        fetchCertificationSample: async (sourceObject, ctx) => {
+          seen.push({ sourceObject, window: ctx.window });
+          return [{ conversionId: 1 }];
+        },
+      }),
+      credentialResolver: async () => ({ apiKey: SECRET_VALUES[0], agencyId: "AG1", contactId: "C1" }),
+    });
+    return { service, seen };
+  }
+
+  function spanDays(window) {
+    return Math.round((Date.parse(window.to) - Date.parse(window.from)) / DAY_MS);
+  }
+
+  it("1 — the default is 7d when no preset is given", async () => {
+    assert.equal(DEFAULT_WINDOW_PRESET, "7d");
+    assert.equal(parseRunBody({}).windowPreset, "7d");
+    const { service, seen } = capturingService();
+    const out = await service.certify("optimise", { sourceObjects: ["conversions"] });
+    assert.equal(spanDays(seen[0].window), 7);
+    assert.equal(out.windowPreset, "7d");
+  });
+
+  it("2 — 30d is accepted and widens the window to 30 days", async () => {
+    assert.equal(parseRunBody({ windowPreset: "30d" }).windowPreset, "30d");
+    const { service, seen } = capturingService();
+    const out = await service.certify("optimise", { sourceObjects: ["conversions"], windowPreset: "30d" });
+    assert.equal(spanDays(seen[0].window), 30);
+    assert.equal(out.windowPreset, "30d");
+  });
+
+  it("3 — 90d is accepted and is the maximum", async () => {
+    assert.equal(parseRunBody({ windowPreset: "90d" }).windowPreset, "90d");
+    const { service, seen } = capturingService();
+    const out = await service.certify("optimise", { sourceObjects: ["conversions"], windowPreset: "90d" });
+    assert.equal(spanDays(seen[0].window), 90);
+    assert.equal(out.windowPreset, "90d");
+    assert.equal(Math.max(...Object.values(WINDOW_PRESETS)), 90, "90 days is the ceiling");
+  });
+
+  it("3c — the response describes the lookback once, by preset only", async () => {
+    // Two representations of one state drift. The token is the representation; the day count it
+    // resolves to is an implementation detail of computing the dates.
+    for (const preset of ["7d", "30d", "90d"]) {
+      const { service } = capturingService();
+      const out = await service.certify("optimise", { sourceObjects: ["conversions"], windowPreset: preset });
+      assert.equal(out.windowPreset, preset);
+      assert.equal("windowDays" in out, false, `windowDays exposed at ${preset}`);
+      for (const key of Object.keys(out)) {
+        assert.ok(!/days|fromDate|toDate|startDate|endDate/i.test(key), `response exposes ${key}`);
+      }
+      // Nor anywhere deeper in the payload.
+      assert.ok(!serialise(out).includes("windowDays"), "windowDays appears somewhere in the response");
+    }
+  });
+
+  it("3b — the preset set is exactly the three approved tokens", () => {
+    assert.deepEqual(Object.keys(WINDOW_PRESETS), ["7d", "30d", "90d"]);
+  });
+
+  it("4 — an arbitrary preset is a 400", () => {
+    for (const bad of ["365d", "1d", "180d", "7D", "7", 7, "", null, "all", "7d "]) {
+      assert.throws(
+        () => parseRunBody({ windowPreset: bad }),
+        (error) => {
+          assert.equal(error.statusCode ?? error.status, 400, JSON.stringify(bad));
+          assert.match(error.message, /windowPreset must be one of/);
+          return true;
+        },
+        `accepted a bad preset: ${JSON.stringify(bad)}`,
+      );
+    }
+  });
+
+  it("5 — arbitrary dates and day counts are rejected as unknown keys", () => {
+    for (const key of [
+      "fromDate",
+      "toDate",
+      "startDate",
+      "endDate",
+      "dateFrom",
+      "dateTo",
+      "days",
+      "daysBack",
+      "windowDays",
+      "lookbackDays",
+    ]) {
+      assert.throws(
+        () => parseRunBody({ sourceObjects: ["conversions"], [key]: "2020-01-01" }),
+        (error) => {
+          assert.equal(error.statusCode ?? error.status, 400, key);
+          assert.match(error.message, /Unsupported field\(s\)/);
+          return true;
+        },
+        `accepted a date-shaped key: ${key}`,
+      );
+    }
+  });
+
+  it("6 — the service computes the dates; the caller supplies only a token", async () => {
+    const { service, seen } = capturingService();
+    await service.certify("optimise", { sourceObjects: ["conversions"], windowPreset: "30d" });
+    const { from, to } = seen[0].window;
+    assert.match(from, /^\d{4}-\d{2}-\d{2}$/);
+    assert.match(to, /^\d{4}-\d{2}-\d{2}$/);
+    // `to` is today, computed here rather than supplied.
+    assert.equal(to, new Date().toISOString().slice(0, 10));
+    // parseRunBody hands the service a token, never a date.
+    const parsed = parseRunBody({ windowPreset: "30d" });
+    assert.equal(parsed.windowPreset, "30d");
+    for (const key of Object.keys(parsed)) {
+      assert.ok(!/date|from|to$|days/i.test(key), `parsed body carries a date-ish key: ${key}`);
+    }
+  });
+
+  it("6b — an unknown preset reaching the service falls back rather than producing a bad window", async () => {
+    // Unreachable through the route, which rejects it with a 400. Belt and braces.
+    const { service, seen } = capturingService();
+    const out = await service.certify("optimise", { sourceObjects: ["conversions"], windowPreset: "999d" });
+    assert.equal(spanDays(seen[0].window), 7);
+    assert.equal(out.windowPreset, "7d");
+  });
+
+  it("7 — conversions still emits exactly the proven query keys at every preset", async () => {
+    for (const preset of ["7d", "30d", "90d"]) {
+      const requests = [];
+      const adapter = createOptimiseAdapter({
+        apiKey: "k",
+        agencyId: "AG1",
+        contactId: "C1",
+        httpClient: {
+          get: async (path, config = {}) => {
+            requests.push({ path, params: config.params });
+            return { data: [{ id: 1 }] };
+          },
+        },
+        certificationRateLimiter: { acquireSlot: async () => {}, resetAfterRateLimit: () => {} },
+      });
+      const days = WINDOW_PRESETS[preset];
+      const to = new Date();
+      const from = new Date(to.getTime() - days * DAY_MS);
+      const iso = (d) => d.toISOString().slice(0, 10);
+      await adapter.fetchCertificationSample("conversions", { window: { from: iso(from), to: iso(to) } });
+
+      assert.deepEqual(
+        Object.keys(requests[0].params).sort(),
+        [
+          "agencyId",
+          "contactId",
+          "conversionType",
+          "dateField",
+          "fromDate",
+          "limit",
+          "offset",
+          "targetCurrencyCode",
+          "toDate",
+        ],
+        preset,
+      );
+      for (const stale of ["startDate", "endDate", "dateFrom", "dateTo"]) {
+        assert.equal(stale in requests[0].params, false, `${preset} sent ${stale}`);
+      }
+    }
+  });
+
+  it("8 — one supplier request whatever the preset", async () => {
+    for (const preset of ["7d", "30d", "90d"]) {
+      const { service, seen } = capturingService();
+      await service.certify("optimise", { sourceObjects: ["conversions"], windowPreset: preset });
+      assert.equal(seen.length, 1, preset);
+    }
+  });
+
+  it("9 — a wider window changes no retry, pagination or timeout behaviour", () => {
+    const start = adapterSource.indexOf("async fetchCertificationSample");
+    const body = adapterSource.slice(start, adapterSource.indexOf("\n    },", start));
+    assert.ok(!body.includes("requestWithRetry"), "still no retry");
+    assert.ok(!body.includes("fetchOffsetPaginated"), "still no paginator");
+    assert.match(body, /CERTIFICATION_SAMPLE_TIMEOUT_MS/, "still the same timeout source");
+    assert.match(body, /\.slice\(0, 1\)/, "still one row");
+    // The preset only reaches the window; it cannot reach any of the bounds above.
+    const serviceStart = adapterSource.indexOf("const CERTIFICATION_SAMPLES");
+    const table = adapterSource.slice(serviceStart, adapterSource.indexOf("export function listCertificationSamples"));
+    assert.ok(!table.includes("windowPreset"), "the sample table never sees a preset token");
+  });
+
+  it("10 — normal Optimise sync is unaffected by the preset", async () => {
+    const syncSource = (await import("node:fs")).readFileSync("src/jobs/sync.job.js", "utf8");
+    assert.ok(!syncSource.includes("windowPreset"), "sync must not read the certification preset");
+    assert.match(syncSource, /OPTIMISE_CONVERSIONS_DAYS_BACK/, "sync keeps its own lookback setting");
+    const start = adapterSource.indexOf("fetchConversions(params = {})");
+    const body = adapterSource.slice(start, adapterSource.indexOf("fetchPayments(params = {})", start));
+    assert.ok(!body.includes("windowPreset"), "the sync fetcher never sees a preset");
+    assert.match(body, /if \(!fromDate \|\| !toDate\)/, "sync date guard intact");
+  });
+
+  it("payments and invoices keep their own contract at a widened preset", async () => {
+    const requests = [];
+    const adapter = createOptimiseAdapter({
+      apiKey: "k",
+      agencyId: "AG1",
+      contactId: "C1",
+      httpClient: {
+        get: async (path, config = {}) => {
+          requests.push({ path, params: config.params });
+          return { data: [{ id: 1 }] };
+        },
+      },
+      certificationRateLimiter: { acquireSlot: async () => {}, resetAfterRateLimit: () => {} },
+    });
+    await adapter.fetchCertificationSample("invoices", { window: { from: "2026-06-14", to: "2026-09-12" } });
+    assert.equal(requests[0].params.startDate, "2026-06-14");
+    assert.equal(requests[0].params.endDate, "2026-09-12");
+    assert.equal("fromDate" in requests[0].params, false);
   });
 });

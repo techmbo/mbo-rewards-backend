@@ -110,6 +110,23 @@ export function statusCategory(error) {
 }
 
 /**
+ * Lookback presets the caller may choose between.
+ *
+ * A preset, not a number of days and not a date pair. The caller picks a token; the service alone
+ * turns it into dates. That keeps the request body free of anything resembling a date parameter, so
+ * there is no path by which a caller could steer the supplier query — the reason the conversions
+ * contract is pinned in the first place. Ninety days is the ceiling because a wider lookback is a
+ * bigger ask of the supplier for no extra certification value: the probe reads one row either way.
+ */
+export const WINDOW_PRESETS = Object.freeze({ "7d": 7, "30d": 30, "90d": 90 });
+export const DEFAULT_WINDOW_PRESET = "7d";
+
+/** Days for a preset token. Unknown tokens never reach here; the controller rejects them with 400. */
+export function windowPresetDays(preset) {
+  return WINDOW_PRESETS[preset] ?? WINDOW_PRESETS[DEFAULT_WINDOW_PRESET];
+}
+
+/**
  * A neutral date window in ISO YYYY-MM-DD.
  *
  * Deliberately NOT named after any endpoint's parameters. An earlier version returned
@@ -292,7 +309,16 @@ export class NetworkCertificationService {
    * Probes run in sequence, not in parallel: a burst of concurrent calls against a supplier's API
    * is exactly the kind of traffic that gets an affiliate account rate-limited or flagged.
    */
-  async certify(network, { sourceObjects = null, region = "sea", accountLabel = "default", compareRaw = false } = {}) {
+  async certify(
+    network,
+    {
+      sourceObjects = null,
+      region = "sea",
+      accountLabel = "default",
+      compareRaw = false,
+      windowPreset = DEFAULT_WINDOW_PRESET,
+    } = {},
+  ) {
     const key = String(network || "").toLowerCase();
     const probes = PROBE_REGISTRY[key];
     if (!probes) throw fail(`No certification probe is defined for network "${key}".`, 404);
@@ -302,7 +328,9 @@ export class NetworkCertificationService {
     if (unknown.length) throw fail(`Unknown source objects for ${key}: ${unknown.join(", ")}`, 400);
 
     const adapter = await this.buildOptimiseAdapter({ region, accountLabel });
-    const ctx = { window: defaultDateWindow(), campaignId: null };
+    // Dates are computed here, from a preset token. Nothing the caller sends is used as a date.
+    const windowDays = windowPresetDays(windowPreset);
+    const ctx = { window: defaultDateWindow(windowDays), campaignId: null };
     const results = [];
     const runDeadline = Date.now() + RUN_BUDGET_MS;
     const budgetLeft = () => runDeadline - Date.now();
@@ -449,6 +477,9 @@ export class NetworkCertificationService {
       network: key,
       region,
       accountLabel,
+      // The preset token alone describes the lookback. The day count it resolves to is used to
+      // compute the dates and stays internal; reporting both would be two names for one state.
+      windowPreset: Object.hasOwn(WINDOW_PRESETS, windowPreset) ? windowPreset : DEFAULT_WINDOW_PRESET,
       probedAt: new Date().toISOString(),
       readOnly: true,
       results,
