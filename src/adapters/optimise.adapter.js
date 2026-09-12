@@ -1,6 +1,12 @@
 import { createHttpClient, requestWithRetry } from "../core/httpClient.js";
 import { createRateLimiter } from "../core/rateLimiter.js";
 import { buildBoundedFeedUrl, parseFirstFeedRecord } from "./optimiseFeedSample.js";
+import {
+  FeedUrlNotAllowedError,
+  MAX_FEED_REDIRECTS,
+  assertAllowedFeedUrl,
+  isAllowedFeedUrl,
+} from "./feedUrlPolicy.js";
 
 const OPTIMISE_MIN_INTERVAL_MS = Number(process.env.OPTIMISE_MIN_INTERVAL_MS || 12500);
 const OPTIMISE_PAGE_LIMIT = Number(process.env.OPTIMISE_PAGE_LIMIT || 100);
@@ -385,18 +391,47 @@ async function fetchOffsetPaginated(httpClient, endpoint, baseParams) {
 }
 
 
+/**
+ * Downloads a feed body, byte-capped, without ever leaving the allowed host.
+ *
+ * Redirects are followed MANUALLY. Node's fetch follows them automatically by default, across hosts
+ * and down to any port — so validating only the URL we pass in would leave a one-hop bypass: a 302
+ * from the feed host to a loopback or link-local address would be followed, and its body returned
+ * to us as feed content. Each hop is revalidated against the same policy as the first.
+ *
+ * No MBO credential is ever sent. This uses the global fetch with an Accept header, not the
+ * Optimise httpClient, so the apikey / x-agency-id / x-contact-id headers do not exist on this
+ * request. Only the `aid` already inside the feed URL is sent, which is the affiliate identifier
+ * the feed host itself issued.
+ */
 async function fetchFeedTextLimited(url, { timeoutMs = 25000, maxBytes = 2_000_000, headers = {} } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: { Accept: "text/csv,application/xml,text/plain,*/*", ...headers },
-    });
+    let target = assertAllowedFeedUrl(url).toString();
+    let res = null;
+
+    for (let hop = 0; ; hop += 1) {
+      res = await fetch(target, {
+        signal: controller.signal,
+        redirect: "manual",
+        headers: { Accept: "text/csv,application/xml,text/plain,*/*", ...headers },
+      });
+      if (res.status < 300 || res.status > 399) break;
+
+      const location = res.headers.get("location");
+      if (!location) break;
+      if (hop >= MAX_FEED_REDIRECTS) throw new FeedUrlNotAllowedError("TOO_MANY_REDIRECTS");
+      // Relative redirects resolve against the current target, which is already allowlisted.
+      target = assertAllowedFeedUrl(new URL(location, target).toString()).toString();
+      await res.body?.cancel().catch(() => {});
+    }
+
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      const err = new Error(`Optimise product feed download failed: ${res.status} ${body.slice(0, 120)}`);
-      err.response = { status: res.status, url, body: body.slice(0, 300) };
+      // The status is reported; the body is not. A response body reached through a redirect may be
+      // internal, and this error is surfaced in an admin API response.
+      const err = new Error(`Optimise product feed download failed with status ${res.status}`);
+      err.response = { status: res.status };
       throw err;
     }
     // Stream and cap bytes so multi-GB feeds do not hang res.text()
@@ -748,12 +783,19 @@ export function createOptimiseAdapter({
         pushUnique(`https://product-feeds.optimisemedia.com/feeds/${id}?aid=${a}&format=${fmt}`);
         pushUnique(`https://product-feeds.optimisemedia.com/${id}?aid=${a}&format=${fmt}`);
       }
-      if (!candidates.length) return [];
+      // Every generated candidate is revalidated, not just the supplier's original URL: the
+      // rewrite above copies the supplier's host into a new URL, so a rewritten candidate is
+      // exactly as untrusted as the one it came from.
+      const safeCandidates = candidates.filter((candidate) => isAllowedFeedUrl(candidate));
+      if (!safeCandidates.length) {
+        if (candidates.length) throw new FeedUrlNotAllowedError("HOST_NOT_ALLOWED");
+        return [];
+      }
 
       let lastError = null;
       // ~64KB per product is generous; cap keeps huge BliBli-style feeds usable
       const maxBytes = Math.min(8_000_000, Math.max(256_000, Number(maxRows || 100) * 64_000));
-      for (const full of candidates.slice(0, 3)) {
+      for (const full of safeCandidates.slice(0, 3)) {
         try {
           const { text } = await fetchFeedTextLimited(full, { timeoutMs: 25000, maxBytes });
           const rows = parseOptimiseFeedCsv(text, maxRows);

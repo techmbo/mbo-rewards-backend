@@ -1,3 +1,5 @@
+import { assertAllowedFeedUrl } from "./feedUrlPolicy.js";
+
 /**
  * Bounded product-item sampling for certification.
  *
@@ -21,8 +23,8 @@
  *    and certify nothing. The parsers here report the supplier's own header names and tag names.
  */
 
-/** The only hosts a certification feed sample may be fetched from. */
-export const ALLOWED_FEED_HOSTS = Object.freeze(["product-feeds.optimisemedia.com"]);
+// The host policy is shared with the production sync downloader; see feedUrlPolicy.js.
+export { ALLOWED_FEED_HOSTS } from "./feedUrlPolicy.js";
 
 /** Raised when a bounded single-record sample cannot be taken. Never carries feed content. */
 export class FeedItemSampleNotBoundedError extends Error {
@@ -69,7 +71,11 @@ export function buildBoundedFeedUrl(feedRow = {}, { aid, format = "csv" } = {}) 
   }
   if (!url) throw new FeedItemSampleNotBoundedError("NO_FEED_URL");
 
-  if (url.protocol !== "https:" || !ALLOWED_FEED_HOSTS.includes(url.hostname)) {
+  // One policy for both paths. Certification reports it as its own outcome rather than as a raw
+  // policy error, because "this feed cannot be sampled" is a certification result, not a failure.
+  try {
+    assertAllowedFeedUrl(url.toString());
+  } catch {
     throw new FeedItemSampleNotBoundedError("DISALLOWED_HOST");
   }
 

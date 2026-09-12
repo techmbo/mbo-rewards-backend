@@ -1020,7 +1020,7 @@ describe("product certification — bounded two-step chain", () => {
   it("10 — production product sync is unchanged", async () => {
     const start = adapterSource.indexOf("async fetchProductFeedItems");
     const body = adapterSource.slice(start, adapterSource.indexOf("async fetchAll", start));
-    assert.match(body, /candidates\.slice\(0, 3\)/, "sync still tries its candidate URLs");
+    assert.match(body, /safeCandidates\.slice\(0, 3\)/, "sync still tries up to three candidate URLs");
     assert.match(body, /parseOptimiseFeedCsv\(text, maxRows\)/, "sync still parses up to maxRows");
     assert.match(body, /maxBytes = Math\.min\(8_000_000/, "sync keeps its own byte ceiling");
     // The sync job still calls the sync downloader, not the sampler.
