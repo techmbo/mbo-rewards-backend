@@ -38,6 +38,21 @@ export const authRateLimiter = rateLimit({
  * over; a shared store (Redis) would be required for a true distributed limit, and REDIS_URL is
  * not configured in this project today.
  */
+/**
+ * Marks a response uncacheable before anything downstream can answer.
+ *
+ * The certification handlers set these headers themselves, but a rate limiter answers 429 without
+ * calling next(), so the handler never runs and the response falls through to the platform default
+ * of `public, max-age=0, must-revalidate`. A 429 says a certification for this supplier account ran
+ * recently, which is account state and should not sit in a shared proxy. Setting the headers here,
+ * before the limiter, covers every response the route can produce.
+ */
+export function noStoreHeaders(_req, res, next) {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Pragma", "no-cache");
+  next();
+}
+
 export const certificationRateLimiter = rateLimit({
   windowMs: Number(process.env.CERTIFICATION_RATE_LIMIT_WINDOW_MS || 300_000),
   max: Number(process.env.CERTIFICATION_RATE_LIMIT_MAX || 1),

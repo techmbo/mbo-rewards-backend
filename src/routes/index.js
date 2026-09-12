@@ -296,7 +296,7 @@ import {
   clientListPayoutsHandler,
 } from "../controllers/clientReporting.controller.js";
 import { clientListProductsHandler } from "../controllers/clientProducts.controller.js";
-import { authRateLimiter, certificationRateLimiter } from "../platform/security/index.js";
+import { authRateLimiter, certificationRateLimiter, noStoreHeaders } from "../platform/security/index.js";
 import {
   auditAction,
   auditPartnerAccess,
@@ -1298,12 +1298,16 @@ router.get(
   "/ops/admin/network-certification",
   authenticate,
   requirePermission(PERMISSIONS.INTEGRATIONS_MANAGE),
+  noStoreHeaders,
   networkCertificationCatalogHandler,
 );
 router.post(
   "/ops/admin/network-certification/:network/run",
   authenticate,
   requirePermission(PERMISSIONS.INTEGRATIONS_MANAGE),
+  // Before the limiter: a 429 short-circuits the handler, so the handler's own no-store never runs.
+  // After authenticate: a 401 carries no account state and keeps the default cache headers.
+  noStoreHeaders,
   certificationRateLimiter,
   auditAction("network.certification.run", (req) =>
     [req.params?.network, req.body?.region || "sea", req.body?.accountLabel || "default"].join("/"),
