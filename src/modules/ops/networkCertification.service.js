@@ -76,9 +76,15 @@ const OPTIMISE_PROBES = Object.freeze({
   commission_groups: {
     method: "GET",
     endpointKey: "GET /campaigns/{campaignId}/commission-groups",
-    needs: "campaignId",
+    needs: "commissionGroupCampaignId",
+    skipCategory: "SKIPPED_NO_COMMISSION_GROUP_CAMPAIGN_ID",
   },
-  campaign_detail: { method: "GET", endpointKey: "GET /campaigns/{campaignId}", needs: "campaignId" },
+  campaign_detail: {
+    method: "GET",
+    endpointKey: "GET /campaigns/{productId}",
+    needs: "campaignDetailId",
+    skipCategory: "SKIPPED_NO_CAMPAIGN_DETAIL_ID",
+  },
   basket_items: {
     method: "GET",
     endpointKey: "GET /conversions (basket items)",
@@ -157,6 +163,37 @@ const NOT_BOUNDED_NOTES = Object.freeze({
 
 function notBoundedReason(error) {
   return error?.productItemSampleNotBounded ? String(error.reason || "UNKNOWN") : null;
+}
+
+/**
+ * The identifier each campaign-scoped endpoint requires, read off a sampled campaign row.
+ *
+ * Two namespaces, two selectors, no shared fallback. `id` is not consulted by either: it was the
+ * fallback removed from commission-group selection once the identifier audit showed campaignId and
+ * productId are separate namespaces on the same row, and reinstating it here would repeat that bug.
+ * A row lacking the identifier an endpoint needs yields null, and the caller skips that endpoint
+ * rather than dispatching a foreign identifier to it.
+ */
+function firstUsableId(row, keys) {
+  for (const key of keys) {
+    const value = row?.[key];
+    if (value === undefined || value === null) continue;
+    const text = String(value).trim();
+    if (!text) continue;
+    // A value carrying path or query syntax would escape the path segment it is interpolated into.
+    return /[\\/\s?#]/.test(text) ? null : text;
+  }
+  return null;
+}
+
+/** GET /campaigns/{productId} — campaign detail. Never id, never campaignId. */
+export function campaignDetailIdOf(row = {}) {
+  return firstUsableId(row, ["productId", "product_id"]);
+}
+
+/** GET /campaigns/{campaignId}/commission-groups. Never id, never productId. */
+export function commissionGroupCampaignIdOf(row = {}) {
+  return firstUsableId(row, ["campaignId", "campaign_id"]);
 }
 
 function asRows(result) {
@@ -330,7 +367,12 @@ export class NetworkCertificationService {
     const adapter = await this.buildOptimiseAdapter({ region, accountLabel });
     // Dates are computed here, from a preset token. Nothing the caller sends is used as a date.
     const windowDays = windowPresetDays(windowPreset);
-    const ctx = { window: defaultDateWindow(windowDays), campaignId: null };
+    const ctx = {
+      window: defaultDateWindow(windowDays),
+      // Separate namespaces, separate fields. Neither is ever supplied by the caller.
+      campaignDetailId: null,
+      commissionGroupCampaignId: null,
+    };
     const results = [];
     const runDeadline = Date.now() + RUN_BUDGET_MS;
     const budgetLeft = () => runDeadline - Date.now();
@@ -338,13 +380,15 @@ export class NetworkCertificationService {
     // Campaign-scoped probes need an id. Take it from a campaigns sample rather than the caller,
     // so the probe cannot be pointed at an arbitrary campaign. This is the one permitted second
     // call in a source chain: sample a campaign, then read that campaign's dependent endpoint.
-    if (requested.some((s) => probes[s]?.needs === "campaignId")) {
+    if (requested.some((s) => probes[s]?.needs)) {
       try {
         const sample = await adapter.fetchCertificationSample("campaigns", ctx);
         const first = asRows(sample)[0] || {};
-        ctx.campaignId = first.id ?? first.campaignId ?? first.campaign_id ?? null;
+        ctx.campaignDetailId = campaignDetailIdOf(first);
+        ctx.commissionGroupCampaignId = commissionGroupCampaignIdOf(first);
       } catch {
-        ctx.campaignId = null;
+        ctx.campaignDetailId = null;
+        ctx.commissionGroupCampaignId = null;
       }
     }
 
@@ -382,14 +426,16 @@ export class NetworkCertificationService {
         continue;
       }
 
-      if (probe.needs === "campaignId" && !ctx.campaignId) {
+      if (probe.needs && !ctx[probe.needs]) {
+        // No dependent supplier call is made: the identifier this endpoint needs is absent from the
+        // sampled row, and another namespace's identifier is not a substitute for it.
         results.push({
           network: key,
           sourceObject,
           endpointKey: probe.endpointKey,
           httpMethod: probe.method,
           ok: false,
-          statusCategory: "SKIPPED_NO_CAMPAIGN_SAMPLE",
+          statusCategory: probe.skipCategory ?? "SKIPPED_NO_CAMPAIGN_SAMPLE",
           sampleCount: 0,
           fieldPaths: [],
         });

@@ -241,6 +241,18 @@ const SINGLE_ROW = { offset: 0, limit: 1 };
  * its own, which is what the supplier rejected. Each sample now names only the parameters its
  * endpoint actually takes, mirroring the fetcher that is known to work in production.
  */
+/**
+ * Campaign-scoped endpoints take different identifier namespaces off the same campaign row.
+ *
+ * The production identifier audit and live certification proved these are not interchangeable:
+ *
+ *   GET /campaigns/{productId}                     campaign detail
+ *   GET /campaigns/{campaignId}/commission-groups  commission groups
+ *
+ * One Optimise row carries both — campaignId 7340528 alongside productId 57316. Sending one where
+ * the other belongs addresses a campaign that is not ours, which Optimise answers 403 rather than
+ * 404. Each sample therefore reads its own context field and there is no shared "campaignId".
+ */
 const CONVERSIONS_DATE_FIELD = String(process.env.OPTIMISE_CONVERSIONS_DATE_FIELD || "conversion").trim();
 const TARGET_CURRENCY_CODE = String(process.env.OPTIMISE_TARGET_CURRENCY_CODE || "USD").trim();
 
@@ -273,16 +285,18 @@ const CERTIFICATION_SAMPLES = Object.freeze({
     params: (ctx) => ({ ...SINGLE_ROW, startDate: ctx.window.from, endDate: ctx.window.to }),
   },
   products: { method: "GET", path: () => "/product-feeds/", params: () => ({ ...SINGLE_ROW }) },
+  // The two campaign-scoped endpoints take DIFFERENT identifier namespaces off the same row, so
+  // each names its own context field. See the namespace note above CERTIFICATION_SAMPLES.
   commission_groups: {
     method: "GET",
-    needs: "campaignId",
-    path: (ctx) => `/campaigns/${encodeURIComponent(ctx.campaignId)}/commission-groups`,
+    needs: "commissionGroupCampaignId",
+    path: (ctx) => `/campaigns/${encodeURIComponent(ctx.commissionGroupCampaignId)}/commission-groups`,
     params: () => ({}),
   },
   campaign_detail: {
     method: "GET",
-    needs: "campaignId",
-    path: (ctx) => `/campaigns/${encodeURIComponent(ctx.campaignId)}`,
+    needs: "campaignDetailId",
+    path: (ctx) => `/campaigns/${encodeURIComponent(ctx.campaignDetailId)}`,
     params: () => ({}),
   },
 });
@@ -554,8 +568,9 @@ export function createOptimiseAdapter({
     async fetchCertificationSample(sourceObject, ctx = {}) {
       const spec = CERTIFICATION_SAMPLES[sourceObject];
       if (!spec) throw new Error(`No certification sample is defined for "${sourceObject}"`);
-      if (spec.needs === "campaignId" && !ctx.campaignId) {
-        throw new Error(`Certification sample "${sourceObject}" requires a campaign id`);
+      // Fails closed rather than substituting another namespace's identifier.
+      if (spec.needs && !ctx[spec.needs]) {
+        throw new Error(`Certification sample "${sourceObject}" requires ${spec.needs}`);
       }
 
       const timeoutMs = Number(ctx.timeoutMs || CERTIFICATION_SAMPLE_TIMEOUT_MS);

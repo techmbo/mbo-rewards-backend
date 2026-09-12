@@ -11,6 +11,8 @@ const {
   DEFAULT_WINDOW_PRESET,
   NetworkCertificationService,
   WINDOW_PRESETS,
+  campaignDetailIdOf,
+  commissionGroupCampaignIdOf,
   listProbeSourceObjects,
   statusCategory,
 } = await import("../src/modules/ops/networkCertification.service.js");
@@ -263,7 +265,8 @@ describe("probe dispatch", () => {
 
   /** One bounded row per source object, as the real sampler returns. */
   const SAMPLE_ROWS = Object.freeze({
-    campaigns: [supplierRecord()],
+    // A real Optimise row carries both namespaces; these are the live-certified values.
+    campaigns: [supplierRecord({ campaignId: "7340528", productId: "57316" })],
     voucher_codes: [{ voucherCodeId: 1, voucherCode: "SAVE10" }],
     conversions: [{ conversionId: 9, currency: "USD" }],
     payment_overview: [{ paymentId: 3 }],
@@ -358,7 +361,7 @@ describe("probe dispatch", () => {
     const { service } = makeService();
     const text = serialise(await service.certify("optimise", {}));
     for (const secret of SECRET_VALUES) assert.ok(!text.includes(secret), secret.slice(0, 12));
-    for (const value of ["AG1", "C1", "SAVE10", "Ubuy SG"]) {
+    for (const value of ["AG1", "C1", "SAVE10", "Ubuy SG", "7340528", "57316"]) {
       assert.ok(!text.includes(value), `value leaked: ${value}`);
     }
   });
@@ -379,7 +382,7 @@ describe("probe dispatch", () => {
     adapter.fetchCertificationSample = async () => [];
     const { service } = makeService(makeDb(), adapter);
     const out = await service.certify("optimise", { sourceObjects: ["campaign_detail"], compareRaw: false });
-    assert.equal(out.results[0].statusCategory, "SKIPPED_NO_CAMPAIGN_SAMPLE");
+    assert.equal(out.results[0].statusCategory, "SKIPPED_NO_CAMPAIGN_DETAIL_ID");
   });
 
   it("reduces a supplier failure to a status category with no error text", async () => {
@@ -755,7 +758,10 @@ describe("bounded sampling — the 300s hang", () => {
 
   it("refuses a campaign-scoped sample without an id", async () => {
     const adapter = probeAdapter(recordingHttpClient());
-    await assert.rejects(() => adapter.fetchCertificationSample("commission_groups", {}), /requires a campaign id/i);
+    await assert.rejects(
+      () => adapter.fetchCertificationSample("commission_groups", {}),
+      /requires commissionGroupCampaignId/i,
+    );
   });
 });
 
@@ -1526,5 +1532,225 @@ describe("certification window presets", () => {
     assert.equal(requests[0].params.startDate, "2026-06-14");
     assert.equal(requests[0].params.endDate, "2026-09-12");
     assert.equal("fromDate" in requests[0].params, false);
+  });
+});
+
+/**
+ * Optimise campaign rows carry two identifier namespaces, and the two campaign-scoped endpoints
+ * take different ones. Sending the wrong one addresses somebody else's campaign, which the supplier
+ * answers 403 — the observed campaign_detail AUTH_FAILED. These tests hold the two apart.
+ *
+ *   GET /campaigns/{productId}                     campaign detail
+ *   GET /campaigns/{campaignId}/commission-groups  commission groups
+ */
+describe("campaign identifier namespaces stay separate", () => {
+  // The live-certified row: one campaign, both identifiers, deliberately different values.
+  const LIVE_ROW = Object.freeze({ id: "99999", campaignId: "7340528", productId: "57316", name: "Ubuy SG" });
+
+  function pathRecorder() {
+    const requests = [];
+    return {
+      requests,
+      get: async (path, config = {}) => {
+        requests.push({ path, params: config.params });
+        return { data: [{ ok: 1 }] };
+      },
+    };
+  }
+
+  function probeAdapterFor(httpClient) {
+    return createOptimiseAdapter({
+      apiKey: "k",
+      agencyId: "AG1",
+      contactId: "C1",
+      httpClient,
+      certificationRateLimiter: { acquireSlot: async () => {}, resetAfterRateLimit: () => {} },
+    });
+  }
+
+  /** A service whose campaigns sample is `row`, recording every dependent request path. */
+  function serviceSampling(row) {
+    const calls = [];
+    const service = new NetworkCertificationService({
+      prisma: { rawPayload: { findMany: async () => [] } },
+      adapterFactory: () => ({
+        fetchCertificationSample: async (sourceObject, ctx) => {
+          calls.push({ sourceObject, ctx });
+          if (sourceObject === "campaigns") return row ? [row] : [];
+          return [{ sampled: true }];
+        },
+      }),
+      credentialResolver: async () => ({ apiKey: SECRET_VALUES[0], agencyId: "AG1", contactId: "C1" }),
+    });
+    return { service, calls };
+  }
+
+  it("1 — campaign_detail uses productId only", async () => {
+    const httpClient = pathRecorder();
+    await probeAdapterFor(httpClient).fetchCertificationSample("campaign_detail", { campaignDetailId: "57316" });
+    assert.equal(httpClient.requests[0].path, "/campaigns/57316");
+  });
+
+  it("2 — commission_groups uses campaignId", () => {
+    assert.equal(commissionGroupCampaignIdOf(LIVE_ROW), "7340528");
+  });
+
+  it("2b — commission_groups builds the campaignId path", async () => {
+    const httpClient = pathRecorder();
+    await probeAdapterFor(httpClient).fetchCertificationSample("commission_groups", {
+      commissionGroupCampaignId: "7340528",
+    });
+    assert.equal(httpClient.requests[0].path, "/campaigns/7340528/commission-groups");
+  });
+
+  it("3 — commission_groups accepts the campaign_id alias", () => {
+    assert.equal(commissionGroupCampaignIdOf({ campaign_id: "7340528", productId: "57316" }), "7340528");
+    assert.equal(commissionGroupCampaignIdOf({ campaignId: "", campaign_id: "7340528" }), "7340528");
+  });
+
+  it("3b — campaign_detail accepts the product_id alias", () => {
+    assert.equal(campaignDetailIdOf({ product_id: "57316" }), "57316");
+  });
+
+  it("4 — `id` is never used for either endpoint", () => {
+    // A row carrying ONLY id must yield nothing for both.
+    assert.equal(campaignDetailIdOf({ id: "99999" }), null);
+    assert.equal(commissionGroupCampaignIdOf({ id: "99999" }), null);
+    // And with id present alongside the real identifiers, id never wins.
+    assert.equal(campaignDetailIdOf(LIVE_ROW), "57316");
+    assert.equal(commissionGroupCampaignIdOf(LIVE_ROW), "7340528");
+  });
+
+  it("4b — the service no longer reads `id` as an identifier at all", async () => {
+    const source = (await import("node:fs")).readFileSync(
+      "src/modules/ops/networkCertification.service.js",
+      "utf8",
+    );
+    assert.ok(!source.includes("first.id"), "the removed fallback must not return");
+    assert.ok(!/ctx\.campaignId\b/.test(source), "no shared campaignId context remains");
+  });
+
+  it("5 — productId is never used for commission_groups", async () => {
+    assert.equal(commissionGroupCampaignIdOf({ productId: "57316", product_id: "57316" }), null);
+    const { service, calls } = serviceSampling({ productId: "57316" });
+    const out = await service.certify("optimise", { sourceObjects: ["commission_groups"], compareRaw: false });
+    assert.equal(out.results[0].statusCategory, "SKIPPED_NO_COMMISSION_GROUP_CAMPAIGN_ID");
+    assert.equal(calls.filter((c) => c.sourceObject === "commission_groups").length, 0, "no request made");
+  });
+
+  it("6 — campaignId is never used for campaign_detail", async () => {
+    assert.equal(campaignDetailIdOf({ campaignId: "7340528", campaign_id: "7340528" }), null);
+    const { service, calls } = serviceSampling({ campaignId: "7340528" });
+    const out = await service.certify("optimise", { sourceObjects: ["campaign_detail"], compareRaw: false });
+    assert.equal(out.results[0].statusCategory, "SKIPPED_NO_CAMPAIGN_DETAIL_ID");
+    assert.equal(calls.filter((c) => c.sourceObject === "campaign_detail").length, 0, "no request made");
+  });
+
+  it("7 — a missing productId skips safely with zero dependent calls", async () => {
+    const { service, calls } = serviceSampling({ id: "99999", campaignId: "7340528" });
+    const out = await service.certify("optimise", { sourceObjects: ["campaign_detail"], compareRaw: false });
+    const row = out.results[0];
+    assert.equal(row.statusCategory, "SKIPPED_NO_CAMPAIGN_DETAIL_ID");
+    assert.equal(row.ok, false);
+    assert.equal(row.sampleCount, 0);
+    assert.deepEqual(row.fieldPaths, []);
+    assert.deepEqual(calls.map((c) => c.sourceObject), ["campaigns"], "only the bootstrap sample");
+  });
+
+  it("8 — a missing campaignId skips safely with zero dependent calls", async () => {
+    const { service, calls } = serviceSampling({ id: "99999", productId: "57316" });
+    const out = await service.certify("optimise", { sourceObjects: ["commission_groups"], compareRaw: false });
+    const row = out.results[0];
+    assert.equal(row.statusCategory, "SKIPPED_NO_COMMISSION_GROUP_CAMPAIGN_ID");
+    assert.equal(row.sampleCount, 0);
+    assert.deepEqual(calls.map((c) => c.sourceObject), ["campaigns"], "only the bootstrap sample");
+  });
+
+  it("9 — a caller cannot inject either identifier", () => {
+    for (const key of [
+      "campaignId",
+      "campaign_id",
+      "productId",
+      "product_id",
+      "campaignDetailId",
+      "commissionGroupCampaignId",
+      "id",
+    ]) {
+      assert.throws(
+        () => parseRunBody({ sourceObjects: ["campaign_detail"], [key]: "57316" }),
+        (error) => {
+          assert.equal(error.statusCode ?? error.status, 400, key);
+          assert.match(error.message, /Unsupported field\(s\)/);
+          return true;
+        },
+        `accepted an identifier key: ${key}`,
+      );
+    }
+  });
+
+  it("9b — an identifier carrying path or query syntax is refused, not interpolated", () => {
+    for (const hostile of ["7340528/../../admin", "7340528?x=1", "7340528#f", "73 40528", "7340528\\\\x"]) {
+      assert.equal(commissionGroupCampaignIdOf({ campaignId: hostile }), null, hostile);
+      assert.equal(campaignDetailIdOf({ productId: hostile }), null, hostile);
+    }
+  });
+
+  it("10 — campaigns, products and conversions certification are unchanged", async () => {
+    const { service, calls } = serviceSampling(LIVE_ROW);
+    // None of these declares `needs`, so none triggers the campaign bootstrap.
+    const out = await service.certify("optimise", {
+      sourceObjects: ["campaigns", "conversions", "voucher_codes"],
+      compareRaw: false,
+    });
+    assert.deepEqual(out.results.map((r) => r.statusCategory), ["OK", "OK", "OK"]);
+    assert.deepEqual(calls.map((c) => c.sourceObject), ["campaigns", "conversions", "voucher_codes"]);
+  });
+
+  it("11 — each campaign-scoped probe makes exactly the bounded expected calls", async () => {
+    const { service, calls } = serviceSampling(LIVE_ROW);
+    const out = await service.certify("optimise", {
+      sourceObjects: ["campaign_detail", "commission_groups"],
+      compareRaw: false,
+    });
+    assert.deepEqual(out.results.map((r) => r.statusCategory), ["OK", "OK"]);
+    // One bootstrap sample plus one request per dependent endpoint. No more.
+    assert.deepEqual(calls.map((c) => c.sourceObject), ["campaigns", "campaign_detail", "commission_groups"]);
+    const detail = calls.find((c) => c.sourceObject === "campaign_detail");
+    const groups = calls.find((c) => c.sourceObject === "commission_groups");
+    assert.equal(detail.ctx.campaignDetailId, "57316");
+    assert.equal(groups.ctx.commissionGroupCampaignId, "7340528");
+    // Each context carries both fields, but each endpoint reads only its own.
+    assert.equal(detail.ctx.commissionGroupCampaignId, "7340528");
+    assert.equal(groups.ctx.campaignDetailId, "57316");
+  });
+
+  it("11b — the bootstrap runs once even when both dependent endpoints are requested", async () => {
+    const { service, calls } = serviceSampling(LIVE_ROW);
+    await service.certify("optimise", {
+      sourceObjects: ["campaign_detail", "commission_groups"],
+      compareRaw: false,
+    });
+    assert.equal(calls.filter((c) => c.sourceObject === "campaigns").length, 1);
+  });
+
+  it("12 — a supplier error on a campaign-scoped probe stays sanitized", async () => {
+    const error = new Error("403 for campaign 57316 with apikey sk_live_LEAKME — not your advertiser");
+    error.response = { status: 403, data: { message: "forbidden: campaign 57316" } };
+    const service = new NetworkCertificationService({
+      prisma: { rawPayload: { findMany: async () => [] } },
+      adapterFactory: () => ({
+        fetchCertificationSample: async (sourceObject) => {
+          if (sourceObject === "campaigns") return [LIVE_ROW];
+          throw error;
+        },
+      }),
+      credentialResolver: async () => ({ apiKey: SECRET_VALUES[0], agencyId: "AG1", contactId: "C1" }),
+    });
+    const out = await service.certify("optimise", { sourceObjects: ["campaign_detail"], compareRaw: false });
+    assert.equal(out.results[0].statusCategory, "AUTH_FAILED");
+    const text = serialise(out);
+    for (const leak of ["sk_live_LEAKME", "not your advertiser", "forbidden", "57316", "7340528"]) {
+      assert.ok(!text.includes(leak), `leaked: ${leak}`);
+    }
   });
 });
