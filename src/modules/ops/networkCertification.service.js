@@ -43,6 +43,23 @@ export const MAX_SUPPLIER_REQUESTS_PER_SOURCE = 1;
 export const MAX_SUPPLIER_REQUESTS_PRODUCTS = 2;
 
 /**
+ * Commission groups is the one source object allowed more than a couple of requests.
+ *
+ * A campaign with no commission groups is common and says nothing about the schema, so certifying
+ * from a single campaign is a coin flip. The chain looks at up to five campaigns from ONE bounded
+ * list request and stops at the first that returns a group: one list + at most five dependent
+ * requests, six in total. This bound applies to commission_groups alone.
+ */
+export const COMMISSION_GROUP_CANDIDATE_LIMIT = 5;
+export const MAX_SUPPLIER_REQUESTS_COMMISSION_GROUPS = 1 + COMMISSION_GROUP_CANDIDATE_LIMIT;
+
+/**
+ * Floor for one dependent attempt. With less than this left in the source budget the chain stops
+ * and says so, rather than firing a request it knows cannot finish.
+ */
+const MIN_ATTEMPT_MS = 2500;
+
+/**
  * Wall-clock ceiling for the whole run.
  *
  * Per-source budgets alone bound each request but not their sum: a sweep of every source object
@@ -76,8 +93,8 @@ const OPTIMISE_PROBES = Object.freeze({
   commission_groups: {
     method: "GET",
     endpointKey: "GET /campaigns/{campaignId}/commission-groups",
-    needs: "commissionGroupCampaignId",
-    skipCategory: "SKIPPED_NO_COMMISSION_GROUP_CAMPAIGN_ID",
+    // Its own bounded chain: a campaign list, then up to five campaigns tried in turn.
+    chain: "commissionGroups",
   },
   campaign_detail: {
     method: "GET",
@@ -241,6 +258,98 @@ export class NetworkCertificationService {
       agencyId: credentials.agencyId,
       contactId: credentials.contactId,
     });
+  }
+
+  /**
+   * The commission-group chain: one campaign list, then up to five campaigns tried in turn.
+   *
+   * Control flow, and the reasons for it:
+   *
+   *  - ONE bounded list request returns up to five campaign rows. Asking five times for one row
+   *    each would cost five requests before a single commission-group call.
+   *  - Each row yields an identifier through commissionGroupCampaignIdOf only — campaignId or
+   *    campaign_id. Rows without one are skipped, never substituted from `id` or `productId`.
+   *  - Campaigns are tried SEQUENTIALLY and the loop stops at the first non-empty response. A
+   *    burst of five concurrent calls is the traffic that gets an affiliate account flagged.
+   *  - Only a recognised EMPTY response continues to the next campaign. Any supplier failure ends
+   *    the chain with its category: continuing past a 401 or a 429 would turn one rejection into
+   *    five, and an unrecognised envelope is a parse failure, not evidence of zero groups.
+   *  - Every attempt is timed against what remains of the source budget, so five attempts cannot
+   *    add up to five full timeouts.
+   */
+  async certifyCommissionGroups({ adapter, key, probe, budgetLeft }) {
+    const base = {
+      network: key,
+      sourceObject: "commission_groups",
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+    };
+
+    // The source's own deadline, never longer than what the whole run has left.
+    const deadline = Date.now() + Math.max(0, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+    const timeLeft = () => deadline - Date.now();
+    const attemptTimeout = () => Math.max(MIN_ATTEMPT_MS, Math.min(SOURCE_BUDGET_MS / 2, timeLeft()));
+
+    let candidates;
+    try {
+      const rows = asRows(
+        await adapter.fetchCertificationSample("campaign_candidates", { timeoutMs: attemptTimeout() }),
+      ).slice(0, COMMISSION_GROUP_CANDIDATE_LIMIT);
+      candidates = rows.map((row) => commissionGroupCampaignIdOf(row)).filter(Boolean);
+    } catch (error) {
+      return { ...base, ok: false, statusCategory: statusCategory(error) };
+    }
+
+    if (!candidates.length) {
+      // No dependent request: not one sampled campaign carries the identifier this endpoint needs.
+      return { ...base, ok: false, statusCategory: "SKIPPED_NO_COMMISSION_GROUP_CAMPAIGN_ID" };
+    }
+
+    let checked = 0;
+    for (const campaignId of candidates) {
+      if (timeLeft() < MIN_ATTEMPT_MS) {
+        return { ...base, ok: false, statusCategory: "SOURCE_BUDGET_EXHAUSTED", campaignsChecked: checked };
+      }
+
+      let sample;
+      try {
+        sample = await adapter.fetchCertificationCommissionGroupSample(campaignId, {
+          timeoutMs: attemptTimeout(),
+        });
+      } catch (error) {
+        // Fail closed. A supplier failure is never a reason to try the next campaign.
+        return { ...base, ok: false, statusCategory: statusCategory(error), campaignsChecked: checked };
+      }
+
+      checked += 1;
+      const rows = asRows(sample?.rows).slice(0, 1);
+      if (rows.length) {
+        const fieldPaths = summarisePayloads(rows);
+        // No campaign id, name or index is reported: which campaign happened to have groups is not
+        // part of the schema, and naming it would leak a supplier value into a structural result.
+        return {
+          ...base,
+          ok: true,
+          statusCategory: "OK",
+          sampleCount: rows.length,
+          fieldCount: fieldPaths.length,
+          fieldPaths,
+        };
+      }
+    }
+
+    // Every sampled campaign answered, and answered empty. That is a fact about these campaigns,
+    // not about Optimise: campaignsChecked says how far the search got.
+    return {
+      ...base,
+      ok: true,
+      statusCategory: "OK",
+      fieldCount: 0,
+      campaignsChecked: checked,
+      note: "No commission-group rows in the campaigns sampled; this does not mean the network has none.",
+    };
   }
 
   /**
@@ -471,6 +580,11 @@ export class NetworkCertificationService {
           sampleCount: 0,
           fieldPaths: [],
         });
+        continue;
+      }
+
+      if (probe.chain === "commissionGroups") {
+        results.push(await this.certifyCommissionGroups({ adapter, key, probe, budgetLeft }));
         continue;
       }
 

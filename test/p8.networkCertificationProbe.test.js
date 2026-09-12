@@ -11,6 +11,10 @@ const {
   DEFAULT_WINDOW_PRESET,
   NetworkCertificationService,
   WINDOW_PRESETS,
+  COMMISSION_GROUP_CANDIDATE_LIMIT,
+  MAX_SUPPLIER_REQUESTS_COMMISSION_GROUPS,
+  MAX_SUPPLIER_REQUESTS_PER_SOURCE,
+  MAX_SUPPLIER_REQUESTS_PRODUCTS,
   campaignDetailIdOf,
   commissionGroupCampaignIdOf,
   listProbeSourceObjects,
@@ -22,6 +26,11 @@ const { parseRunBody, networkCertificationCatalogHandler, networkCertificationRu
 );
 const routesSource = (await import("node:fs")).readFileSync("src/routes/index.js", "utf8");
 const adapterSource = (await import("node:fs")).readFileSync("src/adapters/optimise.adapter.js", "utf8");
+const certServiceSource = (await import("node:fs")).readFileSync(
+  "src/modules/ops/networkCertification.service.js",
+  "utf8",
+);
+const serviceSourceText = () => certServiceSource;
 const { CertificationThrottledError, CertificationTimeoutError, createOptimiseAdapter, listCertificationSamples } =
   await import("../src/adapters/optimise.adapter.js");
 const { ALLOWED_FEED_HOSTS, FeedItemSampleNotBoundedError, buildBoundedFeedUrl, parseFirstFeedRecord } =
@@ -272,6 +281,7 @@ describe("probe dispatch", () => {
     payment_overview: [{ paymentId: 3 }],
     invoices: [{ invoiceId: 4 }],
     products: [{ FeedID: 7, PID: 999 }],
+    campaign_candidates: [supplierRecord({ campaignId: "7340528", productId: "57316" })],
     commission_groups: [{ commission_group_id: 5 }],
     campaign_detail: [{ id: 56577, name: "Ubuy SG" }],
   });
@@ -302,9 +312,14 @@ describe("probe dispatch", () => {
       fetchInvoiceReporting: syncFetcher("fetchInvoiceReporting"),
       fetchCommissionGroups: syncFetcher("fetchCommissionGroups"),
       fetchCampaignDetail: syncFetcher("fetchCampaignDetail"),
-      // The only method the service is allowed to call.
+      // The only methods the service is allowed to call.
       fetchCertificationSample: async (sourceObject) =>
         record(`fetchCertificationSample:${sourceObject}`, SAMPLE_ROWS[sourceObject] ?? []),
+      fetchCertificationCommissionGroupSample: async () =>
+        record("fetchCertificationCommissionGroupSample", {
+          rows: SAMPLE_ROWS.commission_groups,
+          envelopeKind: "array",
+        }),
     };
   }
 
@@ -368,11 +383,19 @@ describe("probe dispatch", () => {
 
   it("takes the campaign id from a sample, not from the caller", async () => {
     const { service, adapter } = makeService();
-    const out = await service.certify("optimise", { sourceObjects: ["commission_groups"], compareRaw: false });
+    const out = await service.certify("optimise", { sourceObjects: ["campaign_detail"], compareRaw: false });
     assert.ok(
       adapter.called.includes("fetchCertificationSample:campaigns"),
       "campaigns sampled to obtain the id",
     );
+    assert.equal(adapter.called.includes("fetchCampaigns"), false, "never the sync fetcher");
+    assert.equal(out.results[0].statusCategory, "OK");
+  });
+
+  it("commission groups take their ids from their own bounded campaign list", async () => {
+    const { service, adapter } = makeService();
+    const out = await service.certify("optimise", { sourceObjects: ["commission_groups"], compareRaw: false });
+    assert.ok(adapter.called.includes("fetchCertificationSample:campaign_candidates"));
     assert.equal(adapter.called.includes("fetchCampaigns"), false, "never the sync fetcher");
     assert.equal(out.results[0].statusCategory, "OK");
   });
@@ -1576,8 +1599,14 @@ describe("campaign identifier namespaces stay separate", () => {
       adapterFactory: () => ({
         fetchCertificationSample: async (sourceObject, ctx) => {
           calls.push({ sourceObject, ctx });
-          if (sourceObject === "campaigns") return row ? [row] : [];
+          if (sourceObject === "campaigns" || sourceObject === "campaign_candidates") {
+            return row ? [row] : [];
+          }
           return [{ sampled: true }];
+        },
+        fetchCertificationCommissionGroupSample: async (campaignId) => {
+          calls.push({ sourceObject: "commission_groups", campaignId });
+          return { rows: [{ commissionGroupId: 5, rate: "3.5" }], envelopeKind: "array" };
         },
       }),
       credentialResolver: async () => ({ apiKey: SECRET_VALUES[0], agencyId: "AG1", contactId: "C1" }),
@@ -1663,7 +1692,7 @@ describe("campaign identifier namespaces stay separate", () => {
     const row = out.results[0];
     assert.equal(row.statusCategory, "SKIPPED_NO_COMMISSION_GROUP_CAMPAIGN_ID");
     assert.equal(row.sampleCount, 0);
-    assert.deepEqual(calls.map((c) => c.sourceObject), ["campaigns"], "only the bootstrap sample");
+    assert.deepEqual(calls.map((c) => c.sourceObject), ["campaign_candidates"], "only the list request");
   });
 
   it("9 — a caller cannot inject either identifier", () => {
@@ -1713,15 +1742,18 @@ describe("campaign identifier namespaces stay separate", () => {
       compareRaw: false,
     });
     assert.deepEqual(out.results.map((r) => r.statusCategory), ["OK", "OK"]);
-    // One bootstrap sample plus one request per dependent endpoint. No more.
-    assert.deepEqual(calls.map((c) => c.sourceObject), ["campaigns", "campaign_detail", "commission_groups"]);
+    // campaign_detail: one bootstrap sample plus its own request.
+    // commission_groups: its own bounded campaign list plus one dependent request.
+    assert.deepEqual(calls.map((c) => c.sourceObject), [
+      "campaigns",
+      "campaign_detail",
+      "campaign_candidates",
+      "commission_groups",
+    ]);
     const detail = calls.find((c) => c.sourceObject === "campaign_detail");
     const groups = calls.find((c) => c.sourceObject === "commission_groups");
-    assert.equal(detail.ctx.campaignDetailId, "57316");
-    assert.equal(groups.ctx.commissionGroupCampaignId, "7340528");
-    // Each context carries both fields, but each endpoint reads only its own.
-    assert.equal(detail.ctx.commissionGroupCampaignId, "7340528");
-    assert.equal(groups.ctx.campaignDetailId, "57316");
+    assert.equal(detail.ctx.campaignDetailId, "57316", "detail reads productId");
+    assert.equal(groups.campaignId, "7340528", "groups read campaignId");
   });
 
   it("11b — the bootstrap runs once even when both dependent endpoints are requested", async () => {
@@ -1731,6 +1763,7 @@ describe("campaign identifier namespaces stay separate", () => {
       compareRaw: false,
     });
     assert.equal(calls.filter((c) => c.sourceObject === "campaigns").length, 1);
+    assert.equal(calls.filter((c) => c.sourceObject === "campaign_candidates").length, 1);
   });
 
   it("12 — a supplier error on a campaign-scoped probe stays sanitized", async () => {
@@ -1752,5 +1785,362 @@ describe("campaign identifier namespaces stay separate", () => {
     for (const leak of ["sk_live_LEAKME", "not your advertiser", "forbidden", "57316", "7340528"]) {
       assert.ok(!text.includes(leak), `leaked: ${leak}`);
     }
+  });
+});
+
+/**
+ * A campaign with no commission groups is common, so certifying from one campaign is a coin flip.
+ * The chain looks at a few campaigns and stops at the first that has any — while staying bounded in
+ * requests and in time, and failing closed on anything that is not a genuinely empty answer.
+ */
+describe("commission groups — bounded multi-campaign sampler", () => {
+  const GROUP_ROW = { commissionGroupId: 5, name: "Default", rate: "3.5", currency: "SGD" };
+
+  function row(id, extra = {}) {
+    return { id: `internal-${id}`, campaignId: String(id), productId: `p-${id}`, ...extra };
+  }
+
+  /**
+   * `outcomes` is consulted per campaign id: an array of rows, or an Error to throw.
+   * Every supplier interaction is recorded so the request count and order can be asserted.
+   */
+  function chainService({ campaigns = [], outcomes = {}, listError = null, groupDelayMs = 0 } = {}) {
+    const calls = [];
+    const service = new NetworkCertificationService({
+      prisma: { rawPayload: { findMany: async () => [] } },
+      adapterFactory: () => ({
+        fetchCertificationSample: async (sourceObject, ctx) => {
+          calls.push({ kind: sourceObject, timeoutMs: ctx?.timeoutMs });
+          if (sourceObject === "campaign_candidates") {
+            if (listError) throw listError;
+            return campaigns;
+          }
+          return [{ sampled: true }];
+        },
+        fetchCertificationCommissionGroupSample: async (campaignId, ctx) => {
+          calls.push({ kind: "groups", campaignId, timeoutMs: ctx?.timeoutMs });
+          if (groupDelayMs) await new Promise((r) => setTimeout(r, groupDelayMs));
+          const outcome = outcomes[campaignId] ?? [];
+          if (outcome instanceof Error) throw outcome;
+          return { rows: outcome, envelopeKind: outcome.length ? "array" : "empty" };
+        },
+      }),
+      credentialResolver: async () => ({ apiKey: SECRET_VALUES[0], agencyId: "AG1", contactId: "C1" }),
+    });
+    return { service, calls };
+  }
+
+  const run = (service) =>
+    service.certify("optimise", { sourceObjects: ["commission_groups"], compareRaw: false });
+
+  const groupCalls = (calls) => calls.filter((c) => c.kind === "groups");
+
+  it("1 — the campaign list request is bounded to five rows", () => {
+    assert.equal(COMMISSION_GROUP_CANDIDATE_LIMIT, 5);
+    const start = adapterSource.indexOf("campaign_candidates: {");
+    const spec = adapterSource.slice(start, adapterSource.indexOf("},", start));
+    assert.match(spec, /offset: 0, limit: COMMISSION_GROUP_CANDIDATE_LIMIT/);
+    assert.match(adapterSource, /COMMISSION_GROUP_CANDIDATE_LIMIT = 5/);
+  });
+
+  it("1b — never more than five campaign rows are considered, however many are returned", async () => {
+    const campaigns = Array.from({ length: 20 }, (_, i) => row(i + 1));
+    const { service, calls } = chainService({ campaigns });
+    await run(service);
+    assert.equal(groupCalls(calls).length, 5, "five dependent requests at most");
+  });
+
+  it("2 — campaign ids come only from campaignId/campaign_id", async () => {
+    const { service, calls } = chainService({
+      campaigns: [{ campaign_id: "888" }],
+      outcomes: { 888: [GROUP_ROW] },
+    });
+    const out = await run(service);
+    assert.equal(groupCalls(calls)[0].campaignId, "888");
+    assert.equal(out.results[0].statusCategory, "OK");
+  });
+
+  it("3 — `id` is ignored as a campaign identifier", async () => {
+    const { service, calls } = chainService({ campaigns: [{ id: "99999" }] });
+    const out = await run(service);
+    assert.equal(out.results[0].statusCategory, "SKIPPED_NO_COMMISSION_GROUP_CAMPAIGN_ID");
+    assert.equal(groupCalls(calls).length, 0);
+  });
+
+  it("4 — productId and product_id are ignored", async () => {
+    const { service, calls } = chainService({
+      campaigns: [{ productId: "57316" }, { product_id: "57317" }],
+    });
+    const out = await run(service);
+    assert.equal(out.results[0].statusCategory, "SKIPPED_NO_COMMISSION_GROUP_CAMPAIGN_ID");
+    assert.equal(groupCalls(calls).length, 0);
+  });
+
+  it("5 — rows without a campaignId are skipped, valid ones still tried", async () => {
+    const { service, calls } = chainService({
+      campaigns: [{ id: "a" }, { productId: "b" }, row(3), { campaignId: "  " }],
+      outcomes: { 3: [GROUP_ROW] },
+    });
+    const out = await run(service);
+    assert.deepEqual(groupCalls(calls).map((c) => c.campaignId), ["3"]);
+    assert.equal(out.results[0].statusCategory, "OK");
+  });
+
+  it("6 — an empty first campaign moves on to the second", async () => {
+    const { service, calls } = chainService({
+      campaigns: [row(1), row(2)],
+      outcomes: { 1: [], 2: [GROUP_ROW] },
+    });
+    const out = await run(service);
+    assert.deepEqual(groupCalls(calls).map((c) => c.campaignId), ["1", "2"]);
+    assert.equal(out.results[0].sampleCount, 1);
+  });
+
+  it("7 — two empty then a hit stops at the third", async () => {
+    const { service, calls } = chainService({
+      campaigns: [row(1), row(2), row(3), row(4), row(5)],
+      outcomes: { 1: [], 2: [], 3: [GROUP_ROW], 4: [GROUP_ROW], 5: [GROUP_ROW] },
+    });
+    const out = await run(service);
+    assert.deepEqual(groupCalls(calls).map((c) => c.campaignId), ["1", "2", "3"]);
+    assert.equal(out.results[0].statusCategory, "OK");
+    assert.equal(out.results[0].sampleCount, 1);
+  });
+
+  it("8 — once a non-empty response is found no further supplier request occurs", async () => {
+    const { service, calls } = chainService({
+      campaigns: [row(1), row(2), row(3)],
+      outcomes: { 1: [GROUP_ROW], 2: [GROUP_ROW], 3: [GROUP_ROW] },
+    });
+    await run(service);
+    assert.equal(groupCalls(calls).length, 1);
+    assert.equal(calls.length, 2, "one list request plus one dependent request");
+  });
+
+  it("9 — all five empty gives a normal OK with sampleCount 0", async () => {
+    const { service, calls } = chainService({
+      campaigns: [row(1), row(2), row(3), row(4), row(5)],
+      outcomes: {},
+    });
+    const out = await run(service);
+    const result = out.results[0];
+    assert.equal(result.ok, true);
+    assert.equal(result.statusCategory, "OK");
+    assert.equal(result.sampleCount, 0);
+    assert.equal(result.fieldCount, 0);
+    assert.deepEqual(result.fieldPaths, []);
+    assert.equal(result.campaignsChecked, 5);
+    assert.match(result.note, /does not mean the network has none/i);
+    assert.equal(groupCalls(calls).length, 5);
+  });
+
+  it("10 — never more than five dependent requests, and six supplier requests in total", async () => {
+    assert.equal(MAX_SUPPLIER_REQUESTS_COMMISSION_GROUPS, 6);
+    const { service, calls } = chainService({
+      campaigns: Array.from({ length: 5 }, (_, i) => row(i + 1)),
+    });
+    await run(service);
+    assert.equal(groupCalls(calls).length, 5);
+    assert.equal(calls.length, MAX_SUPPLIER_REQUESTS_COMMISSION_GROUPS);
+  });
+
+  it("11 — no pagination to exhaustion anywhere in the chain", () => {
+    const source = serviceSourceText();
+    const start = source.indexOf("async certifyCommissionGroups");
+    const body = source.slice(start, source.indexOf("\n  /**", start));
+    assert.ok(!body.includes("fetchOffsetPaginated"), "no paginator");
+    assert.ok(!/offset/i.test(body), "the chain never advances an offset");
+    assert.ok(!/while\s*\(/.test(body), "no unbounded loop");
+    assert.match(body, /slice\(0, COMMISSION_GROUP_CANDIDATE_LIMIT\)/, "candidate list is capped");
+  });
+
+  it("12 — a caller cannot inject campaign identifiers or paging controls", () => {
+    for (const key of [
+      "campaignId",
+      "campaign_id",
+      "productId",
+      "campaignIds",
+      "campaigns",
+      "offset",
+      "limit",
+      "page",
+      "pageSize",
+      "perPage",
+      "maxCampaigns",
+    ]) {
+      assert.throws(
+        () => parseRunBody({ sourceObjects: ["commission_groups"], [key]: 5 }),
+        (error) => {
+          assert.equal(error.statusCode ?? error.status, 400, key);
+          assert.match(error.message, /Unsupported field\(s\)/);
+          return true;
+        },
+        `accepted ${key}`,
+      );
+    }
+  });
+
+  it("13 — AUTH_FAILED on the second campaign stops immediately", async () => {
+    const authError = new Error("nope");
+    authError.response = { status: 401 };
+    const { service, calls } = chainService({
+      campaigns: [row(1), row(2), row(3)],
+      outcomes: { 1: [], 2: authError, 3: [GROUP_ROW] },
+    });
+    const out = await run(service);
+    assert.equal(out.results[0].statusCategory, "AUTH_FAILED");
+    assert.equal(out.results[0].ok, false);
+    assert.deepEqual(groupCalls(calls).map((c) => c.campaignId), ["1", "2"], "campaign 3 never tried");
+  });
+
+  it("14 — RATE_LIMITED stops immediately", async () => {
+    const rateError = new Error("slow down");
+    rateError.response = { status: 429 };
+    const { service, calls } = chainService({
+      campaigns: [row(1), row(2)],
+      outcomes: { 1: rateError, 2: [GROUP_ROW] },
+    });
+    const out = await run(service);
+    assert.equal(out.results[0].statusCategory, "RATE_LIMITED");
+    assert.equal(groupCalls(calls).length, 1);
+  });
+
+  it("14b — every other supplier failure also stops the chain", async () => {
+    const cases = [
+      [{ response: { status: 400 } }, "REQUEST_REJECTED"],
+      [{ response: { status: 503 } }, "UPSTREAM_ERROR"],
+      [{ certificationTimeout: true }, "SUPPLIER_TIMEOUT"],
+      [{}, "NETWORK_ERROR"],
+    ];
+    for (const [shape, expected] of cases) {
+      const error = Object.assign(new Error("boom"), shape);
+      const { service, calls } = chainService({
+        campaigns: [row(1), row(2)],
+        outcomes: { 1: error, 2: [GROUP_ROW] },
+      });
+      const out = await run(service);
+      assert.equal(out.results[0].statusCategory, expected);
+      assert.equal(groupCalls(calls).length, 1, `${expected} continued to campaign 2`);
+    }
+  });
+
+  it("15 — budget exhaustion stops safely partway through", async () => {
+    const original = process.env.CERTIFICATION_SOURCE_BUDGET_MS;
+    process.env.CERTIFICATION_SOURCE_BUDGET_MS = "3000";
+    const { NetworkCertificationService: Scoped } = await import(
+      `../src/modules/ops/networkCertification.service.js?budget=${Date.now()}`
+    );
+    const calls = [];
+    const service = new Scoped({
+      prisma: { rawPayload: { findMany: async () => [] } },
+      adapterFactory: () => ({
+        fetchCertificationSample: async () => Array.from({ length: 5 }, (_, i) => row(i + 1)),
+        fetchCertificationCommissionGroupSample: async (campaignId) => {
+          calls.push(campaignId);
+          await new Promise((r) => setTimeout(r, 400));
+          return { rows: [], envelopeKind: "empty" };
+        },
+      }),
+      credentialResolver: async () => ({ apiKey: "k", agencyId: "AG1", contactId: "C1" }),
+    });
+    const out = await service.certify("optimise", {
+      sourceObjects: ["commission_groups"],
+      compareRaw: false,
+    });
+    const result = out.results[0];
+    assert.ok(
+      ["SOURCE_BUDGET_EXHAUSTED", "OK"].includes(result.statusCategory),
+      `unexpected: ${result.statusCategory}`,
+    );
+    assert.ok(calls.length <= 5, "never exceeds the candidate cap");
+    assert.equal(result.sampleCount, 0);
+    process.env.CERTIFICATION_SOURCE_BUDGET_MS = original;
+  });
+
+  it("15b — each attempt is timed against the remaining source budget", () => {
+    const source = serviceSourceText();
+    const start = source.indexOf("async certifyCommissionGroups");
+    const body = source.slice(start, source.indexOf("\n  /**", start));
+    assert.match(body, /const deadline = Date\.now\(\) \+ Math\.max\(0, Math\.min\(SOURCE_BUDGET_MS, budgetLeft\(\)\)\)/);
+    assert.match(body, /attemptTimeout\(\)/, "each request gets a computed timeout");
+    assert.match(body, /timeLeft\(\) < MIN_ATTEMPT_MS/, "stops when too little time remains");
+    // Five full-length timeouts must not be possible inside one source budget.
+    assert.match(body, /Math\.min\(SOURCE_BUDGET_MS \/ 2, timeLeft\(\)\)/);
+  });
+
+  it("16 — an unrecognised non-empty envelope fails safely, never as zero groups", async () => {
+    const envelopeError = new Error("Optimise commission-groups response is not JSON");
+    envelopeError.code = "optimise_commission_groups_unrecognised_envelope";
+    const { service, calls } = chainService({
+      campaigns: [row(1), row(2)],
+      outcomes: { 1: envelopeError, 2: [GROUP_ROW] },
+    });
+    const out = await run(service);
+    assert.notEqual(out.results[0].statusCategory, "OK", "must not be reported as a clean empty result");
+    assert.equal(out.results[0].ok, false);
+    assert.equal(groupCalls(calls).length, 1, "must not move on to another campaign");
+    // The strict reader is what produces this; the chain must not substitute a lenient one.
+    const chainStart = adapterSource.indexOf("async fetchCertificationCommissionGroupSample");
+    const chainBody = adapterSource.slice(chainStart, adapterSource.indexOf("\n    },", chainStart));
+    assert.match(chainBody, /extractCommissionGroupRows/);
+    assert.ok(!chainBody.includes("extractRows("), "must not use the lenient extractor");
+  });
+
+  it("17 — only the first group row is summarised", async () => {
+    const { service } = chainService({
+      campaigns: [row(1)],
+      outcomes: { 1: [GROUP_ROW, { commissionGroupId: 6, extraOnlyOnSecond: "x" }] },
+    });
+    const out = await run(service);
+    assert.equal(out.results[0].sampleCount, 1);
+    const paths = out.results[0].fieldPaths.map((f) => f.path);
+    assert.ok(paths.includes("commissionGroupId"));
+    assert.ok(!paths.includes("extraOnlyOnSecond"), "the second row must not be summarised");
+  });
+
+  it("18 — the output carries no campaign identifier, index or raw value", async () => {
+    const { service } = chainService({
+      campaigns: [row(1), row(2), row(7340528)],
+      outcomes: { 7340528: [GROUP_ROW] },
+    });
+    const out = await run(service);
+    const text = serialise(out);
+    for (const leak of ["7340528", "internal-", "p-1", "Default", "3.5", "SGD", SECRET_VALUES[0]]) {
+      assert.ok(!text.includes(leak), `leaked: ${leak}`);
+    }
+    // A hit must not disclose how many campaigns were tried — that is a campaign index.
+    assert.equal("campaignsChecked" in out.results[0], false);
+    assert.ok(serialise(out.results[0].fieldPaths).includes("commissionGroupId"), "schema still reported");
+  });
+
+  it("19 — other source objects keep their existing request limits", async () => {
+    assert.equal(MAX_SUPPLIER_REQUESTS_PER_SOURCE, 1);
+    const { service, calls } = chainService({ campaigns: [row(1)] });
+    await service.certify("optimise", {
+      sourceObjects: ["campaigns", "conversions", "voucher_codes", "invoices"],
+      compareRaw: false,
+    });
+    assert.equal(calls.length, 4, "one request each, no chain triggered");
+    assert.equal(groupCalls(calls).length, 0);
+  });
+
+  it("20 — the product two-request exception is unchanged", () => {
+    assert.equal(MAX_SUPPLIER_REQUESTS_PRODUCTS, 2);
+    const source = serviceSourceText();
+    assert.match(source, /export const MAX_SUPPLIER_REQUESTS_PRODUCTS = 2;/);
+    const start = source.indexOf("async certifyProductChain");
+    const body = source.slice(start, source.indexOf("\n  /**", start));
+    assert.match(body, /fetchCertificationFeedItemSample/, "still one feed then one item");
+    assert.ok(!body.includes("COMMISSION_GROUP_CANDIDATE_LIMIT"), "products borrow nothing from the new chain");
+  });
+
+  it("the internal candidate list is not a requestable source object", async () => {
+    assert.equal(listProbeSourceObjects("optimise").includes("campaign_candidates"), false);
+    assert.equal(listCertificationSamples().includes("campaign_candidates"), false);
+    const { service } = chainService({ campaigns: [row(1)] });
+    await assert.rejects(
+      () => service.certify("optimise", { sourceObjects: ["campaign_candidates"] }),
+      /unknown source objects/i,
+    );
   });
 });

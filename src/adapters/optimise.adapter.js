@@ -229,6 +229,15 @@ export const CERTIFICATION_FEED_SAMPLE_BYTES = Number(process.env.CERTIFICATION_
 const SINGLE_ROW = { offset: 0, limit: 1 };
 
 /**
+ * How many campaign rows the commission-group chain may consider.
+ *
+ * One bounded list request returns them all; the chain never asks for a campaign page again. Five
+ * is a compromise: enough that a publisher whose first campaign has no commission groups still gets
+ * a schema, few enough that the source stays inside its time budget at one request each.
+ */
+export const COMMISSION_GROUP_CANDIDATE_LIMIT = 5;
+
+/**
  * Date parameters are per-endpoint, never shared.
  *
  * Optimise uses three different date vocabularies across one API, and the sync fetchers above are
@@ -287,6 +296,15 @@ const CERTIFICATION_SAMPLES = Object.freeze({
   products: { method: "GET", path: () => "/product-feeds/", params: () => ({ ...SINGLE_ROW }) },
   // The two campaign-scoped endpoints take DIFFERENT identifier namespaces off the same row, so
   // each names its own context field. See the namespace note above CERTIFICATION_SAMPLES.
+  // Internal to the commission-group chain: a bounded campaign LIST, not a public source object.
+  // listCertificationSamples() excludes it, and the probe registry has no entry for it, so it can
+  // never be requested by name.
+  campaign_candidates: {
+    method: "GET",
+    internal: true,
+    path: () => "/campaigns",
+    params: () => ({ offset: 0, limit: COMMISSION_GROUP_CANDIDATE_LIMIT }),
+  },
   commission_groups: {
     method: "GET",
     needs: "commissionGroupCampaignId",
@@ -302,7 +320,7 @@ const CERTIFICATION_SAMPLES = Object.freeze({
 });
 
 export function listCertificationSamples() {
-  return Object.keys(CERTIFICATION_SAMPLES);
+  return Object.keys(CERTIFICATION_SAMPLES).filter((name) => !CERTIFICATION_SAMPLES[name].internal);
 }
 
 /** Raised when the probe's own budget expires, so the caller can report a controlled category. */
@@ -594,6 +612,40 @@ export function createOptimiseAdapter({
 
       // At most one row is summarised, whatever the supplier chose to return.
       return extractRows(response.data).slice(0, 1);
+    },
+
+    /**
+     * One commission-group sample for one campaign, using the STRICT envelope reader.
+     *
+     * The generic sampler's extractRows() would report an unrecognised envelope as zero rows, and
+     * "this campaign has no commission groups" is exactly the wrong conclusion to draw from a shape
+     * we failed to parse. extractCommissionGroupRows throws on an unrecognised non-empty body
+     * instead, so the chain fails closed rather than moving on to another campaign.
+     *
+     * Returns { rows, envelopeKind }: rows is [] only when the supplier genuinely said so.
+     */
+    async fetchCertificationCommissionGroupSample(campaignId, ctx = {}) {
+      const id = String(campaignId ?? "").trim();
+      if (!id) throw new Error("Certification commission-group sample requires a campaign id");
+
+      const timeoutMs = Number(ctx.timeoutMs || CERTIFICATION_SAMPLE_TIMEOUT_MS);
+      await withDeadline(
+        certLimiter.acquireSlot(),
+        Number(ctx.throttleBudgetMs ?? Math.min(timeoutMs, 5000)),
+        new CertificationThrottledError(),
+      );
+
+      const response = await withDeadline(
+        httpClient.get(`/campaigns/${encodeURIComponent(id)}/commission-groups`, {
+          params: { ...commonParams },
+          timeout: timeoutMs,
+        }),
+        timeoutMs,
+        new CertificationTimeoutError(),
+      );
+
+      const { groups, envelopeKind } = extractCommissionGroupRows(response?.data);
+      return { rows: groups.slice(0, 1), envelopeKind };
     },
 
     /**
