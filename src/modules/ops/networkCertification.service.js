@@ -33,8 +33,14 @@ const READ_ONLY_METHODS = new Set(["GET", "POST_READONLY"]);
  */
 const SOURCE_BUDGET_MS = Number(process.env.CERTIFICATION_SOURCE_BUDGET_MS || 20000);
 
-/** Certification never makes more than this many supplier requests for one source object. */
+/**
+ * Certification never makes more than this many supplier requests for one source object.
+ *
+ * `products` is the one exception at 2, and only as a dependent chain: sample one feed, then sample
+ * one item from THAT feed. The second request is derived entirely from the first response.
+ */
 export const MAX_SUPPLIER_REQUESTS_PER_SOURCE = 1;
+export const MAX_SUPPLIER_REQUESTS_PRODUCTS = 2;
 
 /**
  * Wall-clock ceiling for the whole run.
@@ -59,7 +65,12 @@ const OPTIMISE_PROBES = Object.freeze({
   conversions: { method: "GET", endpointKey: "GET /conversions" },
   payment_overview: { method: "GET", endpointKey: "GET /payments" },
   invoices: { method: "GET", endpointKey: "GET /invoices" },
-  products: { method: "GET", endpointKey: "GET /product-feeds/" },
+  products: {
+    method: "GET",
+    endpointKey: "GET /product-feeds/",
+    // Emits two result rows so feed metadata and item fields are never mixed into one dictionary.
+    emits: ["product_feeds", "product_items"],
+  },
   reporting: { method: "POST_READONLY", endpointKey: "POST /reporting/", unsupportedForSampling: true },
   invoiceReporting: { method: "POST_READONLY", endpointKey: "POST /reporting/ (invoiceDate)", unsupportedForSampling: true },
   commission_groups: {
@@ -103,6 +114,24 @@ function defaultDateWindow(days = 7) {
   const from = new Date(to.getTime() - days * 86400000);
   const iso = (d) => d.toISOString().slice(0, 10);
   return { startDate: iso(from), endDate: iso(to), dateFrom: iso(from), dateTo: iso(to) };
+}
+
+/**
+ * Whether a probe failure was the item sampler reporting that no bounded sample exists.
+ * A distinct outcome from a supplier error: nothing went wrong, the feed simply cannot be sampled
+ * one record at a time within the byte window.
+ */
+const NOT_BOUNDED_NOTES = Object.freeze({
+  NO_FEED_URL: "The sampled feed carries no feed URL, so there is nothing to take an item sample from.",
+  DISALLOWED_HOST: "The sampled feed's URL is not on the allowed product-feed host, so it was not fetched.",
+  NO_COMPLETE_RECORD_IN_WINDOW:
+    "No complete product record fitted in the bounded byte window. Certification does not widen the window, because that would begin downloading the feed.",
+  UNRECOGNISED_FEED_FORMAT: "The bounded window held no recognisable CSV or XML product record.",
+  UNKNOWN: "A bounded single product-item sample could not be taken.",
+});
+
+function notBoundedReason(error) {
+  return error?.productItemSampleNotBounded ? String(error.reason || "UNKNOWN") : null;
 }
 
 function asRows(result) {
@@ -150,6 +179,103 @@ export class NetworkCertificationService {
       agencyId: credentials.agencyId,
       contactId: credentials.contactId,
     });
+  }
+
+  /**
+   * The products chain: one feed, then one item from that feed.
+   *
+   * Two supplier requests, no more. The second is built by the adapter from the first response and
+   * a host allowlist, so nothing a caller sends can influence which URL is fetched — the request
+   * body cannot name a feed, a feed URL or a path.
+   *
+   * The two are reported as SEPARATE rows. Feed metadata (feedId, itemCount, lastImportedDate) and
+   * product item fields (sku, price, availability) are different vocabularies, and merging them
+   * into one dictionary would make the result unreadable as certification of either.
+   */
+  async certifyProductChain({ adapter, key, probe, compareRaw, budgetLeft }) {
+    const rows = [];
+    const base = { network: key, httpMethod: "GET" };
+    const timeoutFor = () => Math.max(1000, Math.min(SOURCE_BUDGET_MS / 2, budgetLeft()));
+
+    // Request 1 of 2 — one feed row.
+    let feedRow = null;
+    try {
+      const sample = asRows(
+        await adapter.fetchCertificationSample("products", { timeoutMs: timeoutFor() }),
+      ).slice(0, 1);
+      feedRow = sample[0] ?? null;
+      const fieldPaths = summarisePayloads(sample);
+      const entry = {
+        ...base,
+        sourceObject: "product_feeds",
+        endpointKey: probe.endpointKey,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: sample.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+      };
+      if (compareRaw) {
+        const rawPaths = await this.rawPathsFor({ networkSource: key, sourceObject: "products" }).catch(() => []);
+        entry.rawComparison = comparePathSets(fieldPaths.map((f) => f.path), rawPaths);
+      }
+      rows.push(entry);
+    } catch (error) {
+      rows.push({
+        ...base,
+        sourceObject: "product_feeds",
+        endpointKey: probe.endpointKey,
+        ok: false,
+        statusCategory: statusCategory(error),
+        sampleCount: 0,
+        fieldPaths: [],
+      });
+    }
+
+    const itemBase = {
+      ...base,
+      sourceObject: "product_items",
+      endpointKey: "GET {feedUrl} (bounded byte window)",
+      sampleCount: 0,
+      fieldPaths: [],
+      ok: false,
+    };
+
+    if (!feedRow) {
+      rows.push({ ...itemBase, statusCategory: "SKIPPED_NO_FEED_SAMPLE" });
+      return rows;
+    }
+    if (budgetLeft() <= 0) {
+      rows.push({ ...itemBase, statusCategory: "RUN_BUDGET_EXHAUSTED" });
+      return rows;
+    }
+
+    // Request 2 of 2 — one item from that feed, bounded by bytes rather than by a row limit,
+    // because Optimise exposes no product-item endpoint and the feed URL takes no limit parameter.
+    try {
+      const sample = await adapter.fetchCertificationFeedItemSample(feedRow, { timeoutMs: timeoutFor() });
+      const itemRows = asRows(sample?.rows).slice(0, 1);
+      const fieldPaths = summarisePayloads(itemRows);
+      rows.push({
+        ...itemBase,
+        ok: true,
+        statusCategory: "OK",
+        feedFormat: sample?.feedFormat ?? null,
+        sampleCount: itemRows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+        note: "One record parsed from a bounded byte window; the feed was never downloaded in full.",
+      });
+    } catch (error) {
+      const reason = notBoundedReason(error);
+      rows.push({
+        ...itemBase,
+        statusCategory: reason ? "PRODUCT_ITEM_SAMPLE_NOT_BOUNDED" : statusCategory(error),
+        ...(reason ? { reason, note: NOT_BOUNDED_NOTES[reason] ?? NOT_BOUNDED_NOTES.UNKNOWN } : {}),
+      });
+    }
+
+    return rows;
   }
 
   /**
@@ -263,6 +389,14 @@ export class NetworkCertificationService {
           sampleCount: 0,
           fieldPaths: [],
         });
+        continue;
+      }
+
+      if (probe.emits) {
+        // The one dependent chain: at most two requests, the second derived from the first.
+        for (const row of await this.certifyProductChain({ adapter, key, probe, compareRaw, budgetLeft })) {
+          results.push(row);
+        }
         continue;
       }
 

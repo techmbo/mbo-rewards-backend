@@ -18,6 +18,8 @@ const routesSource = (await import("node:fs")).readFileSync("src/routes/index.js
 const adapterSource = (await import("node:fs")).readFileSync("src/adapters/optimise.adapter.js", "utf8");
 const { CertificationThrottledError, CertificationTimeoutError, createOptimiseAdapter, listCertificationSamples } =
   await import("../src/adapters/optimise.adapter.js");
+const { ALLOWED_FEED_HOSTS, FeedItemSampleNotBoundedError, buildBoundedFeedUrl, parseFirstFeedRecord } =
+  await import("../src/adapters/optimiseFeedSample.js");
 
 /** A supplier payload carrying every kind of value the probe must never echo. */
 const SECRET_VALUES = [
@@ -846,5 +848,263 @@ describe("run budget — the route always returns", () => {
       runBudget + sourceBudget < 300000,
       `worst case ${runBudget + sourceBudget}ms must stay under the 300s runtime limit`,
     );
+  });
+});
+
+/**
+ * Products is the only two-step chain in certification. These tests hold it to the same bound as
+ * every single-step probe: a fixed number of requests, no pagination, no retry, no caller
+ * influence over what is fetched, and no supplier value in the output.
+ */
+describe("product certification — bounded two-step chain", () => {
+  const FEED_ROW = Object.freeze({
+    feedId: 8812,
+    feedName: "Ubuy SG Catalog",
+    feedUrl: "https://product-feeds.optimisemedia.com/feeds/8812?AID=999&Format=xml",
+    itemCount: 412553,
+    lastImportedDate: "2026-09-11T02:00:00Z",
+  });
+
+  const CSV_BODY =
+    "ProductSKU,ProductName,ProductPrice,StockAvailability,Brand\r\n" +
+    '"SKU-1","Wireless Kettle",49.99,"in stock","Ubuy"\r\n' +
+    '"SKU-2","Toaster",29.50,"in stock","Ubuy"\r\n';
+
+  /**
+   * Counts every outbound call of either kind, so the chain's total is checkable, and returns what
+   * the real adapter returns — the item sample goes through the real parser, not a hand-built shape.
+   */
+  function chainAdapter({ itemBody = CSV_BODY, itemError = null, feedRow = FEED_ROW } = {}) {
+    const calls = [];
+    return {
+      calls,
+      fetchCertificationSample: async (sourceObject) => {
+        calls.push({ kind: "api", sourceObject });
+        return feedRow ? [feedRow] : [];
+      },
+      fetchCertificationFeedItemSample: async (row) => {
+        calls.push({ kind: "feed", url: row?.feedUrl ?? null });
+        if (itemError) throw itemError;
+        const parsed = parseFirstFeedRecord(itemBody, { truncated: false });
+        return { rows: [parsed.record], feedFormat: parsed.feedFormat, truncated: false };
+      },
+    };
+  }
+
+  function serviceFor(adapter) {
+    return new NetworkCertificationService({
+      prisma: { rawPayload: { findMany: async () => [] } },
+      adapterFactory: () => adapter,
+      credentialResolver: async () => ({ apiKey: SECRET_VALUES[0], agencyId: "AG1", contactId: "C1" }),
+    });
+  }
+
+  it("1 — makes at most two supplier requests", async () => {
+    const adapter = chainAdapter();
+    await serviceFor(adapter).certify("optimise", { sourceObjects: ["products"], compareRaw: false });
+    assert.equal(adapter.calls.length, 2, JSON.stringify(adapter.calls));
+    assert.deepEqual(adapter.calls.map((c) => c.kind), ["api", "feed"]);
+  });
+
+  it("2 — the first request samples exactly one feed", async () => {
+    const adapter = chainAdapter();
+    const out = await serviceFor(adapter).certify("optimise", { sourceObjects: ["products"], compareRaw: false });
+    const feeds = out.results.find((r) => r.sourceObject === "product_feeds");
+    assert.equal(feeds.sampleCount, 1);
+    assert.equal(adapter.calls.filter((c) => c.kind === "api").length, 1);
+  });
+
+  it("3 — a caller cannot inject a feed URL, id or path", async () => {
+    const hostile = {
+      sourceObjects: ["products"],
+      feedUrl: "https://attacker.test/all.csv",
+      feedId: 1,
+      path: "/etc/passwd",
+    };
+    assert.throws(() => parseRunBody(hostile), /Unsupported field\(s\)/);
+    // And the accepted body has no field that could name one.
+    assert.deepEqual(Object.keys(parseRunBody({ sourceObjects: ["products"] })).sort(), [
+      "accountLabel",
+      "compareRaw",
+      "region",
+      "sourceObjects",
+    ]);
+  });
+
+  it("4 — the second request derives only from the sampled feed", async () => {
+    const adapter = chainAdapter();
+    await serviceFor(adapter).certify("optimise", { sourceObjects: ["products"], compareRaw: false });
+    const feedCall = adapter.calls.find((c) => c.kind === "feed");
+    assert.equal(feedCall.url, FEED_ROW.feedUrl, "the URL came from the sampled feed row");
+  });
+
+  it("4b — a feed URL off the allowed host is refused, not fetched", () => {
+    assert.throws(
+      () => buildBoundedFeedUrl({ feedUrl: "https://attacker.test/all.csv" }, { aid: "C1" }),
+      (error) => {
+        assert.equal(error instanceof FeedItemSampleNotBoundedError, true);
+        assert.equal(error.reason, "DISALLOWED_HOST");
+        return true;
+      },
+    );
+    assert.deepEqual(ALLOWED_FEED_HOSTS, ["product-feeds.optimisemedia.com"]);
+  });
+
+  it("4c — http and redirect-shaped hosts are refused too", () => {
+    for (const url of [
+      "http://product-feeds.optimisemedia.com/feeds/1",
+      "https://product-feeds.optimisemedia.com.attacker.test/feeds/1",
+      "https://attacker.test/?x=product-feeds.optimisemedia.com",
+    ]) {
+      assert.throws(() => buildBoundedFeedUrl({ feedUrl: url }, { aid: "C1" }), /bounded single product-item/i);
+    }
+  });
+
+  it("5 — no fetch-all or full-feed path is reachable from the chain", () => {
+    const adapterStart = adapterSource.indexOf("async fetchCertificationFeedItemSample");
+    const body = adapterSource.slice(adapterStart, adapterSource.indexOf("\n    },", adapterStart));
+    assert.ok(!body.includes("fetchProductFeedItems"), "must not call the sync feed downloader");
+    assert.ok(!body.includes("fetchOffsetPaginated"), "must not paginate");
+    assert.ok(!body.includes("fetchAll"), "must not use a fetch-all helper");
+    assert.match(body, /maxBytes/, "the request is byte-bounded");
+    assert.match(body, /Range/, "a byte range is requested");
+  });
+
+  it("6 — the chain does not paginate: one URL, no candidate loop", () => {
+    const adapterStart = adapterSource.indexOf("async fetchCertificationFeedItemSample");
+    const body = adapterSource.slice(adapterStart, adapterSource.indexOf("\n    },", adapterStart));
+    assert.ok(!/for \(/.test(body), "no loop over candidate URLs or pages");
+    assert.ok(!/offset|cursor|page/i.test(body), "no pagination parameter");
+  });
+
+  it("7 — the chain does not retry", () => {
+    const adapterStart = adapterSource.indexOf("async fetchCertificationFeedItemSample");
+    const body = adapterSource.slice(adapterStart, adapterSource.indexOf("\n    },", adapterStart));
+    assert.ok(!body.includes("requestWithRetry"), "no retry wrapper");
+    assert.ok(!body.includes("requestWithOptimiseLimits"), "no retrying request path");
+  });
+
+  it("8 — no raw supplier value appears in the response", async () => {
+    const adapter = chainAdapter();
+    const out = await serviceFor(adapter).certify("optimise", { sourceObjects: ["products"], compareRaw: false });
+    const text = serialise(out);
+    for (const value of [
+      "Wireless Kettle",
+      "SKU-1",
+      "49.99",
+      "Ubuy SG Catalog",
+      "412553",
+      "in stock",
+      "AID=999",
+      SECRET_VALUES[0],
+    ]) {
+      assert.ok(!text.includes(value), `value leaked: ${value}`);
+    }
+  });
+
+  it("8b — but the supplier's own FIELD NAMES are reported, which is the point", async () => {
+    const adapter = chainAdapter();
+    const out = await serviceFor(adapter).certify("optimise", { sourceObjects: ["products"], compareRaw: false });
+    const items = out.results.find((r) => r.sourceObject === "product_items");
+    const paths = items.fieldPaths.map((f) => f.path).sort();
+    assert.deepEqual(paths, ["Brand", "ProductName", "ProductPrice", "ProductSKU", "StockAvailability"]);
+  });
+
+  it("9 — the item request is still bounded by a timeout", () => {
+    const adapterStart = adapterSource.indexOf("async fetchCertificationFeedItemSample");
+    const body = adapterSource.slice(adapterStart, adapterSource.indexOf("\n    },", adapterStart));
+    assert.match(body, /timeoutMs/, "a timeout is passed");
+    assert.match(body, /CertificationTimeoutError/, "and enforced by the probe's own deadline");
+  });
+
+  it("10 — production product sync is unchanged", async () => {
+    const start = adapterSource.indexOf("async fetchProductFeedItems");
+    const body = adapterSource.slice(start, adapterSource.indexOf("async fetchAll", start));
+    assert.match(body, /candidates\.slice\(0, 3\)/, "sync still tries its candidate URLs");
+    assert.match(body, /parseOptimiseFeedCsv\(text, maxRows\)/, "sync still parses up to maxRows");
+    assert.match(body, /maxBytes = Math\.min\(8_000_000/, "sync keeps its own byte ceiling");
+    // The sync job still calls the sync downloader, not the sampler.
+    const jobSource = (await import("node:fs")).readFileSync("src/jobs/optimiseProductFeedSync.js", "utf8");
+    assert.match(jobSource, /adapter\.fetchProductFeedItems\(/);
+    assert.ok(!jobSource.includes("fetchCertificationFeedItemSample"));
+  });
+
+  it("reports the two vocabularies as separate rows, never merged", async () => {
+    const adapter = chainAdapter();
+    const out = await serviceFor(adapter).certify("optimise", { sourceObjects: ["products"], compareRaw: false });
+    const names = out.results.map((r) => r.sourceObject);
+    assert.deepEqual(names, ["product_feeds", "product_items"]);
+    const feedPaths = out.results[0].fieldPaths.map((f) => f.path);
+    const itemPaths = out.results[1].fieldPaths.map((f) => f.path);
+    assert.ok(feedPaths.includes("feedId"), "feed row carries feed metadata");
+    assert.equal(itemPaths.includes("feedId"), false, "item row must not carry feed metadata");
+    assert.equal(feedPaths.includes("ProductSKU"), false, "feed row must not carry item fields");
+  });
+
+  it("reports PRODUCT_ITEM_SAMPLE_NOT_BOUNDED rather than widening the window", async () => {
+    const error = new FeedItemSampleNotBoundedError("NO_COMPLETE_RECORD_IN_WINDOW");
+    const adapter = chainAdapter({ itemError: error });
+    const out = await serviceFor(adapter).certify("optimise", { sourceObjects: ["products"], compareRaw: false });
+    const items = out.results.find((r) => r.sourceObject === "product_items");
+    assert.equal(items.statusCategory, "PRODUCT_ITEM_SAMPLE_NOT_BOUNDED");
+    assert.equal(items.reason, "NO_COMPLETE_RECORD_IN_WINDOW");
+    assert.equal(items.sampleCount, 0);
+    assert.deepEqual(items.fieldPaths, []);
+    assert.match(items.note, /does not widen the window/i);
+  });
+
+  it("skips the item step when no feed was sampled", async () => {
+    const adapter = chainAdapter({ feedRow: null });
+    const out = await serviceFor(adapter).certify("optimise", { sourceObjects: ["products"], compareRaw: false });
+    const items = out.results.find((r) => r.sourceObject === "product_items");
+    assert.equal(items.statusCategory, "SKIPPED_NO_FEED_SAMPLE");
+    assert.equal(adapter.calls.filter((c) => c.kind === "feed").length, 0, "no second request");
+  });
+});
+
+describe("bounded feed parsing — shape preserving and truncation safe", () => {
+  it("drops a partial trailing CSV line rather than under-reporting fields", () => {
+    const body = "sku,name,price\r\nA1,Kettle,49.99\r\nA2,Toas";
+    const whole = parseFirstFeedRecord(body, { truncated: true });
+    assert.deepEqual(Object.keys(whole.record), ["sku", "name", "price"]);
+    assert.equal(whole.feedFormat, "CSV");
+  });
+
+  it("reports the feed's own headers, not our canonical product names", () => {
+    const body = "merchant_sku,titel,prijs\r\nA1,Waterkoker,49.99\r\n";
+    const { record } = parseFirstFeedRecord(body, { truncated: false });
+    assert.deepEqual(Object.keys(record), ["merchant_sku", "titel", "prijs"]);
+  });
+
+  it("reports the feed's own XML tags, including namespace prefixes", () => {
+    const body =
+      '<?xml version="1.0"?><rss><channel><item><g:id>A1</g:id><title>Kettle</title>' +
+      "<g:price>49.99 SGD</g:price></item><item><g:id>A2</g:id></item></channel></rss>";
+    const { record, feedFormat } = parseFirstFeedRecord(body, { truncated: false });
+    assert.equal(feedFormat, "XML");
+    assert.deepEqual(Object.keys(record).sort(), ["g:id", "g:price", "title"]);
+  });
+
+  it("ignores an XML record cut off by the byte window", () => {
+    const body = '<?xml version="1.0"?><rss><channel><item><g:id>A1</g:id><title>Ket';
+    assert.throws(() => parseFirstFeedRecord(body, { truncated: true }), /bounded single product-item/i);
+  });
+
+  it("refuses a header-only window instead of inventing a record", () => {
+    assert.throws(
+      () => parseFirstFeedRecord("sku,name,price\r\n", { truncated: true }),
+      (error) => {
+        assert.equal(error.reason, "NO_COMPLETE_RECORD_IN_WINDOW");
+        return true;
+      },
+    );
+  });
+
+  it("never copies a parsed value into the reported dictionary", () => {
+    const { record } = parseFirstFeedRecord("sku,name\r\nA1,Secret Kettle\r\n", { truncated: false });
+    const text = serialise(summarisePayloads([record]));
+    assert.ok(!text.includes("Secret Kettle"));
+    assert.ok(!text.includes("A1"));
+    assert.ok(text.includes("name"), "the field name is still reported");
   });
 });

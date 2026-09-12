@@ -1,5 +1,6 @@
 import { createHttpClient, requestWithRetry } from "../core/httpClient.js";
 import { createRateLimiter } from "../core/rateLimiter.js";
+import { buildBoundedFeedUrl, parseFirstFeedRecord } from "./optimiseFeedSample.js";
 
 const OPTIMISE_MIN_INTERVAL_MS = Number(process.env.OPTIMISE_MIN_INTERVAL_MS || 12500);
 const OPTIMISE_PAGE_LIMIT = Number(process.env.OPTIMISE_PAGE_LIMIT || 100);
@@ -212,6 +213,13 @@ async function requestWithOptimiseLimits(fn) {
  */
 export const CERTIFICATION_SAMPLE_TIMEOUT_MS = Number(process.env.CERTIFICATION_SAMPLE_TIMEOUT_MS || 10000);
 
+/**
+ * Byte window for a product-item sample. Large enough that a CSV header plus one row, or one XML
+ * <item> block, comfortably fits; far too small to be a feed download. A feed whose single record
+ * exceeds this is reported as unbounded rather than fetched more generously.
+ */
+export const CERTIFICATION_FEED_SAMPLE_BYTES = Number(process.env.CERTIFICATION_FEED_SAMPLE_BYTES || 65536);
+
 const SINGLE_ROW = { offset: 0, limit: 1 };
 
 const CERTIFICATION_SAMPLES = Object.freeze({
@@ -377,13 +385,13 @@ async function fetchOffsetPaginated(httpClient, endpoint, baseParams) {
 }
 
 
-async function fetchFeedTextLimited(url, { timeoutMs = 25000, maxBytes = 2_000_000 } = {}) {
+async function fetchFeedTextLimited(url, { timeoutMs = 25000, maxBytes = 2_000_000, headers = {} } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       signal: controller.signal,
-      headers: { Accept: "text/csv,application/xml,text/plain,*/*" },
+      headers: { Accept: "text/csv,application/xml,text/plain,*/*", ...headers },
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
@@ -498,6 +506,43 @@ export function createOptimiseAdapter({
 
       // At most one row is summarised, whatever the supplier chose to return.
       return extractRows(response.data).slice(0, 1);
+    },
+
+    /**
+     * One bounded product-item sample, derived from an already-sampled feed row.
+     *
+     * This is the second and last request of the products chain. It cannot download a catalog:
+     * `fetchFeedTextLimited` streams, and at CERTIFICATION_FEED_SAMPLE_BYTES it cancels the reader
+     * and aborts the request, so the transfer stops at the window whatever the feed's real size is.
+     * A Range header asks the CDN to send only that window in the first place — an optimisation, not
+     * the guarantee, since a CDN that ignores Range still hits the streaming cap.
+     *
+     * Exactly one URL is tried. The sync path walks up to three candidate URLs on failure; here a
+     * failure is a result to report, not something to retry against another host.
+     */
+    async fetchCertificationFeedItemSample(feedRow, ctx = {}) {
+      const url = buildBoundedFeedUrl(feedRow, { aid: contactId, format: "csv" });
+      const maxBytes = Number(ctx.maxBytes || CERTIFICATION_FEED_SAMPLE_BYTES);
+      const timeoutMs = Number(ctx.timeoutMs || CERTIFICATION_SAMPLE_TIMEOUT_MS);
+
+      await withDeadline(
+        certLimiter.acquireSlot(),
+        Number(ctx.throttleBudgetMs ?? Math.min(timeoutMs, 5000)),
+        new CertificationThrottledError(),
+      );
+
+      const { text, truncated } = await withDeadline(
+        fetchFeedTextLimited(url, {
+          timeoutMs,
+          maxBytes,
+          headers: { Range: `bytes=0-${maxBytes - 1}` },
+        }),
+        timeoutMs,
+        new CertificationTimeoutError(),
+      );
+
+      const { record, feedFormat } = parseFirstFeedRecord(text, { truncated });
+      return { rows: [record], feedFormat, truncated };
     },
     fetchCampaigns(params = {}) {
       return fetchOffsetPaginated(httpClient, "/campaigns", {
