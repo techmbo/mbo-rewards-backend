@@ -5,6 +5,22 @@ const OPTIMISE_MIN_INTERVAL_MS = Number(process.env.OPTIMISE_MIN_INTERVAL_MS || 
 const OPTIMISE_PAGE_LIMIT = Number(process.env.OPTIMISE_PAGE_LIMIT || 100);
 const optimiseRateLimiter = createRateLimiter(OPTIMISE_MIN_INTERVAL_MS);
 
+/**
+ * Certification paces itself on its own limiter, NOT the sync one above.
+ *
+ * The 12.5s sync interval exists to pace fetchOffsetPaginated, which issues hundreds of requests in
+ * a run. Certification issues one request per source object, at most once per five minutes per
+ * network+region+account (enforced at the route). Queueing it behind the sync interval is what
+ * makes a bounded route budget unsatisfiable — the second source object would wait 12.5s before its
+ * request even started — while buying no real protection: this limiter is per-process, so it never
+ * constrained concurrent serverless instances in the first place.
+ *
+ * A separate limiter keeps the property that matters: probes are sequential and spaced, never a
+ * burst against the supplier.
+ */
+const CERTIFICATION_MIN_INTERVAL_MS = Number(process.env.CERTIFICATION_MIN_INTERVAL_MS || 1000);
+const certificationRateLimiter = createRateLimiter(CERTIFICATION_MIN_INTERVAL_MS);
+
 const DEFAULT_REPORTING_MEASURES = [
   "totalConversions",
   "validatedConversions",
@@ -179,6 +195,86 @@ async function requestWithOptimiseLimits(fn) {
   }
 }
 
+/**
+ * Certification sampling — deliberately separate from the sync fetchers above.
+ *
+ * The sync path is built to be exhaustive and patient: fetchOffsetPaginated loops until a short
+ * page arrives, requestWithOptimiseLimits queues on a 12.5s minimum interval and retries up to six
+ * times with backoff. That is correct for a nightly sync and catastrophic for a probe.
+ *
+ * Worse, asking the sync path for a small sample makes it behave at its worst. Its termination
+ * test is `pageRows.length < limit`, so limit=1 never terminates on a full page: it walks the whole
+ * collection one row per request, each 12.5s apart. That is what produced the 300s runtime timeout.
+ *
+ * This path therefore does not reuse any of it: one HTTP request, offset 0, limit 1, a hard
+ * per-request timeout, and no retry. The endpoint is chosen from this table by source-object name,
+ * so no caller can supply a path, query or body.
+ */
+export const CERTIFICATION_SAMPLE_TIMEOUT_MS = Number(process.env.CERTIFICATION_SAMPLE_TIMEOUT_MS || 10000);
+
+const SINGLE_ROW = { offset: 0, limit: 1 };
+
+const CERTIFICATION_SAMPLES = Object.freeze({
+  campaigns: { method: "GET", path: () => "/campaigns", params: () => ({ ...SINGLE_ROW }) },
+  voucher_codes: { method: "GET", path: () => "/vouchercodes", params: () => ({ ...SINGLE_ROW }) },
+  conversions: { method: "GET", path: () => "/conversions", params: (ctx) => ({ ...SINGLE_ROW, ...ctx.dateWindow }) },
+  payment_overview: { method: "GET", path: () => "/payments", params: (ctx) => ({ ...SINGLE_ROW, ...ctx.dateWindow }) },
+  invoices: { method: "GET", path: () => "/invoices", params: (ctx) => ({ ...SINGLE_ROW, ...ctx.dateWindow }) },
+  products: { method: "GET", path: () => "/product-feeds/", params: () => ({ ...SINGLE_ROW }) },
+  commission_groups: {
+    method: "GET",
+    needs: "campaignId",
+    path: (ctx) => `/campaigns/${encodeURIComponent(ctx.campaignId)}/commission-groups`,
+    params: () => ({}),
+  },
+  campaign_detail: {
+    method: "GET",
+    needs: "campaignId",
+    path: (ctx) => `/campaigns/${encodeURIComponent(ctx.campaignId)}`,
+    params: () => ({}),
+  },
+});
+
+export function listCertificationSamples() {
+  return Object.keys(CERTIFICATION_SAMPLES);
+}
+
+/** Raised when the probe's own budget expires, so the caller can report a controlled category. */
+export class CertificationTimeoutError extends Error {
+  constructor(message = "certification sample timed out") {
+    super(message);
+    this.name = "CertificationTimeoutError";
+    this.certificationTimeout = true;
+  }
+}
+
+/** Raised when the certification throttle cannot admit the request inside the probe budget. */
+export class CertificationThrottledError extends Error {
+  constructor(message = "certification sample could not be scheduled within budget") {
+    super(message);
+    this.name = "CertificationThrottledError";
+    this.certificationThrottled = true;
+  }
+}
+
+/**
+ * Rejects with `error` if `promise` has not settled within `ms`.
+ *
+ * The losing promise is abandoned, not cancelled — neither a queued throttle slot nor an in-flight
+ * axios request is retracted. That is acceptable here because the deadline only bounds what the
+ * ROUTE waits for: an abandoned slot belongs to the certification limiter alone, and an abandoned
+ * request carries its own axios timeout. Its rejection is swallowed so a late supplier failure
+ * cannot surface as an unhandled rejection after the probe has already reported.
+ */
+function withDeadline(promise, ms, error) {
+  let timer;
+  Promise.resolve(promise).catch(() => {});
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(error), ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
 const COMMISSION_GROUP_ARRAY_KEYS = [
   "response",
   "data",
@@ -328,6 +424,7 @@ export function createOptimiseAdapter({
   agencyId,
   contactId,
   httpClient: injectedHttpClient = null,
+  certificationRateLimiter: injectedCertificationLimiter = null,
 }) {
   if (!agencyId || !contactId) {
     throw new Error("Optimise adapter requires agencyId and contactId");
@@ -344,6 +441,8 @@ export function createOptimiseAdapter({
         "x-contact-id": String(contactId),
       },
     });
+
+  const certLimiter = injectedCertificationLimiter ?? certificationRateLimiter;
 
   const commonParams = { agencyId, contactId };
 
@@ -364,6 +463,41 @@ export function createOptimiseAdapter({
         ],
         pagination: "page",
       };
+    },
+    /**
+     * One supplier request for certification. Never paginates, never retries, always bounded.
+     *
+     * The throttle is respected but not waited on indefinitely: if a slot cannot be obtained
+     * inside the budget the request is not sent at all and the caller is told it was throttled.
+     */
+    async fetchCertificationSample(sourceObject, ctx = {}) {
+      const spec = CERTIFICATION_SAMPLES[sourceObject];
+      if (!spec) throw new Error(`No certification sample is defined for "${sourceObject}"`);
+      if (spec.needs === "campaignId" && !ctx.campaignId) {
+        throw new Error(`Certification sample "${sourceObject}" requires a campaign id`);
+      }
+
+      const timeoutMs = Number(ctx.timeoutMs || CERTIFICATION_SAMPLE_TIMEOUT_MS);
+      const throttleBudgetMs = Number(ctx.throttleBudgetMs ?? Math.min(timeoutMs, 5000));
+
+      // Pace against other probes, but never queue behind them for minutes.
+      await withDeadline(
+        certLimiter.acquireSlot(),
+        throttleBudgetMs,
+        new CertificationThrottledError(),
+      );
+
+      const response = await withDeadline(
+        httpClient.get(spec.path(ctx), {
+          params: { ...commonParams, ...spec.params(ctx) },
+          timeout: timeoutMs,
+        }),
+        timeoutMs,
+        new CertificationTimeoutError(),
+      );
+
+      // At most one row is summarised, whatever the supplier chose to return.
+      return extractRows(response.data).slice(0, 1);
     },
     fetchCampaigns(params = {}) {
       return fetchOffsetPaginated(httpClient, "/campaigns", {

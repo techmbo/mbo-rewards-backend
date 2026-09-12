@@ -27,37 +27,47 @@ import { comparePathSets, summarisePayloads } from "./payloadShape.js";
 const READ_ONLY_METHODS = new Set(["GET", "POST_READONLY"]);
 
 /**
+ * Wall-clock ceiling for one source object, covering the throttle wait and the request itself.
+ * Well inside any serverless runtime limit, so the probe reports its own failure rather than
+ * being killed mid-flight with nothing to show.
+ */
+const SOURCE_BUDGET_MS = Number(process.env.CERTIFICATION_SOURCE_BUDGET_MS || 20000);
+
+/** Certification never makes more than this many supplier requests for one source object. */
+export const MAX_SUPPLIER_REQUESTS_PER_SOURCE = 1;
+
+/**
+ * Wall-clock ceiling for the whole run.
+ *
+ * Per-source budgets alone bound each request but not their sum: a sweep of every source object
+ * could still add up towards the runtime limit and be killed with nothing to show. Once this budget
+ * is spent the remaining source objects are REPORTED as unattempted rather than tried, so the route
+ * always returns a result it chose to return.
+ */
+const RUN_BUDGET_MS = Number(process.env.CERTIFICATION_RUN_BUDGET_MS || 120000);
+
+/**
  * Optimise probe registry.
  *
- * `minimal` is the smallest request the endpoint accepts. Optimise paginates by offset/limit, so
- * limit 1 is a single row; the adapter's paginator would otherwise walk the whole collection, which
- * is why these call the underlying client directly through a one-page adapter wrapper.
+ * Each entry names a source object and the endpoint it samples; the call itself goes through the
+ * adapter's `fetchCertificationSample`, which issues exactly one bounded request. Nothing here
+ * reaches the sync fetchers, which paginate to exhaustion and retry for minutes.
  */
 const OPTIMISE_PROBES = Object.freeze({
-  campaigns: { method: "GET", endpointKey: "GET /campaigns", call: (a) => a.fetchCampaigns({ limit: 1 }) },
-  voucher_codes: { method: "GET", endpointKey: "GET /vouchercodes", call: (a) => a.fetchVoucherCodes({ limit: 1 }) },
-  conversions: { method: "GET", endpointKey: "GET /conversions", call: (a, ctx) => a.fetchConversions({ limit: 1, ...ctx.dateWindow }) },
-  payment_overview: { method: "GET", endpointKey: "GET /payments", call: (a, ctx) => a.fetchPayments({ limit: 1, ...ctx.dateWindow }) },
-  invoices: { method: "GET", endpointKey: "GET /invoices", call: (a, ctx) => a.fetchInvoices({ limit: 1, ...ctx.dateWindow }) },
-  products: { method: "GET", endpointKey: "GET /product-feeds/", call: (a) => a.fetchProductFeeds({ limit: 1 }) },
-  // POST, but a reporting query: it returns aggregates and changes nothing. The body is built by
-  // the adapter from a fixed measure/dimension list, so no caller-supplied query reaches Optimise.
-  reporting: { method: "POST_READONLY", endpointKey: "POST /reporting/", call: (a, ctx) => a.fetchReporting({ ...ctx.dateWindow }) },
-  invoiceReporting: { method: "POST_READONLY", endpointKey: "POST /reporting/ (invoiceDate)", call: (a, ctx) => a.fetchInvoiceReporting({ ...ctx.dateWindow }) },
-  // Needs a campaign id, taken from the campaigns probe rather than from the caller.
+  campaigns: { method: "GET", endpointKey: "GET /campaigns" },
+  voucher_codes: { method: "GET", endpointKey: "GET /vouchercodes" },
+  conversions: { method: "GET", endpointKey: "GET /conversions" },
+  payment_overview: { method: "GET", endpointKey: "GET /payments" },
+  invoices: { method: "GET", endpointKey: "GET /invoices" },
+  products: { method: "GET", endpointKey: "GET /product-feeds/" },
+  reporting: { method: "POST_READONLY", endpointKey: "POST /reporting/", unsupportedForSampling: true },
+  invoiceReporting: { method: "POST_READONLY", endpointKey: "POST /reporting/ (invoiceDate)", unsupportedForSampling: true },
   commission_groups: {
     method: "GET",
     endpointKey: "GET /campaigns/{campaignId}/commission-groups",
     needs: "campaignId",
-    call: (a, ctx) => a.fetchCommissionGroups(ctx.campaignId),
   },
-  campaign_detail: {
-    method: "GET",
-    endpointKey: "GET /campaigns/{campaignId}",
-    needs: "campaignId",
-    call: (a, ctx) => a.fetchCampaignDetail(ctx.campaignId),
-  },
-  // Declared so the probe reports it rather than silently omitting it.
+  campaign_detail: { method: "GET", endpointKey: "GET /campaigns/{campaignId}", needs: "campaignId" },
   basket_items: {
     method: "GET",
     endpointKey: "GET /conversions (basket items)",
@@ -74,6 +84,10 @@ export function listProbeSourceObjects(network) {
 
 /** HTTP status reduced to a category. The supplier's error body is never read or returned. */
 export function statusCategory(error) {
+  if (error?.certificationTimeout) return "SUPPLIER_TIMEOUT";
+  if (error?.certificationThrottled) return "SUPPLIER_RATE_LIMITED";
+  // axios reports its own timeout this way; it is the same condition seen from a lower layer.
+  if (error?.code === "ECONNABORTED" || error?.code === "ETIMEDOUT") return "SUPPLIER_TIMEOUT";
   const status = Number(error?.response?.status ?? error?.status ?? 0);
   if (!status) return "NETWORK_ERROR";
   if (status === 401 || status === 403) return "AUTH_FAILED";
@@ -156,13 +170,16 @@ export class NetworkCertificationService {
     const adapter = await this.buildOptimiseAdapter({ region, accountLabel });
     const ctx = { dateWindow: defaultDateWindow(), campaignId: null };
     const results = [];
+    const runDeadline = Date.now() + RUN_BUDGET_MS;
+    const budgetLeft = () => runDeadline - Date.now();
 
     // Campaign-scoped probes need an id. Take it from a campaigns sample rather than the caller,
-    // so the probe cannot be pointed at an arbitrary campaign.
+    // so the probe cannot be pointed at an arbitrary campaign. This is the one permitted second
+    // call in a source chain: sample a campaign, then read that campaign's dependent endpoint.
     if (requested.some((s) => probes[s]?.needs === "campaignId")) {
       try {
-        const sample = asRows(await probes.campaigns.call(adapter, ctx));
-        const first = sample[0] || {};
+        const sample = await adapter.fetchCertificationSample("campaigns", ctx);
+        const first = asRows(sample)[0] || {};
         ctx.campaignId = first.id ?? first.campaignId ?? first.campaign_id ?? null;
       } catch {
         ctx.campaignId = null;
@@ -217,8 +234,44 @@ export class NetworkCertificationService {
         continue;
       }
 
+      if (probe.unsupportedForSampling) {
+        // The reporting endpoints are POST aggregate queries with no row-limit parameter, so there
+        // is no bounded single-row sample to take. Reported rather than run unbounded.
+        results.push({
+          network: key,
+          sourceObject,
+          endpointKey: probe.endpointKey,
+          httpMethod: probe.method,
+          ok: false,
+          statusCategory: "NO_BOUNDED_SAMPLE",
+          note: "This endpoint has no row-limit parameter, so certification cannot take a bounded sample without requesting a full aggregate.",
+          sampleCount: 0,
+          fieldPaths: [],
+        });
+        continue;
+      }
+
+      if (budgetLeft() <= 0) {
+        results.push({
+          network: key,
+          sourceObject,
+          endpointKey: probe.endpointKey,
+          httpMethod: probe.method,
+          ok: false,
+          statusCategory: "RUN_BUDGET_EXHAUSTED",
+          note: "The run budget was spent before this source object was reached; probe it in a smaller batch.",
+          sampleCount: 0,
+          fieldPaths: [],
+        });
+        continue;
+      }
+
       try {
-        const rows = asRows(await probe.call(adapter, ctx)).slice(0, 1);
+        // Exactly one bounded supplier request. Never a sync fetcher.
+        const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS / 2, budgetLeft()));
+        const rows = asRows(
+          await adapter.fetchCertificationSample(sourceObject, { ...ctx, timeoutMs }),
+        ).slice(0, 1);
         const fieldPaths = summarisePayloads(rows);
         const entry = {
           network: key,

@@ -15,6 +15,9 @@ const { parseRunBody, networkCertificationCatalogHandler, networkCertificationRu
   "../src/controllers/networkCertification.controller.js"
 );
 const routesSource = (await import("node:fs")).readFileSync("src/routes/index.js", "utf8");
+const adapterSource = (await import("node:fs")).readFileSync("src/adapters/optimise.adapter.js", "utf8");
+const { CertificationThrottledError, CertificationTimeoutError, createOptimiseAdapter, listCertificationSamples } =
+  await import("../src/adapters/optimise.adapter.js");
 
 /** A supplier payload carrying every kind of value the probe must never echo. */
 const SECRET_VALUES = [
@@ -90,7 +93,7 @@ function makeServiceForRaw() {
   const service = new NetworkCertificationService({
     prisma: db,
     adapterFactory: () => ({
-      fetchCampaigns: async () => [supplierRecord()],
+      fetchCertificationSample: async () => [supplierRecord()],
     }),
     credentialResolver: async () => ({
       apiKey: SECRET_VALUES[0],
@@ -252,25 +255,47 @@ describe("probe dispatch", () => {
     return { calls, rawPayload: model("rawPayload"), marketplaceAccount: model("marketplaceAccount") };
   }
 
-  /** Records every adapter method the probe invokes, so mutations can be asserted absent. */
+  /** One bounded row per source object, as the real sampler returns. */
+  const SAMPLE_ROWS = Object.freeze({
+    campaigns: [supplierRecord()],
+    voucher_codes: [{ voucherCodeId: 1, voucherCode: "SAVE10" }],
+    conversions: [{ conversionId: 9, currency: "USD" }],
+    payment_overview: [{ paymentId: 3 }],
+    invoices: [{ invoiceId: 4 }],
+    products: [{ FeedID: 7, PID: 999 }],
+    commission_groups: [{ commission_group_id: 5 }],
+    campaign_detail: [{ id: 56577, name: "Ubuy SG" }],
+  });
+
+  /**
+   * Records every adapter method the probe invokes, so mutations can be asserted absent.
+   *
+   * The sync fetchers are present deliberately: if the service ever regressed to calling one, it
+   * would be recorded here and the read-only assertions would name it, rather than the double
+   * failing with "not a function" and hiding which call was made.
+   */
   function makeAdapter() {
     const called = [];
     const record = (name, value) => {
       called.push(name);
       return value;
     };
+    const syncFetcher = (name) => async () => record(name, []);
     return {
       called,
-      fetchCampaigns: async () => record("fetchCampaigns", [supplierRecord()]),
-      fetchVoucherCodes: async () => record("fetchVoucherCodes", [{ voucherCodeId: 1, voucherCode: "SAVE10" }]),
-      fetchConversions: async () => record("fetchConversions", [{ conversionId: 9, currency: "USD" }]),
-      fetchPayments: async () => record("fetchPayments", [{ paymentId: 3 }]),
-      fetchInvoices: async () => record("fetchInvoices", [{ invoiceId: 4 }]),
-      fetchProductFeeds: async () => record("fetchProductFeeds", [{ FeedID: 7, PID: 999 }]),
-      fetchReporting: async () => record("fetchReporting", [{ clicks: 10, campaignId: 1 }]),
-      fetchInvoiceReporting: async () => record("fetchInvoiceReporting", [{ clicks: 2 }]),
-      fetchCommissionGroups: async () => record("fetchCommissionGroups", [{ commission_group_id: 5 }]),
-      fetchCampaignDetail: async () => record("fetchCampaignDetail", { id: 56577, name: "Ubuy SG" }),
+      fetchCampaigns: syncFetcher("fetchCampaigns"),
+      fetchVoucherCodes: syncFetcher("fetchVoucherCodes"),
+      fetchConversions: syncFetcher("fetchConversions"),
+      fetchPayments: syncFetcher("fetchPayments"),
+      fetchInvoices: syncFetcher("fetchInvoices"),
+      fetchProductFeeds: syncFetcher("fetchProductFeeds"),
+      fetchReporting: syncFetcher("fetchReporting"),
+      fetchInvoiceReporting: syncFetcher("fetchInvoiceReporting"),
+      fetchCommissionGroups: syncFetcher("fetchCommissionGroups"),
+      fetchCampaignDetail: syncFetcher("fetchCampaignDetail"),
+      // The only method the service is allowed to call.
+      fetchCertificationSample: async (sourceObject) =>
+        record(`fetchCertificationSample:${sourceObject}`, SAMPLE_ROWS[sourceObject] ?? []),
     };
   }
 
@@ -306,7 +331,7 @@ describe("probe dispatch", () => {
     const { service, adapter } = makeService();
     await service.certify("optimise", { compareRaw: false });
     for (const name of adapter.called) {
-      assert.ok(/^fetch/.test(name), `non-read adapter call: ${name}`);
+      assert.ok(/^fetch[A-Za-z]*(:|$)/.test(name), `non-read adapter call: ${name}`);
       assert.ok(!/join|leave|create|update|approve|reject|upload|delete|post[A-Z]/i.test(name), name);
     }
   });
@@ -335,13 +360,17 @@ describe("probe dispatch", () => {
   it("takes the campaign id from a sample, not from the caller", async () => {
     const { service, adapter } = makeService();
     const out = await service.certify("optimise", { sourceObjects: ["commission_groups"], compareRaw: false });
-    assert.ok(adapter.called.includes("fetchCampaigns"), "campaigns sampled to obtain the id");
+    assert.ok(
+      adapter.called.includes("fetchCertificationSample:campaigns"),
+      "campaigns sampled to obtain the id",
+    );
+    assert.equal(adapter.called.includes("fetchCampaigns"), false, "never the sync fetcher");
     assert.equal(out.results[0].statusCategory, "OK");
   });
 
   it("skips campaign-scoped probes when no campaign sample is available", async () => {
     const adapter = makeAdapter();
-    adapter.fetchCampaigns = async () => [];
+    adapter.fetchCertificationSample = async () => [];
     const { service } = makeService(makeDb(), adapter);
     const out = await service.certify("optimise", { sourceObjects: ["campaign_detail"], compareRaw: false });
     assert.equal(out.results[0].statusCategory, "SKIPPED_NO_CAMPAIGN_SAMPLE");
@@ -349,7 +378,7 @@ describe("probe dispatch", () => {
 
   it("reduces a supplier failure to a status category with no error text", async () => {
     const adapter = makeAdapter();
-    adapter.fetchCampaigns = async () => {
+    adapter.fetchCertificationSample = async () => {
       const error = new Error("Invalid `prisma.x.findMany()` — apikey sk_live_51H8xQ2abcdefGHIJK rejected");
       error.response = { status: 401 };
       throw error;
@@ -563,5 +592,259 @@ describe("compareRaw gating", () => {
     const { service, db } = makeServiceForRaw();
     await service.certify("optimise", { sourceObjects: ["campaigns"] });
     assert.equal(db.calls.some((c) => c.includes("rawPayload")), false, db.calls.join(", "));
+  });
+});
+
+describe("bounded sampling — the 300s hang", () => {
+  /**
+   * Reproduces the live failure at the layer that caused it.
+   *
+   * fetchOffsetPaginated stops when `pageRows.length < limit`. With limit=1 a full page is exactly
+   * 1 row, so `1 < 1` is false and it walks the whole collection one row per request, each behind
+   * a 12.5s throttle. The sampler must not go anywhere near that code.
+   */
+  function recordingHttpClient({ rowsPerPage = 1, delayMs = 0, fail = null } = {}) {
+    const requests = [];
+    return {
+      requests,
+      get: async (path, config = {}) => {
+        requests.push({ path, params: config.params, timeout: config.timeout });
+        if (fail) throw fail;
+        if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+        return { data: Array.from({ length: rowsPerPage }, (_, i) => ({ id: i + 1, name: "Ubuy SG" })) };
+      },
+      post: async () => {
+        throw new Error("certification must never POST to a sampling endpoint");
+      },
+    };
+  }
+
+  /** Admits immediately. The interval itself is not under test here; the request shape is. */
+  const openLimiter = { acquireSlot: async () => {}, resetAfterRateLimit: () => {} };
+
+  /** Never admits, so a throttle budget can be shown to expire deterministically. */
+  const closedLimiter = { acquireSlot: () => new Promise(() => {}), resetAfterRateLimit: () => {} };
+
+  function probeAdapter(httpClient, certificationRateLimiter = openLimiter) {
+    return createOptimiseAdapter({
+      apiKey: "k",
+      agencyId: "AG1",
+      contactId: "C1",
+      httpClient,
+      certificationRateLimiter,
+    });
+  }
+
+  it("makes exactly one supplier request for campaigns", async () => {
+    const httpClient = recordingHttpClient({ rowsPerPage: 1 });
+    const rows = await probeAdapter(httpClient).fetchCertificationSample("campaigns", {});
+    assert.equal(httpClient.requests.length, 1, "one request only");
+    assert.equal(rows.length, 1);
+  });
+
+  it("uses offset 0 and limit 1", async () => {
+    const httpClient = recordingHttpClient();
+    await probeAdapter(httpClient).fetchCertificationSample("campaigns", {});
+    assert.equal(httpClient.requests[0].params.offset, 0);
+    assert.equal(httpClient.requests[0].params.limit, 1);
+  });
+
+  it("does not loop even when the page is full — the exact 300s condition", async () => {
+    // rowsPerPage === limit is what made the sync paginator continue forever.
+    const httpClient = recordingHttpClient({ rowsPerPage: 1 });
+    await probeAdapter(httpClient).fetchCertificationSample("campaigns", {});
+    assert.equal(httpClient.requests.length, 1, "a full page must not trigger a second request");
+  });
+
+  it("returns at most one row however many the supplier sends", async () => {
+    const httpClient = recordingHttpClient({ rowsPerPage: 50 });
+    const rows = await probeAdapter(httpClient).fetchCertificationSample("campaigns", {});
+    assert.equal(rows.length, 1);
+    assert.equal(httpClient.requests.length, 1);
+  });
+
+  it("sends a per-request timeout", async () => {
+    const httpClient = recordingHttpClient();
+    await probeAdapter(httpClient).fetchCertificationSample("campaigns", { timeoutMs: 10000 });
+    assert.equal(httpClient.requests[0].timeout, 10000);
+  });
+
+  it("gives up on a slow supplier well inside the runtime limit", async () => {
+    const httpClient = recordingHttpClient({ delayMs: 5000 });
+    const started = Date.now();
+    await assert.rejects(
+      () => probeAdapter(httpClient).fetchCertificationSample("campaigns", { timeoutMs: 300 }),
+      (error) => {
+        assert.equal(error instanceof CertificationTimeoutError, true);
+        assert.equal(statusCategory(error), "SUPPLIER_TIMEOUT");
+        return true;
+      },
+    );
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 2000, `took ${elapsed}ms — must not approach a runtime timeout`);
+  });
+
+  it("does not retry", async () => {
+    const error = new Error("boom");
+    error.response = { status: 503 };
+    const httpClient = recordingHttpClient({ fail: error });
+    await assert.rejects(() => probeAdapter(httpClient).fetchCertificationSample("campaigns", {}));
+    assert.equal(httpClient.requests.length, 1, "a 503 must not be retried by the probe");
+  });
+
+  it("reports a throttled probe instead of queueing for minutes", async () => {
+    const httpClient = recordingHttpClient();
+    // The throttle never admits, so the budget expires and the request must not be sent at all.
+    await assert.rejects(
+      () =>
+        probeAdapter(httpClient, closedLimiter).fetchCertificationSample("campaigns", {
+          throttleBudgetMs: 20,
+        }),
+      (error) => {
+        assert.equal(error instanceof CertificationThrottledError, true);
+        assert.equal(statusCategory(error), "SUPPLIER_RATE_LIMITED");
+        return true;
+      },
+    );
+    assert.equal(httpClient.requests.length, 0, "no request is sent when the throttle cannot admit it");
+  });
+
+  it("never routes certification through the paginator or the retry wrapper", () => {
+    const start = adapterSource.indexOf("async fetchCertificationSample");
+    const end = adapterSource.indexOf("fetchCampaigns(params = {})", start);
+    const body = adapterSource.slice(start, end);
+    assert.ok(!body.includes("fetchOffsetPaginated"), "must not use the paginator");
+    assert.ok(!body.includes("requestWithOptimiseLimits"), "must not use the retry wrapper");
+    assert.ok(!body.includes("fetchAll"), "must not use a fetch-all helper");
+  });
+
+  it("the certification service never calls a sync fetcher", async () => {
+    const serviceSource = (await import("node:fs")).readFileSync(
+      "src/modules/ops/networkCertification.service.js",
+      "utf8",
+    );
+    for (const sync of ["fetchCampaigns(", "fetchVoucherCodes(", "fetchConversions(", "fetchPayments(", "fetchInvoices(", "fetchProductFeeds(", "fetchAll("]) {
+      assert.ok(!serviceSource.includes(sync), `service must not call ${sync}`);
+    }
+    assert.ok(serviceSource.includes("fetchCertificationSample"));
+  });
+
+  it("covers every sampleable Optimise source object", () => {
+    assert.deepEqual(listCertificationSamples().sort(), [
+      "campaign_detail",
+      "campaigns",
+      "commission_groups",
+      "conversions",
+      "invoices",
+      "payment_overview",
+      "products",
+      "voucher_codes",
+    ]);
+  });
+
+  it("refuses a source object that is not in the sample table", async () => {
+    const adapter = probeAdapter(recordingHttpClient());
+    await assert.rejects(() => adapter.fetchCertificationSample("anything_else", {}), /No certification sample/i);
+  });
+
+  it("refuses a campaign-scoped sample without an id", async () => {
+    const adapter = probeAdapter(recordingHttpClient());
+    await assert.rejects(() => adapter.fetchCertificationSample("commission_groups", {}), /requires a campaign id/i);
+  });
+});
+
+describe("normal sync behaviour is unchanged", () => {
+  it("the paginator still loops until a short page", () => {
+    const start = adapterSource.indexOf("async function fetchOffsetPaginated");
+    const body = adapterSource.slice(start, adapterSource.indexOf("}", adapterSource.indexOf("return rows;", start)));
+    assert.match(body, /if \(pageRows\.length < limit\)/, "termination test intact");
+    assert.match(body, /offset \+= limit/, "offset advance intact");
+    assert.match(body, /requestWithOptimiseLimits/, "sync still uses the retry wrapper");
+  });
+
+  it("the sync retry policy is untouched", () => {
+    assert.match(adapterSource, /requestWithRetry\(fn, \{ retries: 6, delayMs: 2000 \}\)/);
+  });
+
+  it("the shared throttle interval is untouched", () => {
+    assert.match(adapterSource, /OPTIMISE_MIN_INTERVAL_MS \|\| 12500/);
+  });
+
+  it("the sync fetchers still call the paginator", () => {
+    const start = adapterSource.indexOf("fetchCampaigns(params = {})");
+    const body = adapterSource.slice(start, start + 300);
+    assert.match(body, /fetchOffsetPaginated/);
+  });
+
+  it("the sync throttle is still the one the sync path waits on", () => {
+    const start = adapterSource.indexOf("async function requestWithOptimiseLimits");
+    const body = adapterSource.slice(start, adapterSource.indexOf("\n}", start));
+    assert.match(body, /optimiseRateLimiter\.acquireSlot\(\)/, "sync still queues on the 12.5s limiter");
+  });
+
+  it("certification does not queue on the sync throttle", () => {
+    const start = adapterSource.indexOf("async fetchCertificationSample");
+    const body = adapterSource.slice(start, adapterSource.indexOf("fetchCampaigns(params = {})", start));
+    assert.ok(
+      !body.includes("optimiseRateLimiter"),
+      "a probe must not wait on the interval built for a fetch-all loop",
+    );
+    assert.match(adapterSource, /CERTIFICATION_MIN_INTERVAL_MS \|\| 1000/, "probes are still paced, separately");
+  });
+});
+
+describe("run budget — the route always returns", () => {
+  function slowAdapter(perCallMs) {
+    return {
+      fetchCertificationSample: async () => {
+        await new Promise((r) => setTimeout(r, perCallMs));
+        return [{ id: 1 }];
+      },
+    };
+  }
+
+  function makeDbForBudget() {
+    return { rawPayload: { findMany: async () => [] } };
+  }
+
+  it("reports unattempted source objects rather than overrunning", async () => {
+    const original = process.env.CERTIFICATION_RUN_BUDGET_MS;
+    process.env.CERTIFICATION_RUN_BUDGET_MS = "40";
+    const { NetworkCertificationService: Scoped } = await import(
+      `../src/modules/ops/networkCertification.service.js?budget=${Date.now()}`
+    );
+    const service = new Scoped({
+      prisma: makeDbForBudget(),
+      adapterFactory: () => slowAdapter(30),
+      credentialResolver: async () => ({ apiKey: "k", agencyId: "AG1", contactId: "C1" }),
+    });
+    const out = await service.certify("optimise", {
+      sourceObjects: ["campaigns", "voucher_codes", "conversions", "invoices"],
+      compareRaw: false,
+    });
+    const exhausted = out.results.filter((r) => r.statusCategory === "RUN_BUDGET_EXHAUSTED");
+    assert.ok(exhausted.length > 0, "later source objects must be reported, not attempted");
+    assert.equal(out.results.length, 4, "every requested source object is still accounted for");
+    for (const row of exhausted) {
+      assert.equal(row.ok, false);
+      assert.equal(row.sampleCount, 0);
+      assert.deepEqual(row.fieldPaths, []);
+    }
+    process.env.CERTIFICATION_RUN_BUDGET_MS = original;
+  });
+
+  it("the configured budgets keep a full sweep well inside the 300s runtime limit", async () => {
+    const source = (await import("node:fs")).readFileSync(
+      "src/modules/ops/networkCertification.service.js",
+      "utf8",
+    );
+    const runBudget = Number(/CERTIFICATION_RUN_BUDGET_MS \|\| (\d+)/.exec(source)?.[1]);
+    const sourceBudget = Number(/CERTIFICATION_SOURCE_BUDGET_MS \|\| (\d+)/.exec(source)?.[1]);
+    assert.ok(Number.isFinite(runBudget) && Number.isFinite(sourceBudget));
+    // The last source object can start just under the run budget and then take its own budget.
+    assert.ok(
+      runBudget + sourceBudget < 300000,
+      `worst case ${runBudget + sourceBudget}ms must stay under the 300s runtime limit`,
+    );
   });
 });
