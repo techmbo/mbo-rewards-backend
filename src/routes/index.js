@@ -242,6 +242,10 @@ import {
   adminListPaymentStatusHandler,
 } from "../controllers/adminContract.controller.js";
 import {
+  networkCertificationCatalogHandler,
+  networkCertificationRunHandler,
+} from "../controllers/networkCertification.controller.js";
+import {
   adminListNetworkBillingHandler,
   adminListNetworkPaymentsReceivedHandler,
   adminListMboReceiptsHandler,
@@ -292,7 +296,7 @@ import {
   clientListPayoutsHandler,
 } from "../controllers/clientReporting.controller.js";
 import { clientListProductsHandler } from "../controllers/clientProducts.controller.js";
-import { authRateLimiter } from "../platform/security/index.js";
+import { authRateLimiter, certificationRateLimiter } from "../platform/security/index.js";
 import {
   auditAction,
   auditPartnerAccess,
@@ -1282,6 +1286,30 @@ router.post(
   adminTransitionOrderItemValidationHandler,
 );
 router.get("/ops/admin/product-feeds", authenticate, requirePermission(PERMISSIONS.PRODUCTS_READ), adminListProductFeedsHandler);
+
+// Live supplier certification probe. Read-only against both the supplier and our database; it
+// samples one record per endpoint and reports field paths and structural categories only, never
+// values. Gated on integrations:manage (ADMIN, TECH) because it uses stored supplier credentials.
+//
+// The catalog is a GET: pure metadata, no credential resolved, no supplier call. Execution is a
+// POST, because it initiates outbound supplier requests and must not be reachable by a refresh,
+// prefetch, crawler, proxy replay or GET retry.
+router.get(
+  "/ops/admin/network-certification",
+  authenticate,
+  requirePermission(PERMISSIONS.INTEGRATIONS_MANAGE),
+  networkCertificationCatalogHandler,
+);
+router.post(
+  "/ops/admin/network-certification/:network/run",
+  authenticate,
+  requirePermission(PERMISSIONS.INTEGRATIONS_MANAGE),
+  certificationRateLimiter,
+  auditAction("network.certification.run", (req) =>
+    [req.params?.network, req.body?.region || "sea", req.body?.accountLabel || "default"].join("/"),
+  ),
+  networkCertificationRunHandler,
+);
 router.get("/ops/admin/commission-vocabulary", authenticate, requirePermission(PERMISSIONS.COMMISSION_READ), adminCommissionVocabularyHandler);
 router.get(
   "/ops/admin/payment-status",
