@@ -398,6 +398,26 @@ enum CampaignStatus {
   UNKNOWN
 }
 
+/// Explicit supplier tracking-link lifecycle. Never derive this from `trackingUrl == null`:
+/// a null URL cannot distinguish "never generated" from "revoked" or "generated but not entered".
+enum SupplierTrackingLinkState {
+  /// Publisher has not yet generated a supplier tracking link (Partnerize: Tracking -> Create Tracking Link).
+  TRACKING_LINK_NOT_GENERATED
+  /// A supplier tracking link is stored and usable for attributable traffic.
+  TRACKING_LINK_AVAILABLE
+  /// Stored link needs operator review before it is trusted for monetized clicks.
+  TRACKING_LINK_NEEDS_REVIEW
+  /// Link was withdrawn/expired at the supplier and must be regenerated.
+  TRACKING_LINK_REVOKED
+}
+
+/// Where a stored supplier tracking link came from. SUPPLIER_API is declared for future use only;
+/// there is currently NO_EVIDENCE_IN_CURRENT_INTEGRATION of a Partnerize link create/read endpoint.
+enum SupplierTrackingLinkProvenance {
+  MANUAL_ADMIN
+  SUPPLIER_API
+}
+
 enum ParticipationStatus {
   JOINED
   NOT_JOINED
@@ -506,59 +526,66 @@ model Supplier {
 }
 
 model SupplierCampaign {
-  id                     String               @id @default(uuid())
-  supplier               SupplierKey
-  supplierRegion         SupplierRegion       @default(GLOBAL)
-  supplierCampaignId     String
-  sourceAccountLabel     String               @default("default")
-  campaignName           String
-  campaignDescription    String?
-  campaignLogoUrl        String?
-  merchantId             String?
-  merchant               Merchant?            @relation(fields: [merchantId], references: [id], onDelete: SetNull)
-  matchedAt              DateTime?
-  matchedBy              String?
-  matchConfidence        Decimal?             @db.Decimal(5, 4)
-  merchantNameRaw        String?
-  merchantVertical       String?
-  categoryName           String?
-  campaignType           String?
-  pricingModel           PricingModel?
-  defaultCommissionValue Decimal?             @db.Decimal(18, 4)
-  commissionUnit         CommissionUnit?
-  commissionCurrency     String?              @db.Char(3)
-  commissionGroups       Json?
-  trackingUrl            String?
-  destinationUrl         String?
-  mboTrackingSlug        String?
-  mboTrackingToken       String?
-  mboTrackingUrl         String?
-  deepLinkingEnabled     Boolean?
-  cookieDurationDays     Int?
-  campaignStatus         CampaignStatus       @default(UNKNOWN)
-  participationStatus    ParticipationStatus?
-  isJoined               Boolean              @default(false)
-  countryCodes           String[]             @default([])
-  currencyCode           String?              @db.Char(3)
-  campaignStartDate      DateTime?
-  firstSeenAt            DateTime             @default(now())
-  lastSyncedAt           DateTime             @default(now())
-  entityId               String?
-  entity                 Entity?              @relation(fields: [entityId], references: [id], onDelete: SetNull)
+  id                             String                          @id @default(uuid())
+  supplier                       SupplierKey
+  supplierRegion                 SupplierRegion                  @default(GLOBAL)
+  supplierCampaignId             String
+  sourceAccountLabel             String                          @default("default")
+  campaignName                   String
+  campaignDescription            String?
+  campaignLogoUrl                String?
+  merchantId                     String?
+  merchant                       Merchant?                       @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+  matchedAt                      DateTime?
+  matchedBy                      String?
+  matchConfidence                Decimal?                        @db.Decimal(5, 4)
+  merchantNameRaw                String?
+  merchantVertical               String?
+  categoryName                   String?
+  campaignType                   String?
+  pricingModel                   PricingModel?
+  defaultCommissionValue         Decimal?                        @db.Decimal(18, 4)
+  commissionUnit                 CommissionUnit?
+  commissionCurrency             String?                         @db.Char(3)
+  commissionGroups               Json?
+  trackingUrl                    String?
+  destinationUrl                 String?
+  mboTrackingSlug                String?
+  mboTrackingToken               String?
+  mboTrackingUrl                 String?
+  /// Supplier tracking-link lifecycle. The link value itself lives in `trackingUrl` (canonical);
+  /// `destinationUrl` is the advertiser landing page and is NEVER the supplier tracking link.
+  supplierTrackingLinkState      SupplierTrackingLinkState       @default(TRACKING_LINK_NOT_GENERATED)
+  supplierTrackingLinkProvenance SupplierTrackingLinkProvenance?
+  /// Mirrors the existing matchedAt/matchedBy convention on this model.
+  supplierTrackingLinkUpdatedAt  DateTime?
+  supplierTrackingLinkUpdatedBy  String?
+  deepLinkingEnabled             Boolean?
+  cookieDurationDays             Int?
+  campaignStatus                 CampaignStatus                  @default(UNKNOWN)
+  participationStatus            ParticipationStatus?
+  isJoined                       Boolean                         @default(false)
+  countryCodes                   String[]                        @default([])
+  currencyCode                   String?                         @db.Char(3)
+  campaignStartDate              DateTime?
+  firstSeenAt                    DateTime                        @default(now())
+  lastSyncedAt                   DateTime                        @default(now())
+  entityId                       String?
+  entity                         Entity?                         @relation(fields: [entityId], references: [id], onDelete: SetNull)
   /// Wave B lineage to immutable RawPayload (optional; Entity.rawData remains staging copy).
-  rawPayloadId           String?
-  rawPayloadRecord       RawPayload?          @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
-  rawPayload             Json
-  normalizedPayload      Json
-  mapperVersion          String
-  syncConflict           Boolean              @default(false)
-  adminOverrides         Json?
-  fieldPolicies          Json?
-  archivedAt             DateTime?
-  supplierRefId          String?
-  supplierRef            Supplier?            @relation(fields: [supplierRefId], references: [id], onDelete: SetNull)
-  createdAt              DateTime             @default(now())
-  updatedAt              DateTime             @updatedAt
+  rawPayloadId                   String?
+  rawPayloadRecord               RawPayload?                     @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
+  rawPayload                     Json
+  normalizedPayload              Json
+  mapperVersion                  String
+  syncConflict                   Boolean                         @default(false)
+  adminOverrides                 Json?
+  fieldPolicies                  Json?
+  archivedAt                     DateTime?
+  supplierRefId                  String?
+  supplierRef                    Supplier?                       @relation(fields: [supplierRefId], references: [id], onDelete: SetNull)
+  createdAt                      DateTime                        @default(now())
+  updatedAt                      DateTime                        @updatedAt
 
   coupons                 SupplierCoupon[]
   couponCodeMasters       CouponCodeMaster[]
@@ -576,6 +603,7 @@ model SupplierCampaign {
   @@index([entityId])
   @@index([rawPayloadId])
   @@index([supplier, campaignStatus])
+  @@index([supplier, supplierTrackingLinkState])
   @@map("supplier_campaigns")
 }
 
@@ -1172,33 +1200,33 @@ model ClientCommissionRule {
   displayLabel      String?
 
   /// Deterministic client commercial precedence. Only honored when priorityVerified=true.
-  priority          Int?
-  priorityVerified  Boolean                  @default(false)
+  priority         Int?
+  priorityVerified Boolean @default(false)
 
   /// Agreement / IO / SOW / approved commercial lineage.
-  agreementRef      String?
+  agreementRef        String?
   agreementApprovedAt DateTime?
   agreementApprovedBy String?
 
   /// Optional explicit subsidy/negative-margin approval attached to the rule.
-  subsidyApproved   Boolean                  @default(false)
+  subsidyApproved    Boolean   @default(false)
   subsidyApprovalRef String?
-  subsidyApprovedAt DateTime?
-  subsidyApprovedBy String?
+  subsidyApprovedAt  DateTime?
+  subsidyApprovedBy  String?
 
   /// Tier configuration is normalized into ClientCommercialTier rows.
-  tierMetric        String?
-  tierPeriod        String?
-  metadata          Json?
+  tierMetric String?
+  tierPeriod String?
+  metadata   Json?
 
-  effectiveFrom     DateTime
-  effectiveUntil    DateTime?
-  status            CommissionRuleStatus     @default(DRAFT)
-  createdAt         DateTime                 @default(now())
-  updatedAt         DateTime                 @updatedAt
+  effectiveFrom  DateTime
+  effectiveUntil DateTime?
+  status         CommissionRuleStatus @default(DRAFT)
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
 
-  conditions             ClientCommercialCondition[]
-  tiers                  ClientCommercialTier[]
+  conditions            ClientCommercialCondition[]
+  tiers                 ClientCommercialTier[]
   conversions           Conversion[]
   financialTransactions FinancialTransaction[]
 
@@ -1207,20 +1235,19 @@ model ClientCommissionRule {
   @@map("client_commission_rules")
 }
 
-
 model ClientCommercialCondition {
-  id             String                   @id @default(uuid())
+  id               String                   @id @default(uuid())
   commissionRuleId String
-  commissionRule  ClientCommissionRule     @relation(fields: [commissionRuleId], references: [id], onDelete: Cascade)
-  assignmentId    String
-  assignment      ClientCampaignAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
-  conditionType   String
-  operator        String                   @default("EQ")
-  value           Json?
-  field           String?
-  metadata        Json?
-  createdAt       DateTime                 @default(now())
-  updatedAt       DateTime                 @updatedAt
+  commissionRule   ClientCommissionRule     @relation(fields: [commissionRuleId], references: [id], onDelete: Cascade)
+  assignmentId     String
+  assignment       ClientCampaignAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  conditionType    String
+  operator         String                   @default("EQ")
+  value            Json?
+  field            String?
+  metadata         Json?
+  createdAt        DateTime                 @default(now())
+  updatedAt        DateTime                 @updatedAt
 
   @@index([commissionRuleId])
   @@index([assignmentId])
@@ -1612,7 +1639,7 @@ model ClientCampaignAssignment {
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
 
-  fulfilledBrandRequest    ClientBrandRequest?       @relation("BrandRequestFulfillment")
+  fulfilledBrandRequest    ClientBrandRequest?         @relation("BrandRequestFulfillment")
   trackingLinks            TrackingLink[]
   couponAssignments        ClientCouponAssignment[]
   commissionRules          ClientCommissionRule[]

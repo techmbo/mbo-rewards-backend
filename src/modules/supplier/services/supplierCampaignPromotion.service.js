@@ -8,6 +8,7 @@ import { SupplierCampaignRepository } from "../repositories/supplierCampaign.rep
 import { findLatestRawPayloadForEntity } from "../../raw/rawPayload.service.js";
 import { OutboxWriter, PromotionService } from "./promotion.service.js";
 import { buildSupplierCampaignMboTracking } from "../../commercial/supplierCampaignTracking.js";
+import { mergeSupplierTrackingLinkOnSync } from "../../tracking/supplierTrackingLink.contract.js";
 
 function toCampaignWriteData(
   mapped,
@@ -31,7 +32,6 @@ function toCampaignWriteData(
     commissionUnit: mapped.commissionUnit === "UNKNOWN" ? null : mapped.commissionUnit,
     commissionCurrency: asOptionalString(mapped.commissionCurrency)?.slice(0, 3) ?? null,
     commissionGroups: mapped.commissionGroups,
-    trackingUrl: asOptionalString(mapped.trackingUrl),
     destinationUrl: asOptionalString(mapped.destinationUrl),
     deepLinkingEnabled: mapped.deepLinkingEnabled,
     cookieDurationDays: mapped.cookieDurationDays,
@@ -60,7 +60,26 @@ function toCampaignWriteData(
     data.supplierRef = { connect: { id: supplierRefId } };
   }
 
-  const mboTracking = buildSupplierCampaignMboTracking(mapped, existing);
+  // Supplier tracking-link merge. A payload with no evidenced tracking link must never clear a
+  // manually stored link (Partnerize campaigns legitimately carry no link until a publisher
+  // generates one in the portal).
+  const trackingMerge = mergeSupplierTrackingLinkOnSync({
+    incomingTrackingUrl: asOptionalString(mapped.trackingUrl),
+    existing,
+  });
+  data.trackingUrl = trackingMerge.trackingUrl;
+  data.supplierTrackingLinkState = trackingMerge.state;
+  if (trackingMerge.retained) {
+    // Leave provenance and the manual updatedAt/updatedBy stamps untouched on a retained link.
+    delete data.supplierTrackingLinkProvenance;
+  } else {
+    data.supplierTrackingLinkProvenance = trackingMerge.provenance;
+  }
+
+  const mboTracking = buildSupplierCampaignMboTracking(
+    { ...mapped, trackingUrl: trackingMerge.trackingUrl },
+    existing,
+  );
   data.mboTrackingSlug = mboTracking.mboTrackingSlug;
   data.mboTrackingToken = mboTracking.mboTrackingToken;
   data.mboTrackingUrl = mboTracking.mboTrackingUrl;

@@ -15,6 +15,7 @@ import {
   resolveSupplierTrackingLink,
   toInternalTrackingLinkDto,
 } from "../tracking/trackingLink.contract.js";
+import { supplierAllowsDestinationTrackingFallback } from "../tracking/supplierTrackingLink.contract.js";
 
 function networkLabel(supplier) {
   const key = String(supplier || "").toUpperCase();
@@ -54,10 +55,13 @@ function mappingStatusFor(row, rule) {
 export function toAdminTrackingLinkDto(row) {
   const rule = getTrackingParamRule(row.supplier);
   const brandName = row.merchant?.displayName || row.merchantNameRaw || null;
-  const supplierTrackingLink = resolveSupplierTrackingLink({
-    trackingUrl: row.trackingUrl,
-    destinationUrl: row.destinationUrl,
-  });
+  // For suppliers that never mint a tracking link in the campaign payload, the advertiser landing
+  // page must not be presented to operators as the supplier tracking link.
+  const supplierTrackingLink = resolveSupplierTrackingLink(
+    supplierAllowsDestinationTrackingFallback(row.supplier)
+      ? { trackingUrl: row.trackingUrl, destinationUrl: row.destinationUrl }
+      : { trackingUrl: row.trackingUrl },
+  );
   const mboTrackingLink = resolveMboTrackingLink({ mboTrackingUrl: row.mboTrackingUrl });
   const attributionParameter = attributionParameterLabel(row.supplier);
   const redirectChain = buildRedirectChain({ supplier: row.supplier, attributionParameter });

@@ -45,6 +45,11 @@ import {
   listSupplierCampaignsHandler,
   promoteSupplierCampaignsHandler,
 } from "../controllers/supplierCampaigns.controller.js";
+import {
+  listSupplierTrackingLinkQueueHandler,
+  setSupplierTrackingLinkHandler,
+  setSupplierTrackingLinkStateHandler,
+} from "../controllers/supplierTrackingLinks.controller.js";
 import { masterCatalogSummaryHandler } from "../controllers/masterCatalogDashboard.controller.js";
 import { clientOpsGuideHandler } from "../controllers/clientOpsGuide.controller.js";
 import { aiIntegrationGuideHandler } from "../controllers/aiIntegrationGuide.controller.js";
@@ -618,6 +623,27 @@ router.get(
   requirePermission(PERMISSIONS.CAMPAIGNS_READ),
   getSupplierCampaignHandler,
 );
+router.get(
+  "/supplier-campaigns/tracking-links/queue",
+  authenticate,
+  requirePermission(PERMISSIONS.TRACKING_READ),
+  listSupplierTrackingLinkQueueHandler,
+);
+router.put(
+  "/supplier-campaigns/:id/tracking-link",
+  authenticate,
+  requirePermission(PERMISSIONS.TRACKING_MANAGE),
+  auditAction("tracking.supplier_link.set", "supplier-campaigns"),
+  setSupplierTrackingLinkHandler,
+);
+router.put(
+  "/supplier-campaigns/:id/tracking-link/state",
+  authenticate,
+  requirePermission(PERMISSIONS.TRACKING_MANAGE),
+  auditAction("tracking.supplier_link.state", "supplier-campaigns"),
+  setSupplierTrackingLinkStateHandler,
+);
+
 router.post(
   "/supplier-campaigns/promote",
   authenticate,

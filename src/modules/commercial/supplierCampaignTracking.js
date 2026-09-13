@@ -1,4 +1,5 @@
 import { looksLikeHttpUrl } from "./resolveSupplierDestination.js";
+import { supplierAllowsDestinationTrackingFallback } from "../tracking/supplierTrackingLink.contract.js";
 import {
   buildMboTrackingUrl,
   generateTrackingToken,
@@ -30,7 +31,10 @@ export function resolveSupplierCampaignBrandSlug(record = {}) {
  * Brand-only MBO slug/token at supplier sync time: /r/{brand}/{token}
  */
 export function buildSupplierCampaignMboTracking(record = {}, existing = null) {
-  const supplierUrl = record.trackingUrl || record.destinationUrl || null;
+  const supplier = record.supplier ?? existing?.supplier ?? null;
+  const supplierUrl = supplierAllowsDestinationTrackingFallback(supplier)
+    ? record.trackingUrl || record.destinationUrl || null
+    : record.trackingUrl || null;
   if (!looksLikeHttpUrl(supplierUrl)) {
     return {
       mboTrackingSlug: null,

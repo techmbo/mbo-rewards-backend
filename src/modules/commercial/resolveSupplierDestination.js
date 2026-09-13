@@ -1,3 +1,7 @@
+import {
+  SUPPLIER_TRACKING_LINK_REQUIRED,
+  supplierAllowsDestinationTrackingFallback,
+} from "../tracking/supplierTrackingLink.contract.js";
 import { prisma } from "../../database/prisma.js";
 import { buildAllotmentDisplayFields, extractParentCampaignIds } from "../coupons/allotmentFields.js";
 import { resolveCouponCodeType } from "../coupons/codeType.js";
@@ -336,13 +340,31 @@ export async function resolveSupplierDestination(
     assignment.campaignSource?.supplierCampaign ||
     link?.campaignSource?.supplierCampaign ||
     null;
-  const fromSupplierCampaign = preferWebsite
-    ? pickUrl(supplierCampaign?.destinationUrl, supplierCampaign?.trackingUrl)
-    : pickUrl(supplierCampaign?.trackingUrl, supplierCampaign?.destinationUrl);
+  // Suppliers that never mint a tracking link in the campaign payload must not have their
+  // advertiser landing page substituted for a tracking link on attributable traffic.
+  const allowsDestinationFallback = supplierAllowsDestinationTrackingFallback(
+    supplierCampaign?.supplier,
+  );
+  if (supplierCampaign && !allowsDestinationFallback && !pickUrl(supplierCampaign?.trackingUrl)) {
+    return {
+      url: null,
+      source: null,
+      reason: SUPPLIER_TRACKING_LINK_REQUIRED,
+    };
+  }
+  const fromSupplierCampaign =
+    preferWebsite && allowsDestinationFallback
+      ? pickUrl(supplierCampaign?.destinationUrl, supplierCampaign?.trackingUrl)
+      : allowsDestinationFallback
+        ? pickUrl(supplierCampaign?.trackingUrl, supplierCampaign?.destinationUrl)
+        : pickUrl(supplierCampaign?.trackingUrl);
   if (fromSupplierCampaign) {
     return {
       url: fromSupplierCampaign,
-      source: supplierCampaign?.trackingUrl ? "supplierCampaign.trackingUrl" : "supplierCampaign.destinationUrl",
+      source:
+        supplierCampaign?.trackingUrl && fromSupplierCampaign === supplierCampaign.trackingUrl.trim()
+          ? "supplierCampaign.trackingUrl"
+          : "supplierCampaign.destinationUrl",
       reason: null,
     };
   }
