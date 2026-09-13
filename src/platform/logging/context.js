@@ -25,6 +25,10 @@ const SENSITIVE_KEYS = new Set([
   "access_token",
   "refresh_token",
   "api_key",
+  // Break-glass diagnostic header. requestLoggerMiddleware logs a fixed field list and has never
+  // included headers, so this is defence for future code rather than a live path.
+  "x-db-recovery-token",
+  "db_recovery_diagnostic_token",
 ]);
 
 export function sanitizeForLog(value, depth = 0) {

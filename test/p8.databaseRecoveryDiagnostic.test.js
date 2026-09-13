@@ -188,17 +188,17 @@ describe("database recovery diagnostic — access control", () => {
     }
   });
 
-  it("2d — the route is wired with authenticate, ops:manage, requireAdminRole and noStoreHeaders in order", () => {
+  it("2d — the route is wired with the break-glass gate then noStoreHeaders, in order", () => {
     const start = routesSource.indexOf(`"${ROUTE}"`);
     assert.ok(start > 0, "the route is registered");
     const block = routesSource.slice(start, routesSource.indexOf(");", start));
     const order = [
-      "authenticate",
-      "requirePermission(PERMISSIONS.OPS_MANAGE)",
-      "requireAdminRole",
+      "requireDatabaseRecoveryToken",
       "noStoreHeaders",
       "databaseRecoveryDiagnosticHandler",
     ];
+    // Deliberately NOT authenticate: it resolves the caller through the broken runtime client.
+    assert.ok(!/^\s*authenticate,\s*$/m.test(block), "this route must not use DB-backed auth");
     const positions = order.map((name) => block.indexOf(name));
     for (const [i, position] of positions.entries()) {
       assert.ok(position >= 0, `${order[i]} missing from the route`);

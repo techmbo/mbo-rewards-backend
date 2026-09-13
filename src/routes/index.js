@@ -246,6 +246,7 @@ import {
   networkCertificationRunHandler,
 } from "../controllers/networkCertification.controller.js";
 import { databaseRecoveryDiagnosticHandler } from "../controllers/databaseRecoveryDiagnostic.controller.js";
+import { requireDatabaseRecoveryToken } from "../middleware/databaseRecoveryToken.js";
 import {
   adminListNetworkBillingHandler,
   adminListNetworkPaymentsReceivedHandler,
@@ -307,7 +308,6 @@ import {
   requireApiEndpoint,
   requireEntityTypeAccess,
   requirePermission,
-  requireAdminRole,
 } from "../middleware/auth.js";
 
 const router = Router();
@@ -1324,14 +1324,17 @@ router.post(
 // A GET is safe because it is read-only in both directions: no parameters, no writes, and the one
 // outbound connection goes to an address the server already holds, which no caller can influence.
 //
-// Gated twice. `ops:manage` is the permission protected ops routes already use; `requireAdminRole`
-// narrows it to ADMIN, because OPERATIONS carries that permission too and this reports on
-// production infrastructure. Remove this route once the database is recovered.
+// Remove this route, its middleware and its env var once the database is recovered.
 router.get(
   "/ops/diagnostics/database-recovery",
-  authenticate,
-  requirePermission(PERMISSIONS.OPS_MANAGE),
-  requireAdminRole,
+  // BREAK-GLASS. This route alone does not use `authenticate`, because `authenticate` resolves the
+  // caller through the runtime Prisma client — the client that cannot connect. An endpoint whose
+  // authentication depends on the database cannot diagnose the database, so the gate here is a
+  // pre-shared secret in X-DB-Recovery-Token, which needs nothing but the process environment.
+  //
+  // It is the only route that accepts that header, and the gate fails closed: unconfigured, too
+  // short, or a copy of another environment secret all mean the route is unavailable.
+  requireDatabaseRecoveryToken,
   noStoreHeaders,
   // No audit middleware here, deliberately: it calls logAccess(), which INSERTs an AccessLog row
   // through the runtime client. This diagnostic must not write, and that client is the broken one.
