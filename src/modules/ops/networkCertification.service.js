@@ -1,7 +1,9 @@
 import { prisma } from "../../database/prisma.js";
 import { fail } from "../../core/apiResponse.js";
 import { createOptimiseAdapter } from "../../adapters/optimise.adapter.js";
+import { createPartnerizeAdapter } from "../../adapters/partnerize.adapter.js";
 import { resolveOptimiseCredentials } from "../integrations/optimiseCredentials.js";
+import { resolvePartnerizeCertificationCredentials } from "../integrations/partnerizeCredentials.js";
 import { comparePathSets, summarisePayloads } from "./payloadShape.js";
 
 /**
@@ -109,7 +111,34 @@ const OPTIMISE_PROBES = Object.freeze({
   },
 });
 
-const PROBE_REGISTRY = Object.freeze({ optimise: OPTIMISE_PROBES });
+/**
+ * Partnerize probe registry — the first three source objects whose bounded request contract is
+ * already evidenced by production code. Everything else Partnerize exposes stays out of the
+ * executable registry until its contract is confirmed, rather than being guessed at.
+ *
+ * Each of these is one request. None declares a chain, so none can make a second.
+ */
+const PARTNERIZE_PROBES = Object.freeze({
+  authenticate: { method: "GET", endpointKey: "GET /user" },
+  publishers: { method: "GET", endpointKey: "GET /user/publisher" },
+  campaigns: {
+    method: "GET",
+    endpointKey: "GET /user/publisher/{publisherId}/campaign/a",
+    needs: "publisherId",
+    skipCategory: "SKIPPED_NO_PUBLISHER_ID",
+  },
+});
+
+const PROBE_REGISTRY = Object.freeze({ optimise: OPTIMISE_PROBES, partnerize: PARTNERIZE_PROBES });
+
+/**
+ * How a network's certification adapter is built. Adding a network means adding a builder here,
+ * not loosening anything: the caller still selects a network by name from this frozen map.
+ */
+const ADAPTER_BUILDERS = Object.freeze({
+  optimise: "buildOptimiseAdapter",
+  partnerize: "buildPartnerizeAdapter",
+});
 
 export function listProbeSourceObjects(network) {
   const probes = PROBE_REGISTRY[String(network || "").toLowerCase()];
@@ -227,6 +256,7 @@ export class NetworkCertificationService {
     this.db = deps.prisma ?? prisma;
     this.adapterFactory = deps.adapterFactory ?? null;
     this.credentialResolver = deps.credentialResolver ?? resolveOptimiseCredentials;
+    this.partnerizeCredentialResolver = deps.partnerizeCredentialResolver ?? resolvePartnerizeCertificationCredentials;
   }
 
   /**
@@ -257,6 +287,27 @@ export class NetworkCertificationService {
       baseURL: credentials.baseURL,
       agencyId: credentials.agencyId,
       contactId: credentials.contactId,
+    });
+  }
+
+  /**
+   * Partnerize certification adapter.
+   *
+   * The publisher id is resolved here, from credentials or environment, and handed to the adapter
+   * at construction. Certification never discovers it with a request — that would be a second
+   * supplier call — and never accepts it from a caller.
+   */
+  async buildPartnerizeAdapter({ accountLabel }) {
+    const credentials = await this.partnerizeCredentialResolver(accountLabel);
+    if (!credentials?.applicationKey || !credentials?.userApiKey) {
+      // Only whether the credential resolved is reported; nothing about it.
+      throw fail("Partnerize credentials are not configured for this account label.", 424);
+    }
+    const factory = this.adapterFactory ?? createPartnerizeAdapter;
+    return factory({
+      applicationKey: credentials.applicationKey,
+      userApiKey: credentials.userApiKey,
+      publisherId: credentials.publisherId ?? null,
     });
   }
 
@@ -473,14 +524,17 @@ export class NetworkCertificationService {
     const unknown = requested.filter((s) => !probes[s]);
     if (unknown.length) throw fail(`Unknown source objects for ${key}: ${unknown.join(", ")}`, 400);
 
-    const adapter = await this.buildOptimiseAdapter({ region, accountLabel });
+    const adapter = await this[ADAPTER_BUILDERS[key]]({ region, accountLabel });
     // Dates are computed here, from a preset token. Nothing the caller sends is used as a date.
     const windowDays = windowPresetDays(windowPreset);
     const ctx = {
       window: defaultDateWindow(windowDays),
-      // Separate namespaces, separate fields. Neither is ever supplied by the caller.
+      // Separate namespaces, separate fields. None is ever supplied by the caller.
       campaignDetailId: null,
       commissionGroupCampaignId: null,
+      // Partnerize's publisher id comes from the adapter's own credentials, resolved at
+      // construction. Certification never discovers it with a request.
+      publisherId: adapter.publisherId ?? null,
     };
     const results = [];
     const runDeadline = Date.now() + RUN_BUDGET_MS;
@@ -489,7 +543,11 @@ export class NetworkCertificationService {
     // Campaign-scoped probes need an id. Take it from a campaigns sample rather than the caller,
     // so the probe cannot be pointed at an arbitrary campaign. This is the one permitted second
     // call in a source chain: sample a campaign, then read that campaign's dependent endpoint.
-    if (requested.some((s) => probes[s]?.needs)) {
+    // Optimise only: the campaign-scoped probes there derive their identifiers from a sampled
+    // campaign row. Other networks resolve what they need without a bootstrap request, so this
+    // is keyed on the identifiers themselves rather than on "this probe needs something".
+    const CAMPAIGN_BOOTSTRAP_NEEDS = new Set(["campaignDetailId", "commissionGroupCampaignId"]);
+    if (requested.some((s) => CAMPAIGN_BOOTSTRAP_NEEDS.has(probes[s]?.needs))) {
       try {
         const sample = await adapter.fetchCertificationSample("campaigns", ctx);
         const first = asRows(sample)[0] || {};

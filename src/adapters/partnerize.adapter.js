@@ -150,6 +150,92 @@ function hasMore(data, offset, limit, rowsCount) {
 }
 
 /**
+ * Certification sampling — deliberately separate from every fetcher below.
+ *
+ * The sync fetchers are built to be exhaustive: fetchPaginated loops until a short page, get()
+ * retries three times, and fetchCampaigns walks three participation statuses, then a discovery
+ * endpoint, then falls back through a second API generation hydrating one campaign per request.
+ * All of that is right for a nightly sync and ruinous for a probe.
+ *
+ * Certification therefore reuses none of it. One HTTP request, no retry, no pagination, no
+ * fan-out, no fallback to another API generation, and a hard timeout. The endpoint comes from the
+ * frozen table below, keyed by source-object name, so no caller can supply a path, a query, a
+ * publisher id or a campaign id.
+ *
+ * Every entry's request contract is evidenced by code that already runs in production; nothing
+ * here was inferred from another endpoint's behaviour.
+ */
+export const PARTNERIZE_CERTIFICATION_TIMEOUT_MS = Number(
+  process.env.CERTIFICATION_SAMPLE_TIMEOUT_MS || 10000,
+);
+
+/**
+ * Certification paces itself on its own throttle.
+ *
+ * A single probe cannot burst, but a single RUN can: one request may ask for authenticate,
+ * publishers and campaigns, and the service dispatches them one after another with nothing
+ * between. Three back-to-back calls is exactly the traffic shape an affiliate API notices.
+ *
+ * Separate from the sync limiter so a probe never queues behind a sync in flight, and matched to
+ * the same 750 ms interval because that is the pace this integration already treats as polite.
+ */
+export const PARTNERIZE_CERTIFICATION_MIN_INTERVAL_MS = Number(
+  process.env.PARTNERIZE_CERTIFICATION_MIN_INTERVAL_MS || 750,
+);
+const partnerizeCertificationLimiter = createRateLimiter(PARTNERIZE_CERTIFICATION_MIN_INTERVAL_MS);
+
+/** Raised when admission cannot be granted inside the probe's budget. Carries no supplier detail. */
+export class PartnerizeCertificationThrottledError extends Error {
+  constructor(message = "Partnerize certification sample could not be scheduled within budget") {
+    super(message);
+    this.name = "PartnerizeCertificationThrottledError";
+    // Reuses the existing sanitized mapping to SUPPLIER_RATE_LIMITED.
+    this.certificationThrottled = true;
+  }
+}
+
+/**
+ * Rejects with `error` if `promise` has not settled within `ms`.
+ *
+ * The loser is abandoned rather than cancelled; an abandoned admission belongs to the
+ * certification limiter alone, and its rejection is swallowed so a late settle cannot surface as
+ * an unhandled rejection after the probe has reported.
+ */
+function withDeadline(promise, ms, error) {
+  let timer;
+  Promise.resolve(promise).catch(() => {});
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(error), ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
+const PARTNERIZE_SINGLE_ROW = { limit: 1, offset: 0 };
+
+const PARTNERIZE_CERTIFICATION_SAMPLES = Object.freeze({
+  // Evidenced: authenticate() calls get("/user", {}) with no parameters at all.
+  authenticate: { method: "GET", path: () => "/user", params: () => ({}) },
+
+  // Evidenced: resolvePublisherId() calls get("/user/publisher", { limit: 100, offset: 0 }) —
+  // a direct request to THIS endpoint with these exact parameter names. Only the value changes.
+  publishers: { method: "GET", path: () => "/user/publisher", params: () => ({ ...PARTNERIZE_SINGLE_ROW }) },
+
+  // Evidenced: fetchPaginated sends { limit, offset } to exactly this path shape. One
+  // participation status only — walking a/p/r is fan-out, which certification does not do.
+  // The publisher id comes from the adapter's own credentials, never from a caller.
+  campaigns: {
+    method: "GET",
+    needs: "publisherId",
+    path: (ctx) => `/user/publisher/${encodeURIComponent(ctx.publisherId)}/campaign/a`,
+    params: () => ({ ...PARTNERIZE_SINGLE_ROW }),
+  },
+});
+
+export function listPartnerizeCertificationSamples() {
+  return Object.keys(PARTNERIZE_CERTIFICATION_SAMPLES);
+}
+
+/**
  * @param {object} opts
  * @param {string} opts.applicationKey
  * @param {string} opts.userApiKey
@@ -161,17 +247,23 @@ export function createPartnerizeAdapter({
   userApiKey,
   publisherId = process.env.PARTNERIZE_PUBLISHER_ID || null,
   baseURL = process.env.PARTNERIZE_BASE_URL || "https://api.partnerize.com",
+  httpClient: injectedHttpClient = null,
+  certificationRateLimiter: injectedCertificationLimiter = null,
 } = {}) {
   if (!applicationKey || !userApiKey) {
     throw new Error("Partnerize adapter requires applicationKey and userApiKey");
   }
 
   const basic = Buffer.from(`${applicationKey}:${userApiKey}`).toString("base64");
-  const httpClient = createHttpClient({
-    baseURL: String(baseURL).replace(/\/$/, ""),
-    apiKey: `Basic ${basic}`,
-    headers: { Accept: "application/json" },
-  });
+  const httpClient =
+    injectedHttpClient ??
+    createHttpClient({
+      baseURL: String(baseURL).replace(/\/$/, ""),
+      apiKey: `Basic ${basic}`,
+      headers: { Accept: "application/json" },
+    });
+
+  const certLimiter = injectedCertificationLimiter ?? partnerizeCertificationLimiter;
 
   async function get(path, params = {}, stats = null) {
     await partnerizeRateLimiter.acquireSlot();
@@ -204,6 +296,62 @@ export function createPartnerizeAdapter({
   const adapter = {
     supplierKey: "PARTNERIZE",
     publisherId,
+
+    /**
+     * One bounded certification sample. Never a sync fetcher.
+     *
+     * What is skipped is the get() helper, not the pacing. get() applies requestWithRetry, and a
+     * probe that retries turns one supplier rejection into three, so the request goes to
+     * httpClient directly — which is what keeps the retry count at zero.
+     *
+     * Pacing is kept, on certification's own limiter at a 750 ms minimum interval. One probe
+     * cannot burst, but one RUN can: a single request may ask for authenticate, publishers and
+     * campaigns, and the service dispatches them one after another.
+     *
+     * Admission is bounded and charged against the source budget, so the request receives what is
+     * left of it rather than a fresh timeout stacked on top of the wait. If the admission deadline
+     * expires, NO supplier HTTP request is sent. The underlying createRateLimiter admission
+     * promise is not cancellable and may settle later, which can delay a subsequent probe by up to
+     * one interval — safe, and accepted.
+     */
+    async fetchCertificationSample(sourceObject, ctx = {}) {
+      const spec = PARTNERIZE_CERTIFICATION_SAMPLES[sourceObject];
+      if (!spec) throw new Error(`No Partnerize certification sample is defined for "${sourceObject}"`);
+
+      // The publisher id is the adapter's own, resolved at construction from credentials or env.
+      // It is never taken from ctx, so a caller cannot point the probe at another publisher.
+      const resolved = { publisherId };
+      if (spec.needs && !resolved[spec.needs]) {
+        throw new Error(`Partnerize certification sample "${sourceObject}" requires ${spec.needs}`);
+      }
+
+      // The source budget covers admission AND the request. Waiting for a slot spends it, so the
+      // request gets what is left rather than a fresh full timeout on top of the wait.
+      const timeoutMs = Number(ctx.timeoutMs || PARTNERIZE_CERTIFICATION_TIMEOUT_MS);
+      const admissionBudgetMs = Math.min(Number(ctx.throttleBudgetMs ?? timeoutMs), timeoutMs);
+      const startedAt = Date.now();
+
+      await withDeadline(
+        certLimiter.acquireSlot(),
+        admissionBudgetMs,
+        new PartnerizeCertificationThrottledError(),
+      );
+
+      const remainingMs = timeoutMs - (Date.now() - startedAt);
+      if (remainingMs <= 0) throw new PartnerizeCertificationThrottledError();
+
+      const response = await httpClient.get(spec.path(resolved), {
+        params: spec.params(resolved),
+        timeout: remainingMs,
+      });
+
+      const rows = extractRows(response?.data);
+      // A non-list endpoint (/user) returns an object; report it as the single row it is.
+      if (!rows.length && response?.data && typeof response.data === "object") {
+        return [response.data];
+      }
+      return rows.slice(0, 1);
+    },
 
     getCapabilities() {
       return {

@@ -25,7 +25,7 @@ export async function networkCertificationCatalogHandler(_req, res, next) {
     noStore(res);
     res.json(
       ok({
-        networks: ["optimise"].map((network) => ({ network, sourceObjects: listProbeSourceObjects(network) })),
+        networks: ["optimise", "partnerize"].map((network) => ({ network, sourceObjects: listProbeSourceObjects(network) })),
         execution: {
           method: "POST",
           path: "/ops/admin/network-certification/:network/run",
