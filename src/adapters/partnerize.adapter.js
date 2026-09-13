@@ -226,10 +226,39 @@ const PARTNERIZE_CERTIFICATION_SAMPLES = Object.freeze({
   campaigns: {
     method: "GET",
     needs: "publisherId",
-    path: (ctx) => `/user/publisher/${encodeURIComponent(ctx.publisherId)}/campaign/a`,
+    // The argument is the adapter's RESOLVED values, never a caller's ctx. Named accordingly so
+    // the distinction is visible at the one place an identifier enters a URL path.
+    path: (resolved) => `/user/publisher/${encodeURIComponent(resolved.publisherId)}/campaign/a`,
     params: () => ({ ...PARTNERIZE_SINGLE_ROW }),
   },
 });
+
+/** Raised when no usable publisher id is configured or discoverable. Carries no identifier. */
+export class PartnerizeNoPublisherIdError extends Error {
+  constructor() {
+    super("No usable Partnerize publisher id is configured or discoverable");
+    this.name = "PartnerizeNoPublisherIdError";
+    this.partnerizeNoPublisherId = true;
+  }
+}
+
+/**
+ * The first publisher id a response yields that is safe to interpolate into a path.
+ *
+ * Selection reuses extractPartnerizePublisherIds, the extractor production sync already applies to
+ * this endpoint, rather than inventing a second namespace rule for certification to disagree with.
+ * The guard on top rejects anything carrying path, query or control syntax: these ids come from a
+ * supplier response and are placed into a URL path segment.
+ */
+export function firstUsablePartnerizePublisherId(payload) {
+  for (const candidate of extractPartnerizePublisherIds(payload)) {
+    const text = String(candidate).trim();
+    if (!text) continue;
+    if (/[\\/\s?#]/.test(text)) continue;
+    return text;
+  }
+  return null;
+}
 
 export function listPartnerizeCertificationSamples() {
   return Object.keys(PARTNERIZE_CERTIFICATION_SAMPLES);
@@ -293,6 +322,47 @@ export function createPartnerizeAdapter({
     return all;
   }
 
+  /**
+   * Exactly one bounded certification request.
+   *
+   * `resolved` is always built by this adapter — from its own credentials, or from a supplier
+   * response it read itself. It never originates with a caller.
+   */
+  async function sampleOnce(sourceObject, resolved, ctx = {}) {
+    const spec = PARTNERIZE_CERTIFICATION_SAMPLES[sourceObject];
+    if (!spec) throw new Error(`No Partnerize certification sample is defined for "${sourceObject}"`);
+    if (spec.needs && !resolved[spec.needs]) {
+      throw new Error(`Partnerize certification sample "${sourceObject}" requires ${spec.needs}`);
+    }
+
+    // The source budget covers admission AND the request. Waiting for a slot spends it, so the
+    // request gets what is left rather than a fresh full timeout on top of the wait.
+    const timeoutMs = Number(ctx.timeoutMs || PARTNERIZE_CERTIFICATION_TIMEOUT_MS);
+    const admissionBudgetMs = Math.min(Number(ctx.throttleBudgetMs ?? timeoutMs), timeoutMs);
+    const startedAt = Date.now();
+
+    await withDeadline(
+      certLimiter.acquireSlot(),
+      admissionBudgetMs,
+      new PartnerizeCertificationThrottledError(),
+    );
+
+    const remainingMs = timeoutMs - (Date.now() - startedAt);
+    if (remainingMs <= 0) throw new PartnerizeCertificationThrottledError();
+
+    const response = await httpClient.get(spec.path(resolved), {
+      params: spec.params(resolved),
+      timeout: remainingMs,
+    });
+
+    const rows = extractRows(response?.data);
+    // A non-list endpoint (/user) returns an object; report it as the single row it is.
+    if (!rows.length && response?.data && typeof response.data === "object") {
+      return [response.data];
+    }
+    return rows.slice(0, 1);
+  }
+
   const adapter = {
     supplierKey: "PARTNERIZE",
     publisherId,
@@ -315,42 +385,42 @@ export function createPartnerizeAdapter({
      * one interval — safe, and accepted.
      */
     async fetchCertificationSample(sourceObject, ctx = {}) {
-      const spec = PARTNERIZE_CERTIFICATION_SAMPLES[sourceObject];
-      if (!spec) throw new Error(`No Partnerize certification sample is defined for "${sourceObject}"`);
-
       // The publisher id is the adapter's own, resolved at construction from credentials or env.
       // It is never taken from ctx, so a caller cannot point the probe at another publisher.
-      const resolved = { publisherId };
-      if (spec.needs && !resolved[spec.needs]) {
-        throw new Error(`Partnerize certification sample "${sourceObject}" requires ${spec.needs}`);
+      return sampleOnce(sourceObject, { publisherId }, ctx);
+    },
+
+    /**
+     * The campaigns probe: one request when a publisher id is configured, two when it is not.
+     *
+     * Production sync resolves the id the same way — configured first, then a bounded discovery
+     * call against /user/publisher — so certification mirrors sync rather than requiring a config
+     * change that only certification would need. This is the ONLY Partnerize probe allowed a
+     * second request, and it is a dependent chain, not a fallback: the second call happens because
+     * the first produced an input, never because the first failed.
+     *
+     * The discovered id stays inside this method. It is never returned, never reported, never
+     * written anywhere, and never accepted from a caller.
+     */
+    async fetchCertificationCampaignSample(ctx = {}) {
+      // One deadline for the whole chain, so two calls cannot each take a full timeout.
+      const totalMs = Number(ctx.timeoutMs || PARTNERIZE_CERTIFICATION_TIMEOUT_MS);
+      const deadline = Date.now() + totalMs;
+      const remaining = () => deadline - Date.now();
+
+      let resolvedPublisherId = publisherId;
+
+      if (!resolvedPublisherId) {
+        // Request 1 of 2 — the already-certified bounded publishers sample.
+        const rows = await sampleOnce("publishers", { publisherId: null }, { timeoutMs: remaining() });
+        resolvedPublisherId = firstUsablePartnerizePublisherId(rows);
+        if (!resolvedPublisherId) throw new PartnerizeNoPublisherIdError();
       }
 
-      // The source budget covers admission AND the request. Waiting for a slot spends it, so the
-      // request gets what is left rather than a fresh full timeout on top of the wait.
-      const timeoutMs = Number(ctx.timeoutMs || PARTNERIZE_CERTIFICATION_TIMEOUT_MS);
-      const admissionBudgetMs = Math.min(Number(ctx.throttleBudgetMs ?? timeoutMs), timeoutMs);
-      const startedAt = Date.now();
+      if (remaining() <= 0) throw new PartnerizeCertificationThrottledError();
 
-      await withDeadline(
-        certLimiter.acquireSlot(),
-        admissionBudgetMs,
-        new PartnerizeCertificationThrottledError(),
-      );
-
-      const remainingMs = timeoutMs - (Date.now() - startedAt);
-      if (remainingMs <= 0) throw new PartnerizeCertificationThrottledError();
-
-      const response = await httpClient.get(spec.path(resolved), {
-        params: spec.params(resolved),
-        timeout: remainingMs,
-      });
-
-      const rows = extractRows(response?.data);
-      // A non-list endpoint (/user) returns an object; report it as the single row it is.
-      if (!rows.length && response?.data && typeof response.data === "object") {
-        return [response.data];
-      }
-      return rows.slice(0, 1);
+      // Request 2 of 2 (or 1 of 1 on the configured fast path).
+      return sampleOnce("campaigns", { publisherId: resolvedPublisherId }, { timeoutMs: remaining() });
     },
 
     getCapabilities() {

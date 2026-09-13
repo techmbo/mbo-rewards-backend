@@ -53,6 +53,14 @@ export const MAX_SUPPLIER_REQUESTS_PRODUCTS = 2;
  * requests, six in total. This bound applies to commission_groups alone.
  */
 export const COMMISSION_GROUP_CANDIDATE_LIMIT = 5;
+
+/**
+ * Partnerize campaigns is the one Partnerize source object allowed a second request, and only as
+ * a dependent chain: discover a publisher id, then read one campaign. Production sync resolves the
+ * id exactly this way, so certification mirrors it rather than demanding a configuration change
+ * that only certification would need. Every other Partnerize probe stays at one.
+ */
+export const MAX_SUPPLIER_REQUESTS_PARTNERIZE_CAMPAIGNS = 2;
 export const MAX_SUPPLIER_REQUESTS_COMMISSION_GROUPS = 1 + COMMISSION_GROUP_CANDIDATE_LIMIT;
 
 /**
@@ -124,8 +132,9 @@ const PARTNERIZE_PROBES = Object.freeze({
   campaigns: {
     method: "GET",
     endpointKey: "GET /user/publisher/{publisherId}/campaign/a",
-    needs: "publisherId",
-    skipCategory: "SKIPPED_NO_PUBLISHER_ID",
+    // Its own chain: one request when a publisher id is configured, two when it must be
+    // discovered. The only Partnerize probe allowed a second request.
+    chain: "partnerizeCampaigns",
   },
 });
 
@@ -309,6 +318,49 @@ export class NetworkCertificationService {
       userApiKey: credentials.userApiKey,
       publisherId: credentials.publisherId ?? null,
     });
+  }
+
+  /**
+   * The Partnerize campaigns chain.
+   *
+   * The adapter owns the resolution: it uses its configured publisher id when it has one, and
+   * otherwise discovers one from the bounded publishers sample. Keeping that inside the adapter is
+   * deliberate — a discovered identifier never crosses back through this service, so there is no
+   * point at which it could be reported, persisted, or replaced by a caller's value.
+   *
+   * This service only classifies the outcome.
+   */
+  async certifyPartnerizeCampaigns({ adapter, key, probe, budgetLeft }) {
+    const base = {
+      network: key,
+      sourceObject: "campaigns",
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+    };
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      const rows = asRows(await adapter.fetchCertificationCampaignSample({ timeoutMs })).slice(0, 1);
+      const fieldPaths = summarisePayloads(rows);
+      return {
+        ...base,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+      };
+    } catch (error) {
+      // "No publisher id" is a configuration outcome, not a supplier failure.
+      if (error?.partnerizeNoPublisherId) {
+        return { ...base, ok: false, statusCategory: "SKIPPED_NO_PUBLISHER_ID" };
+      }
+      // Anything else — discovery or campaign — is reported as its category and stops there.
+      return { ...base, ok: false, statusCategory: statusCategory(error) };
+    }
   }
 
   /**
@@ -638,6 +690,11 @@ export class NetworkCertificationService {
           sampleCount: 0,
           fieldPaths: [],
         });
+        continue;
+      }
+
+      if (probe.chain === "partnerizeCampaigns") {
+        results.push(await this.certifyPartnerizeCampaigns({ adapter, key, probe, budgetLeft }));
         continue;
       }
 

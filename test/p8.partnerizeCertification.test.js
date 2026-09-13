@@ -9,14 +9,20 @@ const {
   MAX_SUPPLIER_REQUESTS_PER_SOURCE,
   MAX_SUPPLIER_REQUESTS_PRODUCTS,
   MAX_SUPPLIER_REQUESTS_COMMISSION_GROUPS,
+  MAX_SUPPLIER_REQUESTS_PARTNERIZE_CAMPAIGNS,
   listProbeSourceObjects,
 } = await import("../src/modules/ops/networkCertification.service.js");
 const { parseRunBody } = await import("../src/controllers/networkCertification.controller.js");
 const { createRateLimiter } = await import("../src/core/rateLimiter.js");
-const { createPartnerizeAdapter, listPartnerizeCertificationSamples } = await import(
+const { createPartnerizeAdapter, firstUsablePartnerizePublisherId, listPartnerizeCertificationSamples } = await import(
   "../src/adapters/partnerize.adapter.js"
 );
 const partnerizeSource = (await import("node:fs")).readFileSync("src/adapters/partnerize.adapter.js", "utf8");
+/** The body of the one-request primitive every Partnerize probe goes through. */
+const samplerBody = (() => {
+  const start = partnerizeSource.indexOf("async function sampleOnce(");
+  return partnerizeSource.slice(start, partnerizeSource.indexOf("\n  }", start));
+})();
 const serviceSource = (await import("node:fs")).readFileSync(
   "src/modules/ops/networkCertification.service.js",
   "utf8",
@@ -86,13 +92,17 @@ describe("Partnerize certification — registry and bounds", () => {
     }
   });
 
-  it("18 — Partnerize declares one supplier request per source object", () => {
+  it("18 — one request per source object, with campaigns the single declared exception", () => {
     assert.equal(MAX_SUPPLIER_REQUESTS_PER_SOURCE, 1);
-    // No Partnerize probe declares a chain, so none can make a second request.
     const start = serviceSource.indexOf("const PARTNERIZE_PROBES");
     const block = serviceSource.slice(start, serviceSource.indexOf("});", start));
-    assert.ok(!block.includes("chain:"), "no Partnerize probe may declare a chain");
+    // Exactly one chain, and it is the approved one.
+    assert.equal((block.match(/chain: "/g) || []).length, 1, "exactly one declared chain");
+    assert.match(block, /chain: "partnerizeCampaigns"/);
     assert.ok(!block.includes("emits:"), "no Partnerize probe may emit extra rows");
+    // authenticate and publishers declare nothing extra.
+    const single = block.slice(block.indexOf("authenticate:"), block.indexOf("  campaigns:"));
+    assert.ok(!single.includes("chain:") && !single.includes("needs:"), single);
   });
 
   it("17 — the Optimise request-bound exceptions are unchanged", () => {
@@ -143,6 +153,7 @@ describe("Partnerize certification — the request the sampler actually makes", 
     assert.match(table, /authenticate: \{ method: "GET", path: \(\) => "\/user", params: \(\) => \(\{\}\) \}/);
     assert.match(table, /publishers: \{ method: "GET", path: \(\) => "\/user\/publisher"/);
     assert.match(table, /campaign\/a`/, "one participation status only");
+    assert.match(table, /path: \(resolved\) =>/, "the path argument is resolved values, not caller ctx");
     assert.match(partnerizeSource, /const PARTNERIZE_SINGLE_ROW = \{ limit: 1, offset: 0 \}/);
     // Only GET is ever declared.
     assert.equal((table.match(/method: "GET"/g) || []).length, 3);
@@ -150,16 +161,14 @@ describe("Partnerize certification — the request the sampler actually makes", 
   });
 
   it("4 — the sampler does not retry", () => {
-    const start = partnerizeSource.indexOf("async fetchCertificationSample");
-    const body = partnerizeSource.slice(start, partnerizeSource.indexOf("\n    },", start));
+    const body = samplerBody;
     assert.ok(!body.includes("requestWithRetry"), "must not use the retry wrapper");
     assert.ok(!body.includes("await get("), "must not use the retrying get() helper");
     assert.match(body, /httpClient\.get\(/, "issues the request directly");
   });
 
   it("5 — the sampler does not paginate", () => {
-    const start = partnerizeSource.indexOf("async fetchCertificationSample");
-    const body = partnerizeSource.slice(start, partnerizeSource.indexOf("\n    },", start));
+    const body = samplerBody;
     assert.ok(!body.includes("fetchPaginated"), "must not use the paginator");
     assert.ok(!/for\s*\(/.test(body), "no loop");
     assert.ok(!/while\s*\(/.test(body), "no loop");
@@ -233,10 +242,8 @@ describe("Partnerize certification — the request the sampler actually makes", 
     const { httpClient } = await sample("authenticate");
     const { timeout } = httpClient.requests[0];
     assert.ok(timeout > 0 && timeout <= 10000, `timeout out of bounds: ${timeout}`);
-    const start = partnerizeSource.indexOf("async fetchCertificationSample");
-    const body = partnerizeSource.slice(start, partnerizeSource.indexOf("\n    },", start));
-    assert.match(body, /timeout: remainingMs/, "the request gets what the budget has left");
-    assert.match(body, /const remainingMs = timeoutMs - \(Date\.now\(\) - startedAt\)/);
+    assert.match(samplerBody, /timeout: remainingMs/, "the request gets what the budget has left");
+    assert.match(samplerBody, /const remainingMs = timeoutMs - \(Date\.now\(\) - startedAt\)/);
     assert.match(partnerizeSource, /PARTNERIZE_CERTIFICATION_TIMEOUT_MS = Number\(\s*process\.env\.CERTIFICATION_SAMPLE_TIMEOUT_MS \|\| 10000,?\s*\)/);
   });
 
@@ -321,12 +328,12 @@ describe("Partnerize certification — the request the sampler actually makes", 
     }
   });
 
-  it("14b — the sampler reads its publisher id from the adapter, never from ctx", () => {
-    const start = partnerizeSource.indexOf("async fetchCertificationSample");
-    const body = partnerizeSource.slice(start, partnerizeSource.indexOf("\n    },", start));
-    assert.match(body, /const resolved = \{ publisherId \}/, "taken from the closure");
-    assert.ok(!/ctx\.publisherId/.test(body), "must not read a caller-supplied publisher id");
-    assert.ok(!/ctx\.path|ctx\.endpoint|ctx\.url/.test(body), "no caller-supplied target");
+  it("14b — resolved values never come from ctx", () => {
+    // The public entry point hands the closure's id in; the chain hands one it read itself.
+    assert.match(partnerizeSource, /return sampleOnce\(sourceObject, \{ publisherId \}, ctx\)/);
+    assert.ok(!/ctx\.publisherId/.test(partnerizeSource), "no caller-supplied publisher id anywhere");
+    assert.ok(!/ctx\.path|ctx\.endpoint|ctx\.url/.test(samplerBody), "no caller-supplied target");
+    assert.match(samplerBody, /spec\.path\(resolved\)/, "the path is built from resolved values only");
   });
 
   it("15 — a Partnerize certification run performs no database write", async () => {
@@ -373,7 +380,7 @@ describe("Partnerize certification — the request the sampler actually makes", 
     );
   });
 
-  it("a campaigns probe with no publisher id skips without a request", async () => {
+  it("a campaigns probe with no discoverable publisher id skips", async () => {
     let called = 0;
     const service = new NetworkCertificationService({
       prisma: { rawPayload: { findMany: async () => [] } },
@@ -382,6 +389,11 @@ describe("Partnerize certification — the request the sampler actually makes", 
         fetchCertificationSample: async () => {
           called += 1;
           return [{ a: 1 }];
+        },
+        fetchCertificationCampaignSample: async () => {
+          const error = new Error("no id");
+          error.partnerizeNoPublisherId = true;
+          throw error;
         },
       }),
       partnerizeCredentialResolver: async () => ({
@@ -466,10 +478,8 @@ describe("Partnerize certification — bounded supplier pacing", () => {
     );
     assert.match(partnerizeSource, /createRateLimiter\(PARTNERIZE_CERTIFICATION_MIN_INTERVAL_MS\)/);
     // Its own limiter, not the sync one.
-    const start = partnerizeSource.indexOf("async fetchCertificationSample");
-    const body = partnerizeSource.slice(start, partnerizeSource.indexOf("\n    },", start));
-    assert.match(body, /certLimiter\.acquireSlot\(\)/);
-    assert.ok(!body.includes("partnerizeRateLimiter"), "must not queue on the sync limiter");
+    assert.match(samplerBody, /certLimiter\.acquireSlot\(\)/);
+    assert.ok(!samplerBody.includes("partnerizeRateLimiter"), "must not queue on the sync limiter");
     assert.match(partnerizeSource, /const PARTNERIZE_MIN_INTERVAL_MS = Number\(process\.env\.PARTNERIZE_MIN_INTERVAL_MS \|\| 750\)/);
   });
 
@@ -594,5 +604,327 @@ describe("Partnerize certification — bounded supplier pacing", () => {
     assert.match(body, /partnerizeRateLimiter\.acquireSlot\(\)/, "sync still uses the sync limiter");
     assert.match(body, /requestWithRetry/, "sync still retries");
     assert.match(partnerizeSource, /retries: 3,\s*\n\s*delayMs: 900,/);
+  });
+});
+
+/**
+ * The campaigns probe mirrors how production sync resolves a publisher id: configured first, then
+ * a bounded discovery call. One request when configured, two when not — and never a third.
+ */
+describe("Partnerize campaigns — bounded publisher-id discovery chain", () => {
+  const DISCOVERED = "554433";
+  const CONFIGURED = "998877";
+  const CAMPAIGN_ROW = { campaign_id: "c-1", title: "Ubuy", status: "active" };
+
+  /** Answers per path so each leg of the chain can be shaped independently. */
+  function chainClient({ publishersData, campaignData = { campaigns: [CAMPAIGN_ROW] }, errors = {} } = {}) {
+    const requests = [];
+    return {
+      requests,
+      get: async (path, config = {}) => {
+        requests.push({ path, params: config.params, timeout: config.timeout, at: Date.now() });
+        if (path === "/user/publisher") {
+          if (errors.publishers) throw errors.publishers;
+          return { data: publishersData ?? { publishers: [{ publisher_id: DISCOVERED }] } };
+        }
+        if (errors.campaigns) throw errors.campaigns;
+        return { data: campaignData };
+      },
+    };
+  }
+
+  function chainAdapter(httpClient, { publisherId = null, fast = true } = {}) {
+    return createPartnerizeAdapter({
+      applicationKey: APP_KEY,
+      userApiKey: USER_KEY,
+      publisherId,
+      httpClient,
+      certificationRateLimiter: fast
+        ? { acquireSlot: async () => {}, resetAfterRateLimit: () => {} }
+        : createRateLimiter(120),
+    });
+  }
+
+  const paths = (httpClient) => httpClient.requests.map((r) => r.path);
+
+  it("1 — a configured publisher id makes exactly one campaign request", async () => {
+    const httpClient = chainClient();
+    await chainAdapter(httpClient, { publisherId: CONFIGURED }).fetchCertificationCampaignSample({});
+    assert.equal(httpClient.requests.length, 1);
+    assert.equal(httpClient.requests[0].path, `/user/publisher/${CONFIGURED}/campaign/a`);
+    assert.deepEqual(httpClient.requests[0].params, { limit: 1, offset: 0 });
+  });
+
+  it("2 — a configured publisher id triggers no discovery call", async () => {
+    const httpClient = chainClient();
+    await chainAdapter(httpClient, { publisherId: CONFIGURED }).fetchCertificationCampaignSample({});
+    assert.equal(paths(httpClient).includes("/user/publisher"), false);
+  });
+
+  it("3 — a missing publisher id triggers discovery, then the campaign request", async () => {
+    const httpClient = chainClient();
+    await chainAdapter(httpClient).fetchCertificationCampaignSample({});
+    assert.deepEqual(paths(httpClient), ["/user/publisher", `/user/publisher/${DISCOVERED}/campaign/a`]);
+  });
+
+  it("4 — discovery uses limit=1 offset=0", async () => {
+    const httpClient = chainClient();
+    await chainAdapter(httpClient).fetchCertificationCampaignSample({});
+    assert.deepEqual(httpClient.requests[0].params, { limit: 1, offset: 0 });
+  });
+
+  it("5 — the first valid supplier-derived id is used, via the production extractor", async () => {
+    const httpClient = chainClient({
+      publishersData: { publishers: [{ publisher_id: DISCOVERED }, { publisher_id: "111" }] },
+    });
+    await chainAdapter(httpClient).fetchCertificationCampaignSample({});
+    assert.equal(httpClient.requests[1].path, `/user/publisher/${DISCOVERED}/campaign/a`);
+    // The nested { publisher: {...} } envelope shape the production extractor also handles.
+    assert.equal(firstUsablePartnerizePublisherId({ publishers: [{ publisher: { partner_id: "777" } }] }), "777");
+  });
+
+  it("5b — an id carrying path or control syntax is refused, not interpolated", () => {
+    for (const hostile of ["12/../admin", "12?x=1", "12#f", "1 2", "12\\\\x", "  "]) {
+      assert.equal(
+        firstUsablePartnerizePublisherId({ publishers: [{ publisher_id: hostile }] }),
+        null,
+        hostile,
+      );
+    }
+    // A hostile first entry does not poison a clean later one.
+    assert.equal(
+      firstUsablePartnerizePublisherId({ publishers: [{ publisher_id: "a/b" }, { publisher_id: "9" }] }),
+      "9",
+    );
+  });
+
+  it("6 — a caller cannot supply a publisher id at any layer", () => {
+    for (const key of ["publisherId", "publisher_id", "publishers", "campaignId", "path", "endpoint"]) {
+      assert.throws(
+        () => parseRunBody({ sourceObjects: ["campaigns"], [key]: "1" }),
+        (error) => {
+          assert.equal(error.statusCode ?? error.status, 400, key);
+          return true;
+        },
+        `accepted ${key}`,
+      );
+    }
+    // And the chain reads nothing identifier-shaped out of ctx.
+    const start = partnerizeSource.indexOf("async fetchCertificationCampaignSample");
+    const body = partnerizeSource.slice(start, partnerizeSource.indexOf("\n    },", start));
+    assert.ok(!/ctx\.publisherId|ctx\.path|ctx\.endpoint/.test(body));
+    assert.match(body, /let resolvedPublisherId = publisherId;/, "starts from the closure");
+  });
+
+  it("7 — the discovered id never appears in the certification output", async () => {
+    const httpClient = chainClient();
+    const service = new NetworkCertificationService({
+      prisma: { rawPayload: { findMany: async () => [] } },
+      adapterFactory: () => chainAdapter(httpClient),
+      partnerizeCredentialResolver: async () => ({
+        applicationKey: APP_KEY,
+        userApiKey: USER_KEY,
+        publisherId: null,
+      }),
+    });
+    const out = await service.certify("partnerize", { sourceObjects: ["campaigns"] });
+    assert.equal(out.results[0].statusCategory, "OK");
+    const text = JSON.stringify(out);
+    for (const leak of [DISCOVERED, CONFIGURED, "Ubuy", "c-1", APP_KEY, USER_KEY]) {
+      assert.ok(!text.includes(leak), `leaked: ${leak}`);
+    }
+    // Field names are still reported — that is the probe's purpose.
+    assert.deepEqual(out.results[0].fieldPaths.map((f) => f.path).sort(), ["campaign_id", "status", "title"]);
+  });
+
+  it("8 — the chain performs no database write", async () => {
+    const calls = [];
+    const writes = ["create", "createMany", "update", "updateMany", "upsert", "delete", "deleteMany"];
+    const model = (name) => {
+      const t = { findMany: async () => [] };
+      for (const w of writes) {
+        t[w] = async () => {
+          calls.push(`WRITE:${name}.${w}`);
+          throw new Error("forbidden write");
+        };
+      }
+      return t;
+    };
+    const service = new NetworkCertificationService({
+      prisma: { rawPayload: model("rawPayload"), marketplaceAccount: model("marketplaceAccount") },
+      adapterFactory: () => chainAdapter(chainClient()),
+      partnerizeCredentialResolver: async () => ({
+        applicationKey: APP_KEY,
+        userApiKey: USER_KEY,
+        publisherId: null,
+      }),
+    });
+    await service.certify("partnerize", { sourceObjects: ["campaigns"] });
+    assert.deepEqual(calls, [], "no write attempted");
+    // And nothing in the chain reaches for a persistence helper.
+    const start = partnerizeSource.indexOf("async fetchCertificationCampaignSample");
+    const body = partnerizeSource.slice(start, partnerizeSource.indexOf("\n    },", start));
+    for (const token of ["prisma", "marketplaceAccount", "accountExternalId", "upsert", "update("]) {
+      assert.ok(!body.includes(token), `chain must not persist: ${token}`);
+    }
+  });
+
+  it("9 — empty discovery gives SKIPPED_NO_PUBLISHER_ID and no campaign call", async () => {
+    const httpClient = chainClient({ publishersData: { publishers: [] } });
+    const service = new NetworkCertificationService({
+      prisma: { rawPayload: { findMany: async () => [] } },
+      adapterFactory: () => chainAdapter(httpClient),
+      partnerizeCredentialResolver: async () => ({
+        applicationKey: APP_KEY,
+        userApiKey: USER_KEY,
+        publisherId: null,
+      }),
+    });
+    const out = await service.certify("partnerize", { sourceObjects: ["campaigns"] });
+    assert.equal(out.results[0].statusCategory, "SKIPPED_NO_PUBLISHER_ID");
+    assert.equal(out.results[0].sampleCount, 0);
+    assert.deepEqual(paths(httpClient), ["/user/publisher"], "no campaign request");
+  });
+
+  it("9b — a discovery response whose only id is unusable also skips", async () => {
+    const httpClient = chainClient({ publishersData: { publishers: [{ publisher_id: "bad/id" }] } });
+    const service = new NetworkCertificationService({
+      prisma: { rawPayload: { findMany: async () => [] } },
+      adapterFactory: () => chainAdapter(httpClient),
+      partnerizeCredentialResolver: async () => ({
+        applicationKey: APP_KEY,
+        userApiKey: USER_KEY,
+        publisherId: null,
+      }),
+    });
+    const out = await service.certify("partnerize", { sourceObjects: ["campaigns"] });
+    assert.equal(out.results[0].statusCategory, "SKIPPED_NO_PUBLISHER_ID");
+    assert.equal(httpClient.requests.length, 1);
+  });
+
+  it("10/11 — a discovery failure stops the chain with its own category", async () => {
+    for (const [status, expected] of [[401, "AUTH_FAILED"], [400, "REQUEST_REJECTED"], [429, "RATE_LIMITED"]]) {
+      const error = Object.assign(new Error("x"), { response: { status } });
+      const httpClient = chainClient({ errors: { publishers: error } });
+      const service = new NetworkCertificationService({
+        prisma: { rawPayload: { findMany: async () => [] } },
+        adapterFactory: () => chainAdapter(httpClient),
+        partnerizeCredentialResolver: async () => ({
+          applicationKey: APP_KEY,
+          userApiKey: USER_KEY,
+          publisherId: null,
+        }),
+      });
+      const out = await service.certify("partnerize", { sourceObjects: ["campaigns"] });
+      assert.equal(out.results[0].statusCategory, expected);
+      assert.deepEqual(paths(httpClient), ["/user/publisher"], `${expected}: campaigns must not be attempted`);
+    }
+  });
+
+  it("12 — a campaign-request failure stops, with no fallback", async () => {
+    const error = Object.assign(new Error("x"), { response: { status: 403 } });
+    const httpClient = chainClient({ errors: { campaigns: error } });
+    const service = new NetworkCertificationService({
+      prisma: { rawPayload: { findMany: async () => [] } },
+      adapterFactory: () => chainAdapter(httpClient),
+      partnerizeCredentialResolver: async () => ({
+        applicationKey: APP_KEY,
+        userApiKey: USER_KEY,
+        publisherId: null,
+      }),
+    });
+    const out = await service.certify("partnerize", { sourceObjects: ["campaigns"] });
+    assert.equal(out.results[0].statusCategory, "AUTH_FAILED");
+    assert.equal(httpClient.requests.length, 2, "no third request");
+  });
+
+  it("13 — no a/p/r fan-out", async () => {
+    const httpClient = chainClient();
+    await chainAdapter(httpClient).fetchCertificationCampaignSample({});
+    const campaignPaths = paths(httpClient).filter((p) => p.includes("/campaign/"));
+    assert.deepEqual(campaignPaths, [`/user/publisher/${DISCOVERED}/campaign/a`]);
+    assert.equal(campaignPaths.some((p) => p.endsWith("/p") || p.endsWith("/r")), false);
+  });
+
+  it("14/15 — no sync fetcher and no API-generation fallback in the chain", () => {
+    const start = partnerizeSource.indexOf("async fetchCertificationCampaignSample");
+    const body = partnerizeSource.slice(start, partnerizeSource.indexOf("\n    },", start));
+    for (const forbidden of [
+      "fetchCampaigns",
+      "resolvePublisherId",
+      "fetchPaginated",
+      "partnerizeCampaignListPaths",
+      "/v2/",
+      "/v3/",
+      "discovery/advertisers",
+      "campaign-terms-and-conditions",
+    ]) {
+      assert.ok(!body.includes(forbidden), `chain must not reach for ${forbidden}`);
+    }
+  });
+
+  it("16 — the maximum is two supplier requests, and it is declared", async () => {
+    assert.equal(MAX_SUPPLIER_REQUESTS_PARTNERIZE_CAMPAIGNS, 2);
+    assert.match(serviceSource, /export const MAX_SUPPLIER_REQUESTS_PARTNERIZE_CAMPAIGNS = 2;/);
+    const httpClient = chainClient();
+    await chainAdapter(httpClient).fetchCertificationCampaignSample({});
+    assert.equal(httpClient.requests.length, MAX_SUPPLIER_REQUESTS_PARTNERIZE_CAMPAIGNS);
+  });
+
+  it("17 — pacing applies between discovery and the campaign request", async () => {
+    const httpClient = chainClient();
+    await chainAdapter(httpClient, { fast: false }).fetchCertificationCampaignSample({});
+    assert.equal(httpClient.requests.length, 2);
+    const gap = httpClient.requests[1].at - httpClient.requests[0].at;
+    assert.ok(gap >= 105, `the two legs were ${gap}ms apart, expected >= 120`);
+  });
+
+  it("18 — zero retries anywhere in the chain", async () => {
+    let calls = 0;
+    const failing = {
+      get: async () => {
+        calls += 1;
+        throw Object.assign(new Error("boom"), { response: { status: 503 } });
+      },
+    };
+    await assert.rejects(() => chainAdapter(failing).fetchCertificationCampaignSample({}));
+    assert.equal(calls, 1, "discovery failure must not be retried");
+    const start = partnerizeSource.indexOf("async fetchCertificationCampaignSample");
+    const body = partnerizeSource.slice(start, partnerizeSource.indexOf("\n    },", start));
+    assert.ok(!body.includes("requestWithRetry") && !body.includes("retries"));
+  });
+
+  it("19 — both legs share one deadline, so the source budget is preserved", async () => {
+    const httpClient = chainClient();
+    await chainAdapter(httpClient).fetchCertificationCampaignSample({ timeoutMs: 4000 });
+    const [discovery, campaign] = httpClient.requests;
+    assert.ok(discovery.timeout <= 4000, `discovery ${discovery.timeout}`);
+    assert.ok(campaign.timeout <= discovery.timeout, "the second leg gets what the first left");
+    const start = partnerizeSource.indexOf("async fetchCertificationCampaignSample");
+    const body = partnerizeSource.slice(start, partnerizeSource.indexOf("\n    },", start));
+    assert.match(body, /const deadline = Date\.now\(\) \+ totalMs/);
+    assert.match(body, /timeoutMs: remaining\(\)/);
+  });
+
+  it("20 — authenticate and publishers probes are unchanged", async () => {
+    const authClient = chainClient();
+    await chainAdapter(authClient, { publisherId: CONFIGURED }).fetchCertificationSample("authenticate", {});
+    assert.equal(authClient.requests.length, 1);
+    assert.equal(authClient.requests[0].path, "/user");
+    assert.deepEqual(authClient.requests[0].params, {});
+
+    const pubClient = chainClient();
+    await chainAdapter(pubClient, { publisherId: CONFIGURED }).fetchCertificationSample("publishers", {});
+    assert.equal(pubClient.requests.length, 1);
+    assert.equal(pubClient.requests[0].path, "/user/publisher");
+    assert.deepEqual(pubClient.requests[0].params, { limit: 1, offset: 0 });
+  });
+
+  it("21 — Optimise certification is unchanged", () => {
+    assert.equal(MAX_SUPPLIER_REQUESTS_PRODUCTS, 2);
+    assert.equal(MAX_SUPPLIER_REQUESTS_COMMISSION_GROUPS, 6);
+    assert.equal(listProbeSourceObjects("optimise").length, 11);
+    assert.match(serviceSource, /probe\.chain === "commissionGroups"/);
+    assert.match(serviceSource, /CAMPAIGN_BOOTSTRAP_NEEDS = new Set/);
   });
 });
