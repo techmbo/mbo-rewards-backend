@@ -245,6 +245,7 @@ import {
   networkCertificationCatalogHandler,
   networkCertificationRunHandler,
 } from "../controllers/networkCertification.controller.js";
+import { databaseRecoveryDiagnosticHandler } from "../controllers/databaseRecoveryDiagnostic.controller.js";
 import {
   adminListNetworkBillingHandler,
   adminListNetworkPaymentsReceivedHandler,
@@ -306,6 +307,7 @@ import {
   requireApiEndpoint,
   requireEntityTypeAccess,
   requirePermission,
+  requireAdminRole,
 } from "../middleware/auth.js";
 
 const router = Router();
@@ -1313,6 +1315,27 @@ router.post(
     [req.params?.network, req.body?.region || "sea", req.body?.accountLabel || "default"].join("/"),
   ),
   networkCertificationRunHandler,
+);
+
+// TEMPORARY incident diagnostic. Reports whether DIRECT_URL still names this application's
+// database, using table existence, migration lineage and row counts only — never any part of the
+// URL, and never a row's contents.
+//
+// A GET is safe because it is read-only in both directions: no parameters, no writes, and the one
+// outbound connection goes to an address the server already holds, which no caller can influence.
+//
+// Gated twice. `ops:manage` is the permission protected ops routes already use; `requireAdminRole`
+// narrows it to ADMIN, because OPERATIONS carries that permission too and this reports on
+// production infrastructure. Remove this route once the database is recovered.
+router.get(
+  "/ops/diagnostics/database-recovery",
+  authenticate,
+  requirePermission(PERMISSIONS.OPS_MANAGE),
+  requireAdminRole,
+  noStoreHeaders,
+  // No audit middleware here, deliberately: it calls logAccess(), which INSERTs an AccessLog row
+  // through the runtime client. This diagnostic must not write, and that client is the broken one.
+  databaseRecoveryDiagnosticHandler,
 );
 router.get("/ops/admin/commission-vocabulary", authenticate, requirePermission(PERMISSIONS.COMMISSION_READ), adminCommissionVocabularyHandler);
 router.get(

@@ -145,6 +145,28 @@ export function requirePermission(...requiredPermissions) {
   };
 }
 
+/**
+ * ADMIN role, not merely a permission an ADMIN happens to hold.
+ *
+ * Every ops permission is shared with at least one other role — OPERATIONS also carries
+ * `ops:manage`, TECH also carries `ops:read` — so a permission check alone cannot express
+ * "ADMIN only". Composed after `requirePermission`, this narrows the gate rather than replacing
+ * it, and it stays correct if a permission is later granted to another role.
+ */
+export function requireAdminRole(req, res, next) {
+  if (!req.user) {
+    sendAuthError(res, 401, "Authentication required.");
+    return;
+  }
+
+  if (req.user.role !== "ADMIN") {
+    sendAuthError(res, 403, "You do not have permission to perform this action.");
+    return;
+  }
+
+  next();
+}
+
 export function requireEntityTypeAccess(req, res, next) {
   if (!req.user) {
     sendAuthError(res, 401, "Authentication required.");

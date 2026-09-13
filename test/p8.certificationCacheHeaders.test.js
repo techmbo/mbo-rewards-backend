@@ -247,13 +247,28 @@ describe("certification cache headers — a 429 is not cacheable either", () => 
     }
   });
 
-  it("9 — no other route gained the header middleware", () => {
-    // Count uses only, not the import that brings the symbol in.
+  it("9 — no route gained the header middleware except the ones that should have it", () => {
+    // Count uses only, not the import that brings the symbol in. The set is pinned by path rather
+    // than by number alone, so adding the middleware to an unrelated route fails here even if some
+    // other route stopped using it on the same commit.
+    const allowed = [
+      "/ops/admin/network-certification",
+      "/ops/admin/network-certification/:network/run",
+      // Temporary incident diagnostic; remove this entry when that route is removed.
+      "/ops/diagnostics/database-recovery",
+    ];
     const uses = [...routesSource.matchAll(/^\s*noStoreHeaders,\s*$/gm)];
-    assert.equal(uses.length, 2, "exactly the two certification routes");
+    assert.equal(uses.length, allowed.length, "one use per approved route");
     for (const match of uses) {
-      const preceding = routesSource.slice(Math.max(0, match.index - 400), match.index);
-      assert.match(preceding, /network-certification/, "noStoreHeaders outside a certification route");
+      const preceding = routesSource.slice(Math.max(0, match.index - 700), match.index);
+      const owner = allowed.find((path) => preceding.includes(`"${path}"`));
+      assert.ok(owner, "noStoreHeaders on a route that is not on the approved list");
+    }
+    // And each approved route really does carry it.
+    for (const path of allowed) {
+      const start = routesSource.indexOf(`"${path}"`);
+      const block = routesSource.slice(start, routesSource.indexOf(");", start));
+      assert.match(block, /noStoreHeaders,/, `${path} lost the header middleware`);
     }
   });
 
