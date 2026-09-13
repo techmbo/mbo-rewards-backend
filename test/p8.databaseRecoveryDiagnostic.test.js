@@ -474,7 +474,10 @@ describe("database recovery diagnostic — read-only and shape", () => {
 describe("database recovery diagnostic — nothing else changed", () => {
   it("7 — the runtime Prisma singleton is untouched and never imported by the diagnostic", () => {
     const prismaSource = readFileSync("src/database/prisma.js", "utf8");
-    assert.match(prismaSource, /export const prisma = new PrismaClient\(\);/);
+    // The runtime singleton now selects between DATABASE_URL and DIRECT_URL (temporary incident
+    // fallback), but it is still one shared client and still the only one the app uses.
+    assert.match(prismaSource, /export const prisma = RUNTIME_DATABASE_URL_SOURCE/);
+    assert.equal(prismaSource.split("export const prisma").length - 1, 1);
     assert.ok(
       !serviceSource.includes("database/prisma.js"),
       "the diagnostic must not use the runtime client",
