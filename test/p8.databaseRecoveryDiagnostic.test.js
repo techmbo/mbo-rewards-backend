@@ -23,6 +23,9 @@ const { databaseRecoveryDiagnosticHandler } = await import(
 const routesSource = readFileSync("src/routes/index.js", "utf8");
 const serviceSource = readFileSync("src/modules/ops/databaseRecoveryDiagnostic.service.js", "utf8");
 const authSource = readFileSync("src/middleware/auth.js", "utf8");
+const recoveryRouteSource = readFileSync("src/routes/databaseRecoveryRoute.js", "utf8");
+/** Comments strip out: prose about `app.use("/api", …)` must not satisfy a code assertion. */
+const recoveryRouteCode = recoveryRouteSource.replace(/^\s*\*.*$/gm, "").replace(/\/\/.*$/gm, "");
 
 const ROUTE = "/ops/diagnostics/database-recovery";
 
@@ -189,9 +192,11 @@ describe("database recovery diagnostic — access control", () => {
   });
 
   it("2d — the route is wired with the break-glass gate then noStoreHeaders, in order", () => {
-    const start = routesSource.indexOf(`"${ROUTE}"`);
+    // Mounted on the app in its own module, ahead of the /api router — not in routes/index.js.
+    assert.ok(!routesSource.includes(ROUTE), "the route must not also live in the main router");
+    const start = recoveryRouteSource.indexOf("app.get(");
     assert.ok(start > 0, "the route is registered");
-    const block = routesSource.slice(start, routesSource.indexOf(");", start));
+    const block = recoveryRouteSource.slice(start, recoveryRouteSource.indexOf("  );", start));
     const order = [
       "requireDatabaseRecoveryToken",
       "noStoreHeaders",
@@ -207,11 +212,10 @@ describe("database recovery diagnostic — access control", () => {
       assert.ok(positions[i] > positions[i - 1], `${order[i]} must come after ${order[i - 1]}`);
     }
     // It is a GET and nothing else: no POST/PUT/PATCH/DELETE variant of this path exists.
-    assert.equal(routesSource.split(`"${ROUTE}"`).length - 1, 1, "registered exactly once");
-    assert.ok(
-      routesSource.slice(Math.max(0, start - 200), start).includes("router.get("),
-      "registered as a GET",
-    );
+    assert.equal(recoveryRouteSource.split("app.get(").length - 1, 1, "registered exactly once");
+    for (const verb of ["app.post(", "app.put(", "app.patch(", "app.delete(", "app.use("]) {
+      assert.ok(!recoveryRouteCode.includes(verb), `the module registers a ${verb}`);
+    }
   });
 });
 
@@ -487,10 +491,8 @@ describe("database recovery diagnostic — nothing else changed", () => {
   });
 
   it("7c — the diagnostic writes nothing through the audit trail", () => {
-    const start = routesSource.indexOf(`"${ROUTE}"`);
-    const block = routesSource.slice(start, routesSource.indexOf(");", start));
     // auditAction() calls logAccess(), which INSERTs an AccessLog row.
-    assert.ok(!block.includes("auditAction"), "the diagnostic route must not write an audit row");
+    assert.ok(!recoveryRouteSource.includes("auditAction"), "the route must not write an audit row");
   });
 
   it("7d — existing auth middleware is unchanged in behaviour", () => {

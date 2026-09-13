@@ -2,6 +2,7 @@ import cors from "cors";
 import express from "express";
 import { ZodError } from "zod";
 import routes from "./routes/index.js";
+import { registerDatabaseRecoveryRoute } from "./routes/databaseRecoveryRoute.js";
 import { publicTrackingRedirectHandler, publicTrackingRedirectLegacyHandler, publicProductTrackingRedirectHandler } from "./controllers/trackingRedirect.controller.js";
 import { attachPrismaMetrics } from "./database/prismaMetrics.js";
 import { registerPlatformJobs } from "./platform/bootstrap.js";
@@ -53,6 +54,10 @@ export function createApp() {
   app.get("/r/:token", publicTrackingRedirectLegacyHandler);
   // Epic 4 — product-level MBO tracking wrapper
   app.get("/t/product/:token", publicProductTrackingRedirectHandler);
+
+  // TEMPORARY break-glass diagnostic, mounted BEFORE the /api router so nothing added to that
+  // router later can intercept it. Remove with the rest of the recovery tooling.
+  registerDatabaseRecoveryRoute(app);
 
   app.use("/api", routes);
 

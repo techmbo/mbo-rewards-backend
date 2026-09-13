@@ -24,6 +24,8 @@ const routesSource = readFileSync("src/routes/index.js", "utf8");
 const gateSource = readFileSync("src/middleware/databaseRecoveryToken.js", "utf8");
 const authSource = readFileSync("src/middleware/auth.js", "utf8");
 const requestLoggerSource = readFileSync("src/platform/logging/requestLogger.js", "utf8");
+const recoveryRouteSource = readFileSync("src/routes/databaseRecoveryRoute.js", "utf8");
+const appSource = readFileSync("src/app.js", "utf8");
 /** The gate with comments stripped: assertions about behaviour must not be satisfied by prose. */
 const gateCode = gateSource.replace(/^\s*\*.*$/gm, "").replace(/\/\/.*$/gm, "");
 
@@ -306,13 +308,11 @@ describe("database recovery break-glass — the token never escapes", () => {
 
 describe("database recovery break-glass — blast radius", () => {
   it("6 — the guarded route is still read-only", () => {
-    const start = routesSource.indexOf(`"${ROUTE}"`);
-    const block = routesSource.slice(start, routesSource.indexOf(");", start));
-    assert.ok(!block.includes("auditAction"), "the route must not write an audit row");
-    assert.ok(
-      routesSource.slice(Math.max(0, start - 300), start).includes("router.get("),
-      "still a GET",
-    );
+    assert.ok(!recoveryRouteSource.includes("auditAction"), "the route must not write an audit row");
+    assert.match(recoveryRouteSource, /app\.get\(/, "still a GET");
+    for (const verb of ["app.post(", "app.put(", "app.patch(", "app.delete("]) {
+      assert.ok(!recoveryRouteSource.includes(verb), `the module registers a ${verb}`);
+    }
     // The gate performs no database work of any kind.
     for (const token of ["prisma", "PrismaClient", "$queryRaw", "findUnique", "await "]) {
       assert.ok(!gateCode.includes(token), `the gate does database or async work: ${token}`);
@@ -320,15 +320,12 @@ describe("database recovery break-glass — blast radius", () => {
   });
 
   it("7 — no other route accepts the break-glass token", () => {
-    assert.equal(
-      routesSource.split("requireDatabaseRecoveryToken").length - 1,
-      2,
-      "expected exactly one import and one use",
-    );
-    const start = routesSource.indexOf(`"${ROUTE}"`);
-    const use = routesSource.indexOf("requireDatabaseRecoveryToken,");
-    assert.ok(use > start, "the only use is inside the diagnostic route");
-    assert.ok(use < routesSource.indexOf(");", start), "the only use is inside the diagnostic route");
+    // The gate is referenced only by the one emergency route module: one import, one use.
+    assert.equal(recoveryRouteSource.split("requireDatabaseRecoveryToken").length - 1, 2);
+    assert.ok(!routesSource.includes("requireDatabaseRecoveryToken"), "the main router uses the gate");
+    assert.ok(!appSource.includes("requireDatabaseRecoveryToken"), "app.js uses the gate directly");
+    // And the module registers exactly one path.
+    assert.equal(recoveryRouteSource.split("app.get(").length - 1, 1);
 
     // Nothing outside the gate module reads the header or the variable.
     const readers = [];
@@ -338,7 +335,8 @@ describe("database recovery break-glass — blast radius", () => {
         if (entry.isDirectory()) walk(full);
         else if (entry.name.endsWith(".js")) {
           if (full.endsWith("src/middleware/databaseRecoveryToken.js")) continue;
-          const text = readFileSync(full, "utf8");
+          // Prose may name them; code may not read them, so comments are stripped first.
+          const text = readFileSync(full, "utf8").replace(/^\s*\*.*$/gm, "").replace(/\/\/.*$/gm, "");
           if (text.includes(DB_RECOVERY_TOKEN_HEADER) || text.includes("DB_RECOVERY_DIAGNOSTIC_TOKEN")) {
             readers.push(full);
           }
@@ -374,9 +372,9 @@ describe("database recovery break-glass — blast radius", () => {
     }
   });
 
-  it("8b — the gate is documented as temporary", () => {
+  it("8b — the gate and its route are documented as temporary", () => {
     assert.match(gateSource, /TEMPORARY/);
-    const start = routesSource.indexOf(`"${ROUTE}"`);
-    assert.match(routesSource.slice(Math.max(0, start - 700), start), /TEMPORARY/);
+    assert.match(recoveryRouteSource, /TEMPORARY/);
+    assert.match(appSource, /TEMPORARY break-glass diagnostic/);
   });
 });

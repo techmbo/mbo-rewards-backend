@@ -245,8 +245,6 @@ import {
   networkCertificationCatalogHandler,
   networkCertificationRunHandler,
 } from "../controllers/networkCertification.controller.js";
-import { databaseRecoveryDiagnosticHandler } from "../controllers/databaseRecoveryDiagnostic.controller.js";
-import { requireDatabaseRecoveryToken } from "../middleware/databaseRecoveryToken.js";
 import {
   adminListNetworkBillingHandler,
   adminListNetworkPaymentsReceivedHandler,
@@ -1317,29 +1315,6 @@ router.post(
   networkCertificationRunHandler,
 );
 
-// TEMPORARY incident diagnostic. Reports whether DIRECT_URL still names this application's
-// database, using table existence, migration lineage and row counts only — never any part of the
-// URL, and never a row's contents.
-//
-// A GET is safe because it is read-only in both directions: no parameters, no writes, and the one
-// outbound connection goes to an address the server already holds, which no caller can influence.
-//
-// Remove this route, its middleware and its env var once the database is recovered.
-router.get(
-  "/ops/diagnostics/database-recovery",
-  // BREAK-GLASS. This route alone does not use `authenticate`, because `authenticate` resolves the
-  // caller through the runtime Prisma client — the client that cannot connect. An endpoint whose
-  // authentication depends on the database cannot diagnose the database, so the gate here is a
-  // pre-shared secret in X-DB-Recovery-Token, which needs nothing but the process environment.
-  //
-  // It is the only route that accepts that header, and the gate fails closed: unconfigured, too
-  // short, or a copy of another environment secret all mean the route is unavailable.
-  requireDatabaseRecoveryToken,
-  noStoreHeaders,
-  // No audit middleware here, deliberately: it calls logAccess(), which INSERTs an AccessLog row
-  // through the runtime client. This diagnostic must not write, and that client is the broken one.
-  databaseRecoveryDiagnosticHandler,
-);
 router.get("/ops/admin/commission-vocabulary", authenticate, requirePermission(PERMISSIONS.COMMISSION_READ), adminCommissionVocabularyHandler);
 router.get(
   "/ops/admin/payment-status",

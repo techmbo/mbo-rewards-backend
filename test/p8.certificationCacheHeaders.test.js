@@ -254,8 +254,6 @@ describe("certification cache headers — a 429 is not cacheable either", () => 
     const allowed = [
       "/ops/admin/network-certification",
       "/ops/admin/network-certification/:network/run",
-      // Temporary incident diagnostic; remove this entry when that route is removed.
-      "/ops/diagnostics/database-recovery",
     ];
     const uses = [...routesSource.matchAll(/^\s*noStoreHeaders,\s*$/gm)];
     assert.equal(uses.length, allowed.length, "one use per approved route");
