@@ -8,6 +8,7 @@ import {
   findUserByEmail,
 } from "../modules/auth/auth.service.js";
 import { sendSignupOtp, verifySignupOtp } from "../modules/auth/otp.service.js";
+import { devAuthBypassStatus } from "../middleware/devAuthBypass.js";
 
 const registerSchema = z.object({
   email: z.string().email(),
@@ -122,7 +123,20 @@ export async function meHandler(req, res) {
   res.json({
     ok: true,
     user: toPublicUser(req.user),
+    // Present only under the temporary Preview bypass, so the admin panel can show its banner.
+    ...(req.devAuthBypass ? { devAuthBypass: true } : {}),
   });
+}
+
+/**
+ * TEMPORARY. Public, credential-free: reports whether the Preview auth bypass is live.
+ *
+ * The admin frontend holds no bypass flag of its own and asks the backend instead. A production
+ * backend always answers `active: false`, so a frontend built with the wrong variables still
+ * cannot skip login against production.
+ */
+export async function devAuthBypassStatusHandler(_req, res) {
+  res.json({ ok: true, ...devAuthBypassStatus() });
 }
 
 export async function logoutHandler(req, res) {

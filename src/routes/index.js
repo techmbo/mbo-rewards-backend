@@ -67,6 +67,7 @@ import {
   loginHandler,
   logoutHandler,
   meHandler,
+  devAuthBypassStatusHandler,
   registerHandler,
   sendOtpHandler,
   verifyOtpHandler,
@@ -322,6 +323,8 @@ router.post("/auth/verify-otp", authRateLimiter, verifyOtpHandler);
 router.post("/auth/register", authRateLimiter, registerHandler);
 router.post("/auth/login", authRateLimiter, loginHandler);
 router.get("/auth/me", authenticate, meHandler);
+// TEMPORARY: Preview auth-bypass status. Public and credential-free; always false in production.
+router.get("/auth/dev-bypass-status", devAuthBypassStatusHandler);
 router.post("/auth/logout", authenticate, logoutHandler);
 router.get("/auth/invite/:token", authRateLimiter, getInviteHandler);
 router.post("/auth/set-password", authRateLimiter, setPasswordHandler);

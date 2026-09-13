@@ -8,6 +8,7 @@ import { findUserById, logAccess, verifyAccessToken } from "../modules/auth/auth
 import { ClientCredentialService } from "../modules/client/services/clientCredential.service.js";
 import { ClientRepository } from "../modules/client/repositories/client.repository.js";
 import { isApiEndpointEnabled } from "../modules/client/apiEnvironmentConfig.js";
+import { applyDevBypassIdentity, isDevAuthBypassActive } from "./devAuthBypass.js";
 
 const credentialService = new ClientCredentialService();
 const clientRepo = new ClientRepository();
@@ -41,6 +42,15 @@ function extractPartnerApiKey(req) {
 export async function authenticate(req, res, next) {
   const token = readBearerToken(req);
   if (!token) {
+    // TEMPORARY Preview/Development bypass. Off unless ALLOW_DEV_AUTH_BYPASS === "true" AND the
+    // deployment is provably Preview or Development — see middleware/devAuthBypass.js. It applies
+    // only when NO token was presented, so a real but invalid token still fails normally rather
+    // than being silently upgraded to admin.
+    if (isDevAuthBypassActive()) {
+      applyDevBypassIdentity(req);
+      next();
+      return;
+    }
     sendAuthError(res, 401, "Authentication required.");
     return;
   }
