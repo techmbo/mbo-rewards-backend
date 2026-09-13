@@ -15,10 +15,22 @@ import {
 
 const SUPPORTED_SUPPLIERS = Object.keys(SUPPLIER_TRACKING_HOST_ALLOWLIST);
 
+/**
+ * Query-string booleans. Zod's built-in boolean coercion is NOT usable here: it applies JS
+ * truthiness, so the string "false" arrives as true and the filter is silently ignored.
+ * Caught against a live database, not in review.
+ */
+const booleanFlag = z
+  .union([z.boolean(), z.enum(["true", "false", "1", "0", "yes", "no"])])
+  .transform((value) =>
+    typeof value === "boolean" ? value : ["true", "1", "yes"].includes(value),
+  );
+
+
 const workQueueQuerySchema = z.object({
   supplier: z.enum(SUPPORTED_SUPPLIERS).default("PARTNERIZE"),
   state: z.enum(SUPPLIER_TRACKING_LINK_STATES).default(SUPPLIER_TRACKING_LINK_STATE.NOT_GENERATED),
-  joinedOnly: z.coerce.boolean().default(true),
+  joinedOnly: booleanFlag.default(true),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(MAX_WORK_QUEUE_PAGE_SIZE).default(DEFAULT_WORK_QUEUE_PAGE_SIZE),
 });

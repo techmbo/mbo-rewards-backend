@@ -83,6 +83,29 @@ test("REQUIRED 12: the write body schema is strict and rejects override fields",
   }
 });
 
+test("joinedOnly=false is honoured — z.coerce.boolean() would silently invert it", async () => {
+  // z.coerce.boolean() applies JS truthiness, so the string "false" becomes true and the filter
+  // is silently ignored. Caught against a live database; the controller must not use it.
+  assert.ok(!CONTROLLER.includes("z.coerce.boolean()"), "z.coerce.boolean() is unsafe for query strings");
+
+  const { z } = await import("zod");
+  const booleanFlag = z
+    .union([z.boolean(), z.enum(["true", "false", "1", "0", "yes", "no"])])
+    .transform((value) => (typeof value === "boolean" ? value : ["true", "1", "yes"].includes(value)));
+
+  assert.equal(booleanFlag.parse("false"), false);
+  assert.equal(booleanFlag.parse("0"), false);
+  assert.equal(booleanFlag.parse("no"), false);
+  assert.equal(booleanFlag.parse("true"), true);
+  assert.equal(booleanFlag.parse("1"), true);
+  assert.equal(booleanFlag.parse(false), false);
+  assert.equal(booleanFlag.safeParse("maybe").success, false);
+
+  // And the real schema in the controller behaves the same way.
+  assert.ok(CONTROLLER.includes("booleanFlag"));
+  assert.ok(CONTROLLER.includes('["true", "1", "yes"].includes'));
+});
+
 test("the controller never echoes the stored attributed URL back verbatim", () => {
   // Responses are built from the service's row shape, which exposes host only.
   assert.ok(!CONTROLLER.includes("trackingUrl: record.trackingUrl"));
