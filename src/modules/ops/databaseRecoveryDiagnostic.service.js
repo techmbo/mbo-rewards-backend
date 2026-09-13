@@ -81,6 +81,37 @@ export function classifyProviderHost(hostname) {
 }
 
 /**
+ * A Supabase project reference, from a direct Supabase hostname and nothing else.
+ *
+ * Supabase's direct endpoint is `db.<project-ref>.supabase.co`, so the reference is one label of
+ * the hostname. It is an identifier, not a credential — it appears in public dashboard URLs — and
+ * it is the one thing needed to look the project up and copy the correct pooled connection string.
+ *
+ * Three deliberate refusals, each returning null:
+ *
+ *  - **Any host that is not exactly `db.<label>.<supabase suffix>`.** The shape is matched whole,
+ *    label by label, rather than by searching for "supabase" somewhere in the string. A partial
+ *    match on an unexpected host would return some other label as though it were a project.
+ *  - **The POOLER hostname.** `aws-0-<region>.pooler.supabase.com` carries the reference in the
+ *    USERNAME (`postgres.<ref>`), not the host. Reading it would mean parsing the credential
+ *    portion of the connection string, which this module must never touch — so a pooler URL simply
+ *    yields null.
+ *  - **A label that is not shaped like a reference.** Lowercase alphanumeric only, 16 to 32
+ *    characters (Supabase issues 20). Anything else is not safely a project reference.
+ */
+export function extractSupabaseProjectRef(hostname) {
+  const host = String(hostname ?? "").trim().toLowerCase();
+  const labels = host.split(".");
+  // Exactly four labels: db . <ref> . supabase . co|com
+  if (labels.length !== 4) return null;
+  const [prefix, ref, second, top] = labels;
+  if (prefix !== "db") return null;
+  if (second !== "supabase") return null;
+  if (top !== "co" && top !== "com") return null;
+  return /^[a-z0-9]{16,32}$/.test(ref) ? ref : null;
+}
+
+/**
  * Presence, scheme validity and provider class for a candidate URL.
  *
  * Returns no part of the URL. A value that fails to parse is reported as an invalid scheme rather
@@ -90,7 +121,7 @@ export function classifyProviderHost(hostname) {
 export function inspectDirectUrl(rawUrl) {
   const value = typeof rawUrl === "string" ? rawUrl : "";
   if (!value.trim()) {
-    return { present: false, validScheme: false, providerClass: "unknown" };
+    return { present: false, validScheme: false, providerClass: "unknown", supabaseProjectRef: null };
   }
 
   // Checked on the RAW string, before parsing, and this ordering is the point. The WHATWG URL
@@ -99,23 +130,31 @@ export function inspectDirectUrl(rawUrl) {
   // with the protocol postgresql:// or postgres://". A diagnostic that disagreed with the engine
   // about exactly this would report a working URL for the malformation it exists to detect.
   if (!value.startsWith("postgresql://") && !value.startsWith("postgres://")) {
-    return { present: true, validScheme: false, providerClass: "unknown" };
+    return { present: true, validScheme: false, providerClass: "unknown", supabaseProjectRef: null };
   }
 
   let parsed;
   try {
     parsed = new URL(value);
   } catch {
-    return { present: true, validScheme: false, providerClass: "unknown" };
+    return { present: true, validScheme: false, providerClass: "unknown", supabaseProjectRef: null };
   }
 
   if (parsed.protocol !== "postgresql:" && parsed.protocol !== "postgres:") {
     // Deliberately not classified. A non-Postgres URL's host is not a Postgres provider, and
     // reporting a class for it would invite reading meaning into a value that has none here.
-    return { present: true, validScheme: false, providerClass: "unknown" };
+    return { present: true, validScheme: false, providerClass: "unknown", supabaseProjectRef: null };
   }
 
-  return { present: true, validScheme: true, providerClass: classifyProviderHost(parsed.hostname) };
+  const providerClass = classifyProviderHost(parsed.hostname);
+  return {
+    present: true,
+    validScheme: true,
+    providerClass,
+    // Only for Supabase. For every other provider the field exists but stays null, so the response
+    // shape is stable and a reader never has to distinguish "absent" from "not applicable".
+    supabaseProjectRef: providerClass === "supabase" ? extractSupabaseProjectRef(parsed.hostname) : null,
+  };
 }
 
 /**
@@ -280,12 +319,13 @@ export async function runDatabaseRecoveryDiagnostic({
   clientFactory = defaultClientFactory,
   timeoutMs = DIAGNOSTIC_TIMEOUT_MS,
 } = {}) {
-  const { present, validScheme, providerClass } = inspectDirectUrl(url);
+  const { present, validScheme, providerClass, supabaseProjectRef } = inspectDirectUrl(url);
 
   const base = {
     directUrlPresent: present,
     directUrlValidPostgresScheme: validScheme,
     providerClass,
+    supabaseProjectRef,
     connectionOk: false,
     databaseIdentity: { ...EMPTY_IDENTITY },
     migrationFingerprint: { ...EMPTY_MIGRATIONS },

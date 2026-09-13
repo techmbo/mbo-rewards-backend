@@ -13,6 +13,7 @@ const {
   IDENTITY_TABLES,
   PROVIDER_CLASSES,
   classifyProviderHost,
+  extractSupabaseProjectRef,
   inspectDirectUrl,
   runDatabaseRecoveryDiagnostic,
 } = await import("../src/modules/ops/databaseRecoveryDiagnostic.service.js");
@@ -338,9 +339,15 @@ describe("database recovery diagnostic — DIRECT_URL handling", () => {
     for (const [, expected] of cases) assert.ok(PROVIDER_CLASSES.includes(expected));
   });
 
-  it("5e — inspectDirectUrl returns three booleans/enums and nothing else", () => {
+  it("5e — inspectDirectUrl returns four scalars and nothing else", () => {
     const inspected = inspectDirectUrl(LIVE_URL);
-    assert.deepEqual(Object.keys(inspected).sort(), ["present", "providerClass", "validScheme"]);
+    assert.deepEqual(Object.keys(inspected).sort(), [
+      "present",
+      "providerClass",
+      "supabaseProjectRef",
+      "validScheme",
+    ]);
+    assert.equal(inspected.supabaseProjectRef, null, "a Railway host has no Supabase ref");
     assert.equal(inspected.providerClass, "railway");
     for (const part of Object.values(SECRET_PARTS)) {
       assert.ok(!JSON.stringify(inspected).includes(part));
@@ -400,6 +407,7 @@ describe("database recovery diagnostic — read-only and shape", () => {
       "migrationFingerprint",
       "providerClass",
       "rowCountFingerprint",
+      "supabaseProjectRef",
     ]);
     assert.deepEqual(Object.keys(result.databaseIdentity).sort(), [
       "fieldRegistryTableExists",
