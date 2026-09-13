@@ -31,6 +31,11 @@ export async function resolvePartnerizeCertificationCredentials(accountLabel = "
     (await getMarketplaceExternalId("partnerize", accountLabel).catch(() => null)) ||
     null;
 
+  // Certification only, and environment only. The voucher endpoint is campaign-scoped; there is no
+  // campaign id anywhere in the ordinary credential set, so this is the one trusted server-side
+  // place it can come from. Never a request, never a caller.
+  const certificationCampaignId = process.env.PARTNERIZE_CERTIFICATION_CAMPAIGN_ID || null;
+
   // Some accounts store both halves in one field, separated by a colon.
   if (appKey && String(appKey).includes(":") && !userKey) {
     const index = String(appKey).indexOf(":");
@@ -38,8 +43,11 @@ export async function resolvePartnerizeCertificationCredentials(accountLabel = "
       applicationKey: String(appKey).slice(0, index),
       userApiKey: String(appKey).slice(index + 1),
       publisherId,
+      certificationCampaignId,
     };
   }
-  if (appKey && userKey) return { applicationKey: appKey, userApiKey: userKey, publisherId };
+  if (appKey && userKey) {
+    return { applicationKey: appKey, userApiKey: userKey, publisherId, certificationCampaignId };
+  }
   return null;
 }

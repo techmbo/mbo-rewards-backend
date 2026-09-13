@@ -61,6 +61,8 @@ export const COMMISSION_GROUP_CANDIDATE_LIMIT = 5;
  * that only certification would need. Every other Partnerize probe stays at one.
  */
 export const MAX_SUPPLIER_REQUESTS_PARTNERIZE_CAMPAIGNS = 2;
+/** Vouchers has no discovery step: both identifiers are configured, so it is one request or none. */
+export const MAX_SUPPLIER_REQUESTS_PARTNERIZE_VOUCHERS = 1;
 export const MAX_SUPPLIER_REQUESTS_COMMISSION_GROUPS = 1 + COMMISSION_GROUP_CANDIDATE_LIMIT;
 
 /**
@@ -135,6 +137,13 @@ const PARTNERIZE_PROBES = Object.freeze({
     // Its own chain: one request when a publisher id is configured, two when it must be
     // discovered. The only Partnerize probe allowed a second request.
     chain: "partnerizeCampaigns",
+  },
+  // Evidenced by fetchCoupons, which builds exactly this path and sends no query parameters.
+  // One request or none: both identifiers come from configuration, neither is discovered.
+  vouchers: {
+    method: "GET",
+    endpointKey: "GET /user/publisher/{publisherId}/campaign/{campaignId}/voucher",
+    chain: "partnerizeVouchers",
   },
 });
 
@@ -317,6 +326,7 @@ export class NetworkCertificationService {
       applicationKey: credentials.applicationKey,
       userApiKey: credentials.userApiKey,
       publisherId: credentials.publisherId ?? null,
+      certificationCampaignId: credentials.certificationCampaignId ?? null,
     });
   }
 
@@ -359,6 +369,51 @@ export class NetworkCertificationService {
         return { ...base, ok: false, statusCategory: "SKIPPED_NO_PUBLISHER_ID" };
       }
       // Anything else — discovery or campaign — is reported as its category and stops there.
+      return { ...base, ok: false, statusCategory: statusCategory(error) };
+    }
+  }
+
+  /**
+   * The voucher chain: at most ONE supplier request, and none at all without both identifiers.
+   *
+   * The endpoint is campaign-scoped, so it needs a publisher id and a campaign id. Both come from
+   * server-side configuration. Neither is discovered — that would be a second request — and neither
+   * can be supplied by a caller, so this probe cannot be pointed at another publisher or another
+   * merchant's vouchers. A missing identifier is its own outcome, distinct from a supplier failure,
+   * and produces no traffic at all.
+   */
+  async certifyPartnerizeVouchers({ adapter, key, probe, budgetLeft }) {
+    const base = {
+      network: key,
+      sourceObject: "vouchers",
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+    };
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      const rows = asRows(await adapter.fetchCertificationVoucherSample({ timeoutMs })).slice(0, 1);
+      const fieldPaths = summarisePayloads(rows);
+      return {
+        ...base,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+      };
+    } catch (error) {
+      // Two configuration outcomes, reported separately: which identifier is missing is what tells
+      // an operator what to configure, and neither is a supplier failure.
+      if (error?.partnerizeNoPublisherId) {
+        return { ...base, ok: false, statusCategory: "SKIPPED_NO_PUBLISHER_ID" };
+      }
+      if (error?.partnerizeNoCampaignId) {
+        return { ...base, ok: false, statusCategory: "SKIPPED_NO_CERTIFICATION_CAMPAIGN_ID" };
+      }
       return { ...base, ok: false, statusCategory: statusCategory(error) };
     }
   }
@@ -695,6 +750,11 @@ export class NetworkCertificationService {
 
       if (probe.chain === "partnerizeCampaigns") {
         results.push(await this.certifyPartnerizeCampaigns({ adapter, key, probe, budgetLeft }));
+        continue;
+      }
+
+      if (probe.chain === "partnerizeVouchers") {
+        results.push(await this.certifyPartnerizeVouchers({ adapter, key, probe, budgetLeft }));
         continue;
       }
 

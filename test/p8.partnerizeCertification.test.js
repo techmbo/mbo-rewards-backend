@@ -6,6 +6,7 @@ process.env.FRONTEND_URL = process.env.FRONTEND_URL || "https://frontend.test";
 
 const {
   NetworkCertificationService,
+  MAX_SUPPLIER_REQUESTS_PARTNERIZE_VOUCHERS,
   MAX_SUPPLIER_REQUESTS_PER_SOURCE,
   MAX_SUPPLIER_REQUESTS_PRODUCTS,
   MAX_SUPPLIER_REQUESTS_COMMISSION_GROUPS,
@@ -51,8 +52,9 @@ function recorder({ data = { id: 1 }, error = null, delayMs = 0 } = {}) {
 
 describe("Partnerize certification — registry and bounds", () => {
   it("1 — Partnerize exists in the certification registry", () => {
-    assert.deepEqual(listProbeSourceObjects("partnerize"), ["authenticate", "publishers", "campaigns"]);
-    assert.deepEqual(listPartnerizeCertificationSamples(), ["authenticate", "publishers", "campaigns"]);
+    const expected = ["authenticate", "publishers", "campaigns", "vouchers"];
+    assert.deepEqual(listProbeSourceObjects("partnerize"), expected);
+    assert.deepEqual(listPartnerizeCertificationSamples(), expected);
   });
 
   it("2 — an unknown Partnerize source object cannot dispatch", async () => {
@@ -65,7 +67,8 @@ describe("Partnerize certification — registry and bounds", () => {
         publisherId: PUBLISHER_ID,
       }),
     });
-    for (const unknown of ["conversions", "payments", "vouchers", "products", "offers", "clicks", "invoices"]) {
+    // vouchers moved out of this list once fetchCoupons evidenced its contract; the rest stay.
+    for (const unknown of ["conversions", "payments", "products", "offers", "clicks", "invoices"]) {
       await assert.rejects(
         () => service.certify("partnerize", { sourceObjects: [unknown] }),
         /unknown source objects/i,
@@ -79,7 +82,8 @@ describe("Partnerize certification — registry and bounds", () => {
     for (const excluded of [
       "conversions",
       "payments",
-      "vouchers",
+      // "vouchers" is now executable: GET /user/publisher/{id}/campaign/{id}/voucher is evidenced
+      // by fetchCoupons. "coupons" stays out — it is not a Partnerize endpoint name.
       "coupons",
       "products",
       "offers",
@@ -96,9 +100,14 @@ describe("Partnerize certification — registry and bounds", () => {
     assert.equal(MAX_SUPPLIER_REQUESTS_PER_SOURCE, 1);
     const start = serviceSource.indexOf("const PARTNERIZE_PROBES");
     const block = serviceSource.slice(start, serviceSource.indexOf("});", start));
-    // Exactly one chain, and it is the approved one.
-    assert.equal((block.match(/chain: "/g) || []).length, 1, "exactly one declared chain");
-    assert.match(block, /chain: "partnerizeCampaigns"/);
+    // Two chains, and both are approved by name. campaigns may make a second request to discover a
+    // publisher id; vouchers may not — it is one request or none.
+    assert.deepEqual(
+      (block.match(/chain: "[^"]+"/g) || []).sort(),
+      ['chain: "partnerizeCampaigns"', 'chain: "partnerizeVouchers"'],
+      "an undeclared chain was added",
+    );
+    assert.equal(MAX_SUPPLIER_REQUESTS_PARTNERIZE_VOUCHERS, 1, "vouchers must stay at one request");
     assert.ok(!block.includes("emits:"), "no Partnerize probe may emit extra rows");
     // authenticate and publishers declare nothing extra.
     const single = block.slice(block.indexOf("authenticate:"), block.indexOf("  campaigns:"));
@@ -156,7 +165,9 @@ describe("Partnerize certification — the request the sampler actually makes", 
     assert.match(table, /path: \(resolved\) =>/, "the path argument is resolved values, not caller ctx");
     assert.match(partnerizeSource, /const PARTNERIZE_SINGLE_ROW = \{ limit: 1, offset: 0 \}/);
     // Only GET is ever declared.
-    assert.equal((table.match(/method: "GET"/g) || []).length, 3);
+    assert.equal((table.match(/method: "GET"/g) || []).length, 4);
+    // The voucher entry sends no query parameters, matching fetchCoupons' get(path, {}).
+    assert.match(table, /campaign\/\$\{encodeURIComponent\(resolved\.campaignId\)\}\/voucher`,\n\s*params: \(\) => \(\{\}\),/);
     assert.ok(!table.includes('method: "POST"'));
   });
 
@@ -170,8 +181,12 @@ describe("Partnerize certification — the request the sampler actually makes", 
   it("5 — the sampler does not paginate", () => {
     const body = samplerBody;
     assert.ok(!body.includes("fetchPaginated"), "must not use the paginator");
-    assert.ok(!/for\s*\(/.test(body), "no loop");
     assert.ok(!/while\s*\(/.test(body), "no loop");
+    // One loop exists and it is not pagination: it validates the identifiers a spec declares it
+    // needs, before any request is issued. No loop may iterate pages, rows or offsets.
+    const loops = body.match(/for \(const [^)]+\)/g) || [];
+    assert.deepEqual(loops, ["for (const name of required)"], `unexpected loop: ${loops}`);
+    assert.ok(!/offset|page|cursor/i.test(body), "the sampler references a pagination parameter");
     assert.match(body, /\.slice\(0, 1\)/, "at most one row");
   });
 
@@ -226,7 +241,19 @@ describe("Partnerize certification — the request the sampler actually makes", 
     const table = partnerizeSource.slice(start, partnerizeSource.indexOf("\n});", start));
     assert.ok(!table.includes("partnerizeCampaignListPaths"), "must not expand to several statuses");
     assert.ok(!table.includes("discovery"), "must not add the discovery endpoint");
-    assert.equal((table.match(/campaign\//g) || []).length, 1, "exactly one campaign path");
+    // Two campaign-scoped paths now, and neither is a fan-out. The campaign LIST is pinned to one
+    // participation status; the voucher path is a different source object addressing one
+    // configured campaign. Walking a/p/r, or looping campaigns, would be fan-out.
+    assert.equal((table.match(/campaign\/a`/g) || []).length, 1, "exactly one campaign-list path");
+    for (const status of ["campaign/p", "campaign/r", "campaign/${status}"]) {
+      assert.ok(!table.includes(status), `the table expands to ${status}`);
+    }
+    assert.equal(
+      (table.match(/campaign\/\$\{encodeURIComponent\(resolved\.campaignId\)\}/g) || []).length,
+      1,
+      "exactly one campaign-scoped path, addressing one configured campaign",
+    );
+    assert.equal((table.match(/campaign\//g) || []).length, 2, "no third campaign path");
   });
 
   it("10 — no API-generation fallback inside a probe", () => {

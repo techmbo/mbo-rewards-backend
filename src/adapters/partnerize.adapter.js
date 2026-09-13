@@ -231,6 +231,23 @@ const PARTNERIZE_CERTIFICATION_SAMPLES = Object.freeze({
     path: (resolved) => `/user/publisher/${encodeURIComponent(resolved.publisherId)}/campaign/a`,
     params: () => ({ ...PARTNERIZE_SINGLE_ROW }),
   },
+
+  // Evidenced: fetchCoupons builds exactly this path and calls get(path, {}, stats) — with NO
+  // query parameters at all. So none are sent here either. There is no evidenced limit, offset,
+  // page or cursor on this endpoint, and inventing one is the mistake that cost Optimise a
+  // rejected conversions probe; the bound comes from the response being one campaign's voucher
+  // list, and from taking a single row out of it for the field dictionary.
+  //
+  // Both identifiers come from the adapter's own configuration. Neither is discovered with a
+  // request — that would be a second call — and neither can be supplied by a caller.
+  vouchers: {
+    method: "GET",
+    needs: ["publisherId", "campaignId"],
+    path: (resolved) =>
+      `/user/publisher/${encodeURIComponent(resolved.publisherId)}` +
+      `/campaign/${encodeURIComponent(resolved.campaignId)}/voucher`,
+    params: () => ({}),
+  },
 });
 
 /** Raised when no usable publisher id is configured or discoverable. Carries no identifier. */
@@ -240,6 +257,26 @@ export class PartnerizeNoPublisherIdError extends Error {
     this.name = "PartnerizeNoPublisherIdError";
     this.partnerizeNoPublisherId = true;
   }
+}
+
+/** Raised when no campaign id is configured for the voucher probe. Carries no identifier. */
+export class PartnerizeNoCampaignIdError extends Error {
+  constructor() {
+    super("No Partnerize certification campaign id is configured");
+    this.name = "PartnerizeNoCampaignIdError";
+    this.partnerizeNoCampaignId = true;
+  }
+}
+
+/**
+ * Whether an identifier may be interpolated into a URL path segment.
+ *
+ * Rejects path, query and whitespace syntax. Both identifiers this adapter puts into a path go
+ * through it, so a configured value carrying `../` or `?` cannot reshape the request.
+ */
+export function isPathSafePartnerizeId(value) {
+  const text = String(value ?? "").trim();
+  return Boolean(text) && !/[\\/\s?#]/.test(text);
 }
 
 /**
@@ -275,6 +312,10 @@ export function createPartnerizeAdapter({
   applicationKey,
   userApiKey,
   publisherId = process.env.PARTNERIZE_PUBLISHER_ID || null,
+  // Certification only. The voucher endpoint is campaign-scoped and there is no campaign id in the
+  // ordinary credential set, so one is configured server-side rather than discovered or accepted
+  // from a caller. Absent means the voucher probe is skipped, never that it picks a campaign.
+  certificationCampaignId = process.env.PARTNERIZE_CERTIFICATION_CAMPAIGN_ID || null,
   baseURL = process.env.PARTNERIZE_BASE_URL || "https://api.partnerize.com",
   httpClient: injectedHttpClient = null,
   certificationRateLimiter: injectedCertificationLimiter = null,
@@ -331,8 +372,11 @@ export function createPartnerizeAdapter({
   async function sampleOnce(sourceObject, resolved, ctx = {}) {
     const spec = PARTNERIZE_CERTIFICATION_SAMPLES[sourceObject];
     if (!spec) throw new Error(`No Partnerize certification sample is defined for "${sourceObject}"`);
-    if (spec.needs && !resolved[spec.needs]) {
-      throw new Error(`Partnerize certification sample "${sourceObject}" requires ${spec.needs}`);
+    const required = Array.isArray(spec.needs) ? spec.needs : spec.needs ? [spec.needs] : [];
+    for (const name of required) {
+      if (!resolved[name]) {
+        throw new Error(`Partnerize certification sample "${sourceObject}" requires ${name}`);
+      }
     }
 
     // The source budget covers admission AND the request. Waiting for a slot spends it, so the
@@ -421,6 +465,29 @@ export function createPartnerizeAdapter({
 
       // Request 2 of 2 (or 1 of 1 on the configured fast path).
       return sampleOnce("campaigns", { publisherId: resolvedPublisherId }, { timeoutMs: remaining() });
+    },
+
+    /**
+     * One bounded voucher sample. EXACTLY one supplier request, or none.
+     *
+     * Unlike the campaign probe this has no discovery step. Both identifiers must already be
+     * configured server-side: discovering either would mean a second request, and the endpoint is
+     * campaign-scoped so a "first campaign" fallback would be this probe choosing which merchant's
+     * vouchers to read. An absent identifier is reported as its own outcome and nothing is sent.
+     */
+    async fetchCertificationVoucherSample(ctx = {}) {
+      if (!publisherId || !isPathSafePartnerizeId(publisherId)) {
+        throw new PartnerizeNoPublisherIdError();
+      }
+      if (!certificationCampaignId || !isPathSafePartnerizeId(certificationCampaignId)) {
+        throw new PartnerizeNoCampaignIdError();
+      }
+
+      return sampleOnce(
+        "vouchers",
+        { publisherId: String(publisherId), campaignId: String(certificationCampaignId) },
+        { timeoutMs: Number(ctx.timeoutMs || PARTNERIZE_CERTIFICATION_TIMEOUT_MS) },
+      );
     },
 
     getCapabilities() {
