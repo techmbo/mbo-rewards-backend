@@ -212,6 +212,15 @@ function withDeadline(promise, ms, error) {
 
 const PARTNERIZE_SINGLE_ROW = { limit: 1, offset: 0 };
 
+/**
+ * Hard ceiling on rows kept from ONE response for an in-memory scan.
+ *
+ * Not a page size and not a request count: the supplier query is unchanged and still asks for
+ * limit 1. This only caps how many rows of a response the certification code will walk, so a
+ * supplier that one day returns a large page cannot turn a scan into unbounded work.
+ */
+export const CERTIFICATION_MAX_SCAN_ROWS = 10;
+
 const PARTNERIZE_CERTIFICATION_SAMPLES = Object.freeze({
   // Evidenced: authenticate() calls get("/user", {}) with no parameters at all.
   authenticate: { method: "GET", path: () => "/user", params: () => ({}) },
@@ -404,7 +413,11 @@ export function createPartnerizeAdapter({
     if (!rows.length && response?.data && typeof response.data === "object") {
       return [response.data];
     }
-    return rows.slice(0, 1);
+    // One row unless a caller asks for a bounded scan. The bound is on ROWS HELD IN MEMORY from
+    // the one response already received — never on requests, and never on what is asked of the
+    // supplier: spec.params() is untouched, so the query still says limit 1.
+    const maxRows = Math.max(1, Math.min(Number(ctx.maxRows) || 1, CERTIFICATION_MAX_SCAN_ROWS));
+    return rows.slice(0, maxRows);
   }
 
   const adapter = {
@@ -463,8 +476,13 @@ export function createPartnerizeAdapter({
 
       if (remaining() <= 0) throw new PartnerizeCertificationThrottledError();
 
-      // Request 2 of 2 (or 1 of 1 on the configured fast path).
-      return sampleOnce("campaigns", { publisherId: resolvedPublisherId }, { timeoutMs: remaining() });
+      // Request 2 of 2 (or 1 of 1 on the configured fast path). Still ONE request; `maxRows` only
+      // says how many rows of that one response are kept for the caller to scan.
+      return sampleOnce(
+        "campaigns",
+        { publisherId: resolvedPublisherId },
+        { timeoutMs: remaining(), maxRows: CERTIFICATION_MAX_SCAN_ROWS },
+      );
     },
 
     /**

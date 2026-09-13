@@ -206,7 +206,16 @@ describe("Partnerize certification — the request the sampler actually makes", 
     const loops = body.match(/for \(const [^)]+\)/g) || [];
     assert.deepEqual(loops, ["for (const name of required)"], `unexpected loop: ${loops}`);
     assert.ok(!/offset|page|cursor/i.test(body), "the sampler references a pagination parameter");
-    assert.match(body, /\.slice\(0, 1\)/, "at most one row");
+    // One row by default. A caller may ask to keep more rows OF THE ONE RESPONSE for an in-memory
+    // scan, clamped to a hard ceiling — that is a memory bound, not pagination: it fetches nothing
+    // more, and the supplier query still comes from spec.params().
+    assert.match(
+      body,
+      /const maxRows = Math\.max\(1, Math\.min\(Number\(ctx\.maxRows\) \|\| 1, CERTIFICATION_MAX_SCAN_ROWS\)\);/,
+    );
+    assert.match(body, /\.slice\(0, maxRows\)/);
+    assert.match(body, /params: spec\.params\(resolved\)/, "the query must come from the frozen spec");
+    assert.ok(!body.includes("ctx.params"), "a caller must not shape the supplier query");
   });
 
   it("6 — the publishers probe is one request with the evidenced parameters", async () => {

@@ -63,6 +63,12 @@ export const COMMISSION_GROUP_CANDIDATE_LIMIT = 5;
 export const MAX_SUPPLIER_REQUESTS_PARTNERIZE_CAMPAIGNS = 2;
 /** Vouchers has no discovery step: both identifiers are configured, so it is one request or none. */
 export const MAX_SUPPLIER_REQUESTS_PARTNERIZE_VOUCHERS = 1;
+/**
+ * How many campaign rows of the ONE campaign response may be walked looking for commission
+ * structure. A memory bound, not a request bound and not a page size: the supplier query still
+ * asks for limit 1, so today exactly one row arrives and exactly one is inspected.
+ */
+export const COMMISSION_SCAN_ROW_LIMIT = 10;
 export const MAX_SUPPLIER_REQUESTS_COMMISSION_GROUPS = 1 + COMMISSION_GROUP_CANDIDATE_LIMIT;
 
 /**
@@ -184,6 +190,38 @@ export const COMMISSION_STRUCTURE_KEYS = Object.freeze([
  * same keys and different numbers still count as two outcomes; the shape count only says whether
  * they are described the same way, which is what a canonical mapping has to accommodate.
  */
+/** Whether a row states any commission structure at all: a non-empty array, or an object with keys. */
+export function hasCommissionStructure(row = {}) {
+  const commissions = row?.commissions;
+  if (Array.isArray(commissions)) return commissions.length > 0;
+  if (commissions && typeof commissions === "object") return Object.keys(commissions).length > 0;
+  return false;
+}
+
+/**
+ * The first row in a bounded in-memory scan that states commission structure.
+ *
+ * Operates only on rows already returned by the single campaign request. It issues nothing, and
+ * the cap is on rows walked, not on rows requested — the supplier query is untouched.
+ *
+ * Returns the chosen row and how many rows were actually inspected. "First" is the response's own
+ * order: no sorting, no scoring, no preference for a row with more outcomes, because any of those
+ * would be this code choosing which merchant's commercials to certify.
+ */
+export function chooseCommissionSampleRow(rows = [], limit = COMMISSION_SCAN_ROW_LIMIT) {
+  const scanned = (Array.isArray(rows) ? rows : []).slice(0, limit);
+  for (const [index, row] of scanned.entries()) {
+    if (hasCommissionStructure(row)) {
+      return { row, campaignsInspectedCount: index + 1, found: true };
+    }
+  }
+  return {
+    row: scanned[0] ?? null,
+    campaignsInspectedCount: scanned.length,
+    found: false,
+  };
+}
+
 export function summariseCommissionStructure(row = {}) {
   const source = row && typeof row === "object" && !Array.isArray(row) ? row : {};
   const subtree = {};
@@ -439,9 +477,14 @@ export class NetworkCertificationService {
 
     const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
 
-    let rows;
+    let allRows;
     try {
-      rows = asRows(await adapter.fetchCertificationCampaignSample({ timeoutMs })).slice(0, 1);
+      // Up to COMMISSION_SCAN_ROW_LIMIT rows of the ONE response are kept. How many actually
+      // arrive is the supplier's answer to a query that still asks for limit 1, unchanged here.
+      allRows = asRows(await adapter.fetchCertificationCampaignSample({ timeoutMs })).slice(
+        0,
+        COMMISSION_SCAN_ROW_LIMIT,
+      );
     } catch (error) {
       // "No publisher id" is a configuration outcome, not a supplier failure.
       if (error?.partnerizeNoPublisherId) {
@@ -451,30 +494,31 @@ export class NetworkCertificationService {
       return both({ ok: false, statusCategory: statusCategory(error) });
     }
 
-    const fieldPaths = summarisePayloads(rows);
-    const commission = summariseCommissionStructure(rows[0]);
+    // The campaigns dictionary is unchanged: one row, exactly as before.
+    const campaignRows = allRows.slice(0, 1);
+    const fieldPaths = summarisePayloads(campaignRows);
+
+    // The commission scan may walk further into the SAME response. It issues nothing.
+    const chosen = chooseCommissionSampleRow(allRows, COMMISSION_SCAN_ROW_LIMIT);
+    const commission = summariseCommissionStructure(chosen.row ?? {});
 
     return {
       campaigns: rowFor("campaigns", {
         ok: true,
         statusCategory: "OK",
-        sampleCount: rows.length,
+        sampleCount: campaignRows.length,
         fieldCount: fieldPaths.length,
         fieldPaths,
       }),
       commission_structure: rowFor("commission_structure", {
         ok: true,
-        // A campaign that states no commission collection is a fact about that campaign, not a
-        // failure: it is reported as its own category so it cannot be read as "no data returned".
-        // "Present" here must mean the campaign STATES outcomes, not merely that the key exists.
-        // An empty array is a stated-but-empty collection and must not read as OK; an object form
-        // has no countable outcomes but is still structure, so it does.
-        statusCategory:
-          commission.commissionsPresent &&
-          (commission.commissionOutcomeCount === null || commission.commissionOutcomeCount > 0)
-            ? "OK"
-            : "OK_NO_COMMISSION_COLLECTION",
-        sampleCount: rows.length,
+        // Not "the key exists" but "a row in the bounded scan states outcomes". A stated-but-empty
+        // collection and a scan that found none are the same finding, and share one category.
+        statusCategory: chosen.found ? "OK" : "OK_NO_COMMISSION_COLLECTION_IN_BOUNDED_SAMPLE",
+        // How many campaign rows of the one response were walked. The query asks for limit 1, so
+        // this is 1 today; it rises only if that query is widened, which is a separate decision.
+        campaignsInspectedCount: chosen.campaignsInspectedCount,
+        sampleCount: chosen.row ? 1 : 0,
         fieldCount: commission.fieldPaths.length,
         fieldPaths: commission.fieldPaths,
         commissionsObservedType: commission.commissionsObservedType,
@@ -484,9 +528,9 @@ export class NetworkCertificationService {
         defaultCommissionValuePresent: commission.defaultCommissionValuePresent,
         defaultCurrencyPresent: commission.defaultCurrencyPresent,
         note:
-          "Outcomes are reported as a count, never merged. default_commission_rate is not payout " +
-          "truth when commissions[] states more specific outcomes; canonical target is " +
-          "SupplierCommissionRule, one row per outcome.",
+          "Outcomes are reported as a count, never merged. default_commission_rate is display and " +
+          "default context only, not payout truth when commissions[] states more specific " +
+          "outcomes; canonical target is SupplierCommissionRule, one row per outcome.",
       }),
     };
   }

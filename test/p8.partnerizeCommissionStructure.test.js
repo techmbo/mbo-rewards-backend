@@ -7,7 +7,10 @@ process.env.FRONTEND_URL = process.env.FRONTEND_URL || "https://frontend.test";
 process.env.PARTNERIZE_CERTIFICATION_MIN_INTERVAL_MS = "1";
 
 const {
+  COMMISSION_SCAN_ROW_LIMIT,
   COMMISSION_STRUCTURE_KEYS,
+  chooseCommissionSampleRow,
+  hasCommissionStructure,
   NetworkCertificationService,
   listProbeSourceObjects,
   summariseCommissionStructure,
@@ -50,12 +53,15 @@ const ALL_VALUES = [
 /** Counts campaign fetches so "no extra supplier call" is observed, not assumed. */
 function adapterFor(row = CAMPAIGN_ROW) {
   const fetches = [];
+  // A single response may carry several rows. Passing an array models exactly that, and the fetch
+  // counter proves the extra rows cost no extra request.
+  const rows = row instanceof Error ? row : Array.isArray(row) ? row : [row];
   return {
     fetches,
     adapter: {
       fetchCertificationCampaignSample: async () => {
         fetches.push("campaigns");
-        return row instanceof Error ? Promise.reject(row) : [row];
+        return rows instanceof Error ? Promise.reject(rows) : rows;
       },
       fetchCertificationVoucherSample: async () => {
         fetches.push("vouchers");
@@ -208,7 +214,8 @@ describe("partnerize commission structure — distinct outcomes stay distinct", 
     // Both defaults coexist with the collection: none of the three displaces another.
     assert.equal(row.commissionOutcomeCount, 3);
     assert.match(row.note, /never merged/);
-    assert.match(row.note, /not payout truth when commissions\[\] states more specific outcomes/);
+    assert.match(row.note, /display and default context only/);
+    assert.match(row.note, /not payout truth when commissions\[\] states more specific/);
     assert.match(row.note, /SupplierCommissionRule, one row per outcome/);
   });
 
@@ -257,7 +264,7 @@ describe("partnerize commission structure — distinct outcomes stay distinct", 
   it("3g — a campaign with no collection is its own outcome, not a failure", async () => {
     const { row } = await run(["commission_structure"], { ...CAMPAIGN_ROW, commissions: [] });
     assert.equal(row.ok, true);
-    assert.equal(row.statusCategory, "OK_NO_COMMISSION_COLLECTION");
+    assert.equal(row.statusCategory, "OK_NO_COMMISSION_COLLECTION_IN_BOUNDED_SAMPLE");
     assert.equal(row.commissionOutcomeCount, 0);
   });
 });
@@ -388,5 +395,166 @@ describe("partnerize commission structure — existing behaviour unchanged", () 
   it("7e — Optimise is unaffected", () => {
     assert.equal(listProbeSourceObjects("optimise").length, 11);
     assert.ok(!serviceSource.includes("OPTIMISE_PROBES.commission_structure"));
+  });
+});
+
+/** Campaign rows carrying no commission structure, for building a multi-row response. */
+const emptyRow = (i) => ({
+  campaign_id: `zzempty${i}zz`,
+  title: `zzemptytitle${i}zz`,
+  default_commission_rate: "zzdefaultratezz",
+  default_currency: "zzdefaultcurrencyzz",
+  commissions: [],
+});
+
+describe("partnerize commission structure — bounded in-memory scan", () => {
+  it("S1 — several rows in ONE response cost one request and are scanned in order", async () => {
+    const rows = [emptyRow(1), emptyRow(2), CAMPAIGN_ROW, emptyRow(4)];
+    const { fetches, row } = await run(["commission_structure"], rows);
+    assert.deepEqual(fetches, ["campaigns"], "extra rows must not cost extra requests");
+    assert.equal(row.campaignsInspectedCount, 3, "the scan stopped at the first non-empty row");
+    assert.equal(row.statusCategory, "OK");
+    assert.equal(row.commissionOutcomeCount, 3);
+  });
+
+  it("S2 — the FIRST non-empty row wins; later richer rows do not displace it", async () => {
+    const richer = {
+      ...CAMPAIGN_ROW,
+      commissions: [{ a: "zz1zz" }, { a: "zz2zz" }, { a: "zz3zz" }, { a: "zz4zz" }, { a: "zz5zz" }],
+    };
+    const first = { ...CAMPAIGN_ROW, commissions: [{ name: "zzonlyzz" }] };
+    const { row } = await run(["commission_structure"], [emptyRow(1), first, richer]);
+    assert.equal(row.campaignsInspectedCount, 2);
+    assert.equal(row.commissionOutcomeCount, 1, "a later row with more outcomes was preferred");
+    // No sorting or scoring: the chooser walks the response's own order.
+    const start = serviceSource.indexOf("export function chooseCommissionSampleRow");
+    const body = serviceSource.slice(start, serviceSource.indexOf("\n}", start));
+    for (const forbidden of [".sort(", "Math.max", "reduce(", ".length >", "score"]) {
+      assert.ok(!body.includes(forbidden), `the chooser uses ${forbidden}`);
+    }
+  });
+
+  it("S3 — at most ten rows are inspected, however many arrive", async () => {
+    assert.equal(COMMISSION_SCAN_ROW_LIMIT, 10);
+    const twenty = Array.from({ length: 20 }, (_, i) => emptyRow(i));
+    // The only non-empty row sits beyond the bound and must NOT be found.
+    twenty[15] = CAMPAIGN_ROW;
+    const { fetches, row } = await run(["commission_structure"], twenty);
+    assert.deepEqual(fetches, ["campaigns"]);
+    assert.equal(row.campaignsInspectedCount, 10, "the scan walked past its bound");
+    assert.equal(row.statusCategory, "OK_NO_COMMISSION_COLLECTION_IN_BOUNDED_SAMPLE");
+    assert.equal(row.commissionOutcomeCount, 0);
+  });
+
+  it("S3b — the adapter caps rows kept from one response at the same ceiling", async () => {
+    const { CERTIFICATION_MAX_SCAN_ROWS, createPartnerizeAdapter } = await import(
+      "../src/adapters/partnerize.adapter.js"
+    );
+    assert.equal(CERTIFICATION_MAX_SCAN_ROWS, 10);
+    const calls = [];
+    const adapter = createPartnerizeAdapter({
+      applicationKey: "zzappkeyzz",
+      userApiKey: "zzuserapikeyzz",
+      publisherId: "zzpublisherzz",
+      httpClient: {
+        get: async (path, config = {}) => {
+          calls.push({ path, params: config.params });
+          return { data: { campaigns: Array.from({ length: 40 }, (_, i) => ({ campaign_id: `zzc${i}zz` })) } };
+        },
+      },
+    });
+    const rows = await adapter.fetchCertificationCampaignSample({ timeoutMs: 3000 });
+    assert.equal(calls.length, 1, "one request");
+    assert.equal(rows.length, 10, "more than the ceiling was kept");
+    // The SUPPLIER QUERY is untouched: still limit 1, still one participation status.
+    assert.deepEqual(calls[0].params, { limit: 1, offset: 0 });
+    assert.equal(calls[0].path, "/user/publisher/zzpublisherzz/campaign/a");
+  });
+
+  it("S4 — no per-campaign fan-out: the scan issues nothing at all", () => {
+    const start = serviceSource.indexOf("export function chooseCommissionSampleRow");
+    const chooser = serviceSource.slice(start, serviceSource.indexOf("\n}", start));
+    for (const forbidden of ["await", "fetch", "adapter", "httpClient", "sampleOnce", "async"]) {
+      assert.ok(!chooser.includes(forbidden), `the chooser does ${forbidden}`);
+    }
+    // And the chain still makes exactly one campaign call on the multi-row path.
+    const chainStart = serviceSource.indexOf("async certifyPartnerizeCampaigns");
+    const chain = serviceSource.slice(chainStart, serviceSource.indexOf("\n  }\n", chainStart));
+    assert.equal(chain.split("fetchCertificationCampaignSample").length - 1, 1);
+    assert.ok(!/for \(|while \(/.test(chain), "the chain loops over campaigns");
+  });
+
+  it("S5 — an empty or absent collection never satisfies the scan", () => {
+    for (const commissions of [[], null, undefined, {}, "", 0, "zzstringzz"]) {
+      assert.equal(hasCommissionStructure({ commissions }), false, String(commissions));
+    }
+    for (const commissions of [[{ a: 1 }], [null], { a: 1 }]) {
+      assert.equal(hasCommissionStructure({ commissions }), true, JSON.stringify(commissions));
+    }
+    assert.equal(hasCommissionStructure(null), false);
+    assert.equal(hasCommissionStructure(), false);
+  });
+
+  it("S3c — the chooser enforces its own bound, independently of its caller", () => {
+    // The service slices before calling, and the adapter caps before that, so the chooser's own
+    // bound is never exercised through the chain. Tested directly, because defence in depth that
+    // is never asserted is just an unverified claim.
+    const rows = Array.from({ length: 40 }, (_, i) => emptyRow(i));
+    rows[25] = CAMPAIGN_ROW;
+    const chosen = chooseCommissionSampleRow(rows, COMMISSION_SCAN_ROW_LIMIT);
+    assert.equal(chosen.campaignsInspectedCount, 10, "the chooser walked past its own bound");
+    assert.equal(chosen.found, false, "it reached a row beyond the bound");
+    // And a smaller explicit bound is honoured too.
+    assert.equal(chooseCommissionSampleRow(rows, 3).campaignsInspectedCount, 3);
+    assert.equal(chooseCommissionSampleRow(rows, 26).found, true);
+  });
+
+  it("S3d — the adapter clamps an inflated maxRows to the ceiling", () => {
+    // No current caller passes more than the ceiling, so this is asserted at the source: the clamp
+    // is what stops a future caller turning a scan into unbounded work.
+    assert.match(
+      adapterSource,
+      /const maxRows = Math\.max\(1, Math\.min\(Number\(ctx\.maxRows\) \|\| 1, CERTIFICATION_MAX_SCAN_ROWS\)\);/,
+    );
+    assert.match(adapterSource, /export const CERTIFICATION_MAX_SCAN_ROWS = 10;/);
+  });
+
+  it("S5b — the chooser reports what it walked, even when it finds nothing", () => {
+    assert.deepEqual(chooseCommissionSampleRow([], 10), {
+      row: null,
+      campaignsInspectedCount: 0,
+      found: false,
+    });
+    const none = chooseCommissionSampleRow([emptyRow(1), emptyRow(2)], 10);
+    assert.equal(none.found, false);
+    assert.equal(none.campaignsInspectedCount, 2);
+    // It falls back to the first row so the default_* presence flags are still reported.
+    assert.equal(none.row.campaign_id, "zzempty1zz");
+    for (const notAList of [null, undefined, "x", 42, {}]) {
+      assert.deepEqual(chooseCommissionSampleRow(notAList, 10).campaignsInspectedCount, 0);
+    }
+  });
+
+  it("S6 — nothing from any inspected row leaks, not just the chosen one", async () => {
+    const rows = [emptyRow(1), emptyRow(2), CAMPAIGN_ROW];
+    const { result } = await run(["campaigns", "commission_structure"], rows);
+    const serialised = JSON.stringify(result);
+    for (const value of [...ALL_VALUES, "zzempty1zz", "zzempty2zz", "zzemptytitle1zz", "zzemptytitle2zz"]) {
+      assert.ok(!serialised.includes(value), `${value} leaked from an inspected row`);
+    }
+    // The count is the only thing the skipped rows contribute.
+    const row = result.results.find((r) => r.sourceObject === "commission_structure");
+    assert.equal(row.campaignsInspectedCount, 3);
+  });
+
+  it("S7 — the campaigns dictionary is still built from exactly one row", async () => {
+    const rows = [CAMPAIGN_ROW, { ...emptyRow(2), zzextrafieldzz: 1 }];
+    const { result } = await run(["campaigns", "commission_structure"], rows);
+    const campaigns = result.results.find((r) => r.sourceObject === "campaigns");
+    assert.equal(campaigns.sampleCount, 1, "the campaigns sample widened");
+    assert.ok(
+      !campaigns.fieldPaths.some((f) => f.path === "zzextrafieldzz"),
+      "a second row bled into the campaigns dictionary",
+    );
   });
 });
