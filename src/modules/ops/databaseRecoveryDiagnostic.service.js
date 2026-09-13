@@ -81,6 +81,15 @@ export function classifyProviderHost(hostname) {
 }
 
 /**
+ * The shape of a Supabase project reference: lowercase alphanumeric, 16 to 32 characters.
+ *
+ * One constant, used by both extraction paths, so the direct-host branch and the pooler-username
+ * branch cannot drift into accepting different things. Supabase issues 20 characters; the range
+ * tolerates variation without admitting anything that is not a bare label.
+ */
+const PROJECT_REF_PATTERN = /^[a-z0-9]{16,32}$/;
+
+/**
  * A Supabase project reference, from a direct Supabase hostname and nothing else.
  *
  * Supabase's direct endpoint is `db.<project-ref>.supabase.co`, so the reference is one label of
@@ -108,7 +117,55 @@ export function extractSupabaseProjectRef(hostname) {
   if (prefix !== "db") return null;
   if (second !== "supabase") return null;
   if (top !== "co" && top !== "com") return null;
-  return /^[a-z0-9]{16,32}$/.test(ref) ? ref : null;
+  return PROJECT_REF_PATTERN.test(ref) ? ref : null;
+}
+
+/**
+ * Whether a hostname is a Supabase connection-pooler endpoint.
+ *
+ * Dot-anchored, so it matches `aws-0-ap-southeast-1.pooler.supabase.com` and refuses
+ * `pooler.supabase.com.attacker.test`. At least one label must precede the suffix: the bare suffix
+ * is not an endpoint anyone connects to, and treating it as one would widen the gate for nothing.
+ */
+export function isSupabasePoolerHost(hostname) {
+  const host = String(hostname ?? "").trim().toLowerCase();
+  return ["pooler.supabase.com", "pooler.supabase.co"].some(
+    (suffix) => host.endsWith(`.${suffix}`) && host.length > suffix.length + 1,
+  );
+}
+
+/**
+ * A Supabase project reference, from a pooler USERNAME.
+ *
+ * This is the one place in this module that reads the credential portion of a connection string,
+ * and it is narrowly justified: on the pooler the reference is not in the hostname at all, so there
+ * is nowhere else to find it. The safety comes from the shape of what is read and what is returned.
+ *
+ * The whole username must be exactly `postgres.<ref>` — anchored at both ends, one dot, and a
+ * reference matching the shared pattern. Nothing else is accepted, so this cannot return a password
+ * fragment, a role name, an email, or a username of some other shape. Only the captured group is
+ * returned; the username itself never leaves the function, and the password is never read at all.
+ *
+ * A percent-encoded username (`postgres%2Eabc…`) fails the anchored match and yields null rather
+ * than being decoded — decoding would be a second way for an unexpected value to become a ref.
+ */
+export function extractSupabaseProjectRefFromPoolerUsername(username) {
+  const match = /^postgres\.([a-z0-9]{16,32})$/.exec(String(username ?? "").trim());
+  return match && PROJECT_REF_PATTERN.test(match[1]) ? match[1] : null;
+}
+
+/**
+ * The project reference for a Supabase URL, whichever endpoint it names.
+ *
+ * Direct endpoints carry it in the hostname; pooler endpoints carry it in the username. The
+ * username is consulted ONLY when the hostname is a recognised pooler host, so no non-Supabase
+ * URL's credential portion is ever parsed.
+ */
+export function supabaseProjectRefFrom({ hostname, username } = {}) {
+  const fromHost = extractSupabaseProjectRef(hostname);
+  if (fromHost) return fromHost;
+  if (!isSupabasePoolerHost(hostname)) return null;
+  return extractSupabaseProjectRefFromPoolerUsername(username);
 }
 
 /**
@@ -153,7 +210,10 @@ export function inspectDirectUrl(rawUrl) {
     providerClass,
     // Only for Supabase. For every other provider the field exists but stays null, so the response
     // shape is stable and a reader never has to distinguish "absent" from "not applicable".
-    supabaseProjectRef: providerClass === "supabase" ? extractSupabaseProjectRef(parsed.hostname) : null,
+    supabaseProjectRef:
+      providerClass === "supabase"
+        ? supabaseProjectRefFrom({ hostname: parsed.hostname, username: parsed.username })
+        : null,
   };
 }
 
