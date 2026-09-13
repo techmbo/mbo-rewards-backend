@@ -213,6 +213,24 @@ function withDeadline(promise, ms, error) {
 const PARTNERIZE_SINGLE_ROW = { limit: 1, offset: 0 };
 
 /**
+ * How many campaign rows ONE certification request asks for.
+ *
+ * Certification only. Production sync paginates through fetchPaginated, which derives its own
+ * limit from the caller's query and defaults to 100 — it never reads this constant, so widening
+ * the sample here cannot change ingestion.
+ *
+ * Ten, and offset 0, and no loop: still exactly one request against one participation status. The
+ * widening exists because a one-row sample of a campaign list cannot answer whether ANY campaign
+ * states commission outcomes — the single row it returned had `commissions: []`, which says
+ * nothing about the other campaigns on the account.
+ */
+export const PARTNERIZE_CERTIFICATION_CAMPAIGN_SAMPLE_LIMIT = 10;
+const PARTNERIZE_CAMPAIGN_SAMPLE_PAGE = Object.freeze({
+  limit: PARTNERIZE_CERTIFICATION_CAMPAIGN_SAMPLE_LIMIT,
+  offset: 0,
+});
+
+/**
  * Hard ceiling on rows kept from ONE response for an in-memory scan.
  *
  * Not a page size and not a request count: the supplier query is unchanged and still asks for
@@ -238,7 +256,9 @@ const PARTNERIZE_CERTIFICATION_SAMPLES = Object.freeze({
     // The argument is the adapter's RESOLVED values, never a caller's ctx. Named accordingly so
     // the distinction is visible at the one place an identifier enters a URL path.
     path: (resolved) => `/user/publisher/${encodeURIComponent(resolved.publisherId)}/campaign/a`,
-    params: () => ({ ...PARTNERIZE_SINGLE_ROW }),
+    // Ten rows, offset 0. One request, one participation status, no loop — only the page width
+    // changes, and only for certification. Neither value can come from a caller.
+    params: () => ({ ...PARTNERIZE_CAMPAIGN_SAMPLE_PAGE }),
   },
 
   // Evidenced: fetchCoupons builds exactly this path and calls get(path, {}, stats) — with NO

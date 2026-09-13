@@ -231,7 +231,9 @@ describe("Partnerize certification — the request the sampler actually makes", 
     const { httpClient } = await sample("campaigns");
     assert.equal(httpClient.requests.length, 1);
     assert.equal(httpClient.requests[0].path, `/user/publisher/${PUBLISHER_ID}/campaign/a`);
-    assert.deepEqual(httpClient.requests[0].params, { limit: 1, offset: 0 });
+    // Ten rows for certification, offset 0, one status, one request. The width changed; the
+    // request count, the offset and the status did not.
+    assert.deepEqual(httpClient.requests[0].params, { limit: 10, offset: 0 });
   });
 
   it("7b — campaigns without a configured publisher id refuses rather than discovering one", async () => {
@@ -707,7 +709,9 @@ describe("Partnerize campaigns — bounded publisher-id discovery chain", () => 
     await chainAdapter(httpClient, { publisherId: CONFIGURED }).fetchCertificationCampaignSample({});
     assert.equal(httpClient.requests.length, 1);
     assert.equal(httpClient.requests[0].path, `/user/publisher/${CONFIGURED}/campaign/a`);
-    assert.deepEqual(httpClient.requests[0].params, { limit: 1, offset: 0 });
+    // The certification campaign page is ten rows wide. Widening the page is not pagination: the
+    // request count, the offset and the participation status are unchanged.
+    assert.deepEqual(httpClient.requests[0].params, { limit: 10, offset: 0 });
   });
 
   it("2 — a configured publisher id triggers no discovery call", async () => {

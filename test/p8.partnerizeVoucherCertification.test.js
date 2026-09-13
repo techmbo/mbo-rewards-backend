@@ -388,7 +388,8 @@ describe("partnerize vouchers — existing behaviour unchanged", () => {
     const cases = [
       ["authenticate", "/user", {}],
       ["publishers", "/user/publisher", { limit: 1, offset: 0 }],
-      ["campaigns", `/user/publisher/${PUBLISHER_ID}/campaign/a`, { limit: 1, offset: 0 }],
+      // Certification samples ten campaign rows in one request; publishers still samples one.
+      ["campaigns", `/user/publisher/${PUBLISHER_ID}/campaign/a`, { limit: 10, offset: 0 }],
     ];
     for (const [sourceObject, path, params] of cases) {
       const { adapter, spy } = adapterWith({ http: spyHttp({ data: { data: [{ a: 1 }] } }) });

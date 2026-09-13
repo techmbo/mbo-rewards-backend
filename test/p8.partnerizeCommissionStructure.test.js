@@ -16,6 +16,10 @@ const {
   summariseCommissionStructure,
 } = await import("../src/modules/ops/networkCertification.service.js");
 const { parseRunBody } = await import("../src/controllers/networkCertification.controller.js");
+const {
+  PARTNERIZE_CERTIFICATION_CAMPAIGN_SAMPLE_LIMIT,
+  createPartnerizeAdapter,
+} = await import("../src/adapters/partnerize.adapter.js");
 
 const serviceSource = readFileSync("src/modules/ops/networkCertification.service.js", "utf8");
 const adapterSource = readFileSync("src/adapters/partnerize.adapter.js", "utf8");
@@ -466,8 +470,8 @@ describe("partnerize commission structure — bounded in-memory scan", () => {
     const rows = await adapter.fetchCertificationCampaignSample({ timeoutMs: 3000 });
     assert.equal(calls.length, 1, "one request");
     assert.equal(rows.length, 10, "more than the ceiling was kept");
-    // The SUPPLIER QUERY is untouched: still limit 1, still one participation status.
-    assert.deepEqual(calls[0].params, { limit: 1, offset: 0 });
+    // The certification query: ten rows, offset zero, one participation status, one request.
+    assert.deepEqual(calls[0].params, { limit: 10, offset: 0 });
     assert.equal(calls[0].path, "/user/publisher/zzpublisherzz/campaign/a");
   });
 
@@ -556,5 +560,124 @@ describe("partnerize commission structure — bounded in-memory scan", () => {
       !campaigns.fieldPaths.some((f) => f.path === "zzextrafieldzz"),
       "a second row bled into the campaigns dictionary",
     );
+  });
+});
+
+
+describe("partnerize commission structure — the widened certification query", () => {
+  /** One request against a stubbed client; returns what was actually sent. */
+  async function requestFor(rows) {
+    const calls = [];
+    const adapter = createPartnerizeAdapter({
+      applicationKey: "zzappkeyzz",
+      userApiKey: "zzuserapikeyzz",
+      publisherId: "zzpublisherzz",
+      httpClient: {
+        get: async (path, config = {}) => {
+          calls.push({ path, params: config.params });
+          return { data: { campaigns: rows } };
+        },
+      },
+    });
+    const kept = await adapter.fetchCertificationCampaignSample({ timeoutMs: 3000 });
+    return { calls, kept };
+  }
+
+  it("W1 — the certification query is exactly { limit: 10, offset: 0 }", async () => {
+    assert.equal(PARTNERIZE_CERTIFICATION_CAMPAIGN_SAMPLE_LIMIT, 10);
+    const { calls } = await requestFor([{ campaign_id: "zzc1zz" }]);
+    assert.equal(calls.length, 1, "exactly one HTTP request");
+    assert.deepEqual(calls[0].params, { limit: 10, offset: 0 });
+    assert.equal(calls[0].path, "/user/publisher/zzpublisherzz/campaign/a");
+    // The constant is what the spec uses, so the two cannot drift.
+    assert.match(
+      adapterSource,
+      /export const PARTNERIZE_CERTIFICATION_CAMPAIGN_SAMPLE_LIMIT = 10;/,
+    );
+    assert.match(
+      adapterSource,
+      /const PARTNERIZE_CAMPAIGN_SAMPLE_PAGE = Object\.freeze\(\{\s*limit: PARTNERIZE_CERTIFICATION_CAMPAIGN_SAMPLE_LIMIT,\s*offset: 0,\s*\}\);/,
+    );
+  });
+
+  it("W2 — offset stays 0 and there is no second page, however many rows arrive", async () => {
+    const { calls, kept } = await requestFor(
+      Array.from({ length: 200 }, (_, i) => ({ campaign_id: `zzc${i}zz` })),
+    );
+    assert.equal(calls.length, 1, "a second page was requested");
+    assert.equal(calls[0].params.offset, 0);
+    assert.equal(kept.length, 10, "more than the ceiling was kept in memory");
+  });
+
+  it("W3 — publishers is NOT widened: it still samples one row", async () => {
+    const calls = [];
+    const adapter = createPartnerizeAdapter({
+      applicationKey: "zzappkeyzz",
+      userApiKey: "zzuserapikeyzz",
+      publisherId: null,
+      httpClient: {
+        get: async (path, config = {}) => {
+          calls.push({ path, params: config.params });
+          if (path === "/user/publisher") return { data: { publishers: [{ publisher_id: "zzdiscoveredzz" }] } };
+          return { data: { campaigns: [{ campaign_id: "zzc1zz" }] } };
+        },
+      },
+    });
+    await adapter.fetchCertificationCampaignSample({ timeoutMs: 3000 });
+    const publishers = calls.find((c) => c.path === "/user/publisher");
+    assert.deepEqual(publishers.params, { limit: 1, offset: 0 }, "the publishers sample was widened");
+    assert.match(adapterSource, /const PARTNERIZE_SINGLE_ROW = \{ limit: 1, offset: 0 \};/);
+  });
+
+  it("W4 — production sync pagination is untouched and reads none of this", () => {
+    // fetchPaginated derives its own limit from the caller's query, defaulting to 100, and loops
+    // until a short page. Certification's constant is not referenced anywhere in it.
+    assert.match(adapterSource, /const limit = Number\(query\.limit \?\? query\.page_size \?\? 100\);/);
+    const start = adapterSource.indexOf("async function fetchPaginated");
+    const body = adapterSource.slice(start, adapterSource.indexOf("\n  }", start));
+    for (const forbidden of [
+      "PARTNERIZE_CERTIFICATION_CAMPAIGN_SAMPLE_LIMIT",
+      "PARTNERIZE_CAMPAIGN_SAMPLE_PAGE",
+      "PARTNERIZE_SINGLE_ROW",
+      "CERTIFICATION_MAX_SCAN_ROWS",
+    ]) {
+      assert.ok(!body.includes(forbidden), `sync pagination reads ${forbidden}`);
+    }
+    // Its loop and its stop condition are unchanged.
+    assert.match(body, /for \(;;\) \{/);
+    assert.match(body, /if \(!hasMore\(data, offset, limit, rows\.length\) \|\| rows\.length === 0\) break;/);
+    assert.match(body, /offset \+= rows\.length;/);
+    assert.match(body, /if \(page > 500\) break;/);
+    // And the sync campaign fetcher still goes through it.
+    assert.match(adapterSource, /collected\.push\(\.\.\.asArray\(await fetchPaginated\(path, params, stats\)\)\);/);
+  });
+
+  it("W5 — the widened page is certification-only: two constants, two callers", () => {
+    // The certification page constant is used by the certification spec and nowhere else.
+    assert.equal(adapterSource.split("PARTNERIZE_CAMPAIGN_SAMPLE_PAGE").length - 1, 2);
+    const specStart = adapterSource.indexOf("  campaigns: {");
+    const spec = adapterSource.slice(specStart, adapterSource.indexOf("  },", specStart));
+    assert.match(spec, /params: \(\) => \(\{ \.\.\.PARTNERIZE_CAMPAIGN_SAMPLE_PAGE \}\)/);
+    // No caller can supply either value.
+    for (const body of [{ limit: 50 }, { offset: 10 }, { page: 2 }, { pageSize: 25 }]) {
+      assert.throws(() => parseRunBody(body), /Unsupported field/);
+    }
+  });
+
+  it("W6 — a wider page still costs one request through the whole chain", async () => {
+    const rows = Array.from({ length: 10 }, (_, i) => emptyRow(i));
+    rows[6] = CAMPAIGN_ROW;
+    const { fetches, row, result } = await run(["campaigns", "commission_structure"], rows);
+    assert.deepEqual(fetches, ["campaigns"], "the widened page cost an extra request");
+    assert.equal(row.campaignsInspectedCount, 7);
+    assert.equal(row.statusCategory, "OK");
+    assert.equal(row.commissionOutcomeCount, 3);
+    // The campaigns dictionary is still one row.
+    assert.equal(result.results.find((r) => r.sourceObject === "campaigns").sampleCount, 1);
+    // And nothing from the nine other rows leaks.
+    const serialised = JSON.stringify(result);
+    for (const value of [...ALL_VALUES, "zzempty0zz", "zzempty9zz", "zzemptytitle3zz"]) {
+      assert.ok(!serialised.includes(value), `${value} leaked`);
+    }
   });
 });
