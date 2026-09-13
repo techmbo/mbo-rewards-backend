@@ -145,7 +145,86 @@ const PARTNERIZE_PROBES = Object.freeze({
     endpointKey: "GET /user/publisher/{publisherId}/campaign/{campaignId}/voucher",
     chain: "partnerizeVouchers",
   },
+  // No endpoint of its own. Partnerize exposes no commission or rate endpoint — the adapter builds
+  // six paths in total and none is commission-scoped — so the structure is read out of the campaign
+  // response that is already certified. Same chain as `campaigns`, so selecting both still costs
+  // one request; selecting either alone costs one.
+  commission_structure: {
+    method: "GET",
+    endpointKey: "GET /user/publisher/{publisherId}/campaign/a (embedded commission subtree)",
+    chain: "partnerizeCampaigns",
+    derivedFrom: "campaigns",
+  },
 });
+
+/**
+ * The campaign fields that carry commission structure. Nothing outside this list is inspected.
+ *
+ * Partnerize states payout in three places at once: `commissions`, a plural collection of specific
+ * outcomes, and two `default_*` scalars. They are not alternatives and they are not interchangeable.
+ */
+export const COMMISSION_STRUCTURE_KEYS = Object.freeze([
+  "commissions",
+  "default_commission_rate",
+  "default_commission_value",
+  "default_currency",
+]);
+
+/**
+ * A structural view of one campaign's commission subtree.
+ *
+ * Reports SHAPE and CARDINALITY, never a rate, an amount or a currency. The cardinality is the
+ * point: a field dictionary alone collapses `commissions[0]` and `commissions[1]` into one
+ * `commissions[]` path, which is correct for paths and useless for the question that matters here —
+ * how many distinct payout outcomes the supplier stated. Counting them is what makes "do not
+ * average or collapse distinct outcomes" checkable rather than aspirational. A count is not a
+ * value: it says there are three outcomes, never what any of them pays.
+ *
+ * `distinctOutcomeShapeCount` counts distinct KEY SETS among the elements. Two outcomes with the
+ * same keys and different numbers still count as two outcomes; the shape count only says whether
+ * they are described the same way, which is what a canonical mapping has to accommodate.
+ */
+export function summariseCommissionStructure(row = {}) {
+  const source = row && typeof row === "object" && !Array.isArray(row) ? row : {};
+  const subtree = {};
+  for (const key of COMMISSION_STRUCTURE_KEYS) {
+    if (Object.hasOwn(source, key)) subtree[key] = source[key];
+  }
+
+  const commissions = subtree.commissions;
+  const isArray = Array.isArray(commissions);
+  const elements = isArray ? commissions : [];
+
+  // Distinct key sets, computed from NAMES only. No element value is read, compared or hashed.
+  const shapes = new Set(
+    elements.map((element) =>
+      element && typeof element === "object" && !Array.isArray(element)
+        ? Object.keys(element).sort().join(",")
+        : `__${Array.isArray(element) ? "array" : typeof element}__`,
+    ),
+  );
+
+  return {
+    commissionsPresent: Object.hasOwn(source, "commissions") && commissions != null,
+    commissionsObservedType: !Object.hasOwn(source, "commissions")
+      ? "ABSENT"
+      : commissions === null
+        ? "NULL"
+        : isArray
+          ? "ARRAY"
+          : typeof commissions === "object"
+            ? "OBJECT"
+            : String(typeof commissions).toUpperCase(),
+    // How many distinct payout outcomes the supplier stated. Null when it is not a collection.
+    commissionOutcomeCount: isArray ? elements.length : null,
+    distinctOutcomeShapeCount: isArray ? shapes.size : null,
+    defaultCommissionRatePresent: source.default_commission_rate != null,
+    defaultCommissionValuePresent: source.default_commission_value != null,
+    defaultCurrencyPresent: source.default_currency != null,
+    // Paths for the subtree only, through the same value-free summariser every probe uses.
+    fieldPaths: summarisePayloads([subtree]),
+  };
+}
 
 const PROBE_REGISTRY = Object.freeze({ optimise: OPTIMISE_PROBES, partnerize: PARTNERIZE_PROBES });
 
@@ -340,37 +419,76 @@ export class NetworkCertificationService {
    *
    * This service only classifies the outcome.
    */
-  async certifyPartnerizeCampaigns({ adapter, key, probe, budgetLeft }) {
-    const base = {
+  async certifyPartnerizeCampaigns({ adapter, key, probes, budgetLeft }) {
+    // Two source objects, one response. `campaigns` reports the whole 46-field dictionary;
+    // `commission_structure` reports only the commission subtree of the SAME row, so no second
+    // supplier request exists for it to make.
+    const rowFor = (sourceObject, extra) => ({
       network: key,
-      sourceObject: "campaigns",
-      endpointKey: probe.endpointKey,
-      httpMethod: probe.method,
+      sourceObject,
+      endpointKey: probes[sourceObject].endpointKey,
+      httpMethod: probes[sourceObject].method,
       sampleCount: 0,
       fieldPaths: [],
-    };
+      ...extra,
+    });
+    const both = (extra) => ({
+      campaigns: rowFor("campaigns", extra),
+      commission_structure: rowFor("commission_structure", extra),
+    });
 
     const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
 
+    let rows;
     try {
-      const rows = asRows(await adapter.fetchCertificationCampaignSample({ timeoutMs })).slice(0, 1);
-      const fieldPaths = summarisePayloads(rows);
-      return {
-        ...base,
+      rows = asRows(await adapter.fetchCertificationCampaignSample({ timeoutMs })).slice(0, 1);
+    } catch (error) {
+      // "No publisher id" is a configuration outcome, not a supplier failure.
+      if (error?.partnerizeNoPublisherId) {
+        return both({ ok: false, statusCategory: "SKIPPED_NO_PUBLISHER_ID" });
+      }
+      // Anything else — discovery or campaign — is reported as its category and stops there.
+      return both({ ok: false, statusCategory: statusCategory(error) });
+    }
+
+    const fieldPaths = summarisePayloads(rows);
+    const commission = summariseCommissionStructure(rows[0]);
+
+    return {
+      campaigns: rowFor("campaigns", {
         ok: true,
         statusCategory: "OK",
         sampleCount: rows.length,
         fieldCount: fieldPaths.length,
         fieldPaths,
-      };
-    } catch (error) {
-      // "No publisher id" is a configuration outcome, not a supplier failure.
-      if (error?.partnerizeNoPublisherId) {
-        return { ...base, ok: false, statusCategory: "SKIPPED_NO_PUBLISHER_ID" };
-      }
-      // Anything else — discovery or campaign — is reported as its category and stops there.
-      return { ...base, ok: false, statusCategory: statusCategory(error) };
-    }
+      }),
+      commission_structure: rowFor("commission_structure", {
+        ok: true,
+        // A campaign that states no commission collection is a fact about that campaign, not a
+        // failure: it is reported as its own category so it cannot be read as "no data returned".
+        // "Present" here must mean the campaign STATES outcomes, not merely that the key exists.
+        // An empty array is a stated-but-empty collection and must not read as OK; an object form
+        // has no countable outcomes but is still structure, so it does.
+        statusCategory:
+          commission.commissionsPresent &&
+          (commission.commissionOutcomeCount === null || commission.commissionOutcomeCount > 0)
+            ? "OK"
+            : "OK_NO_COMMISSION_COLLECTION",
+        sampleCount: rows.length,
+        fieldCount: commission.fieldPaths.length,
+        fieldPaths: commission.fieldPaths,
+        commissionsObservedType: commission.commissionsObservedType,
+        commissionOutcomeCount: commission.commissionOutcomeCount,
+        distinctOutcomeShapeCount: commission.distinctOutcomeShapeCount,
+        defaultCommissionRatePresent: commission.defaultCommissionRatePresent,
+        defaultCommissionValuePresent: commission.defaultCommissionValuePresent,
+        defaultCurrencyPresent: commission.defaultCurrencyPresent,
+        note:
+          "Outcomes are reported as a count, never merged. default_commission_rate is not payout " +
+          "truth when commissions[] states more specific outcomes; canonical target is " +
+          "SupplierCommissionRule, one row per outcome.",
+      }),
+    };
   }
 
   /**
@@ -666,6 +784,9 @@ export class NetworkCertificationService {
       }
     }
 
+    // Memo for the one chain whose single response serves two source objects.
+    let partnerizeCampaignRows = null;
+
     for (const sourceObject of requested) {
       const probe = probes[sourceObject];
 
@@ -749,7 +870,17 @@ export class NetworkCertificationService {
       }
 
       if (probe.chain === "partnerizeCampaigns") {
-        results.push(await this.certifyPartnerizeCampaigns({ adapter, key, probe, budgetLeft }));
+        // One fetch, two rows. `campaigns` and `commission_structure` read the same response, so
+        // requesting both must not request the campaign twice — the memo is what guarantees it.
+        if (!partnerizeCampaignRows) {
+          partnerizeCampaignRows = await this.certifyPartnerizeCampaigns({
+            adapter,
+            key,
+            probes,
+            budgetLeft,
+          });
+        }
+        results.push(partnerizeCampaignRows[sourceObject]);
         continue;
       }
 

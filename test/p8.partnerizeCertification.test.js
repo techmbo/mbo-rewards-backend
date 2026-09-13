@@ -52,9 +52,21 @@ function recorder({ data = { id: 1 }, error = null, delayMs = 0 } = {}) {
 
 describe("Partnerize certification — registry and bounds", () => {
   it("1 — Partnerize exists in the certification registry", () => {
-    const expected = ["authenticate", "publishers", "campaigns", "vouchers"];
-    assert.deepEqual(listProbeSourceObjects("partnerize"), expected);
-    assert.deepEqual(listPartnerizeCertificationSamples(), expected);
+    assert.deepEqual(listProbeSourceObjects("partnerize"), [
+      "authenticate",
+      "publishers",
+      "campaigns",
+      "vouchers",
+      "commission_structure",
+    ]);
+    // The adapter has one SAMPLE per supplier request. commission_structure has none: it is derived
+    // from the campaign response, so it is a source object without a request of its own.
+    assert.deepEqual(listPartnerizeCertificationSamples(), [
+      "authenticate",
+      "publishers",
+      "campaigns",
+      "vouchers",
+    ]);
   });
 
   it("2 — an unknown Partnerize source object cannot dispatch", async () => {
@@ -102,10 +114,17 @@ describe("Partnerize certification — registry and bounds", () => {
     const block = serviceSource.slice(start, serviceSource.indexOf("});", start));
     // Two chains, and both are approved by name. campaigns may make a second request to discover a
     // publisher id; vouchers may not — it is one request or none.
+    // Two DISTINCT chains, both approved by name. commission_structure reuses the campaign chain
+    // rather than declaring a third, which is what keeps it free of a supplier request.
     assert.deepEqual(
-      (block.match(/chain: "[^"]+"/g) || []).sort(),
+      [...new Set(block.match(/chain: "[^"]+"/g) || [])].sort(),
       ['chain: "partnerizeCampaigns"', 'chain: "partnerizeVouchers"'],
       "an undeclared chain was added",
+    );
+    assert.equal(
+      (block.match(/chain: "partnerizeCampaigns"/g) || []).length,
+      2,
+      "campaigns and commission_structure must share one chain",
     );
     assert.equal(MAX_SUPPLIER_REQUESTS_PARTNERIZE_VOUCHERS, 1, "vouchers must stay at one request");
     assert.ok(!block.includes("emits:"), "no Partnerize probe may emit extra rows");

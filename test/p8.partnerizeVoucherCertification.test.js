@@ -119,7 +119,9 @@ describe("partnerize vouchers — the endpoint is pinned", () => {
       "publishers",
       "campaigns",
       "vouchers",
+      "commission_structure",
     ]);
+    // commission_structure is derived from the campaign response, so it has no adapter sample.
     assert.deepEqual(listPartnerizeCertificationSamples(), [
       "authenticate",
       "publishers",
