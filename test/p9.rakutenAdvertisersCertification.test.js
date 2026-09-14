@@ -159,6 +159,7 @@ describe("Rakuten is registered in the certification framework", () => {
       "advertisers",
       "commissioning_lists",
       "coupons",
+      "events",
       "links",
       "offers",
       "partnerships",
@@ -166,7 +167,7 @@ describe("Rakuten is registered in the certification framework", () => {
   });
 
   it("adds no probe for the objects this phase defers", () => {
-    for (const notYet of ["events", "advanced_reports", "payments", "products"]) {
+    for (const notYet of ["advanced_reports", "payments", "products"]) {
       assert.ok(!listProbeSourceObjects("rakuten").includes(notYet), notYet);
       assert.ok(!Object.hasOwn(RAKUTEN_CERTIFICATION_SPECS, notYet), notYet);
     }
@@ -306,8 +307,9 @@ describe("the request table is the only thing that chooses a path", () => {
   it("refuses a source object it does not name, saying so", async () => {
     const spy = spyHttp();
     await assert.rejects(
-      () => adapterWith(spy).fetchCertificationSample("events", {}),
-      (error) => /No Rakuten certification sample is defined for "events"/.test(error.message),
+      () => adapterWith(spy).fetchCertificationSample("advanced_reports", {}),
+      (error) =>
+        /No Rakuten certification sample is defined for "advanced_reports"/.test(error.message),
     );
     assert.equal(spy.calls.length, 0);
   });
@@ -631,7 +633,7 @@ describe("credentials match production semantics", () => {
   it("rejects a source object that has no probe", async () => {
     const service = serviceWith(adapterWith(spyHttp()));
     await assert.rejects(
-      () => service.certify("rakuten", { sourceObjects: ["events"] }),
+      () => service.certify("rakuten", { sourceObjects: ["advanced_reports"] }),
       (error) => Number(error?.statusCode ?? error?.status) === 400,
     );
   });

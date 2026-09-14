@@ -261,11 +261,16 @@ describe("the documented Coupon API request contract", () => {
     });
   });
 
-  it("is the only spec declaring bounds of its own", () => {
+  it("declares bounds of its own, as only the endpoints that publish their own do", () => {
+    // events joined later: its limit/page pair arrives inside production's own parameter builder,
+    // so spreading the shared pair alongside would bypass that normalisation. Nothing else.
     for (const [name, spec] of Object.entries(RAKUTEN_CERTIFICATION_SPECS)) {
-      if (name === "coupons") continue;
+      if (name === "coupons" || name === "events") continue;
       assert.ok(!spec.ownBounds, `${name} must keep the shared bounds`);
     }
+    assert.equal(RAKUTEN_CERTIFICATION_SPECS.coupons.ownBounds, true);
+    // coupons declares its bounds as a frozen literal; events builds them from the window.
+    assert.equal(RAKUTEN_CERTIFICATION_SPECS.coupons.buildParams, undefined);
   });
 });
 

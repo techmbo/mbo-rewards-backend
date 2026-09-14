@@ -168,6 +168,7 @@ describe("offers is registered as a Rakuten source object", () => {
       "advertisers",
       "commissioning_lists",
       "coupons",
+      "events",
       "links",
       "offers",
       "partnerships",
@@ -206,7 +207,7 @@ describe("offers is registered as a Rakuten source object", () => {
   });
 
   it("adds no probe for the objects this phase still defers", () => {
-    for (const notYet of ["events", "advanced_reports", "payments", "products"]) {
+    for (const notYet of ["advanced_reports", "payments", "products"]) {
       assert.ok(!listProbeSourceObjects("rakuten").includes(notYet), notYet);
       assert.ok(!Object.hasOwn(RAKUTEN_CERTIFICATION_SPECS, notYet), notYet);
     }

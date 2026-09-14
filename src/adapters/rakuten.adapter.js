@@ -243,6 +243,96 @@ export function extractRakutenCouponLinks(xml) {
 }
 
 /**
+ * Rakuten's Events API — recent transaction confirmations.
+ *
+ * GET /events/1.0/transactions, Bearer only, JSON. Production already reads this path in
+ * fetchConversions; nothing here duplicates it. What is added is the bounded CERTIFICATION shape.
+ *
+ * AN EVENT TRANSACTION IS NOT A FINAL ORDER FINANCE RECORD. Rakuten retains roughly the previous
+ * one to two weeks here and describes it as recent, directional conversion evidence. `commissions`
+ * on a row is a supplier-observed event commission — not the final payable commission, not
+ * ClientPayable, not NetworkInvoice, not NetworkPayment. Expected and final reconciliation belongs
+ * to the reporting surfaces (Signature Orders / Individual Item), not to this endpoint. Nothing in
+ * this phase feeds an Events value into commercial or payable logic.
+ */
+export const RAKUTEN_EVENTS_PATH = "/events/1.0/transactions";
+
+/** The row container. Production's fetchConversions reads the same key, so certification and the
+ *  sync see a ROW and never the envelope around it. */
+export const RAKUTEN_EVENTS_COLLECTION_KEYS = Object.freeze(["transactions"]);
+
+/**
+ * A UTC day boundary as a Date: the first instant of the day, or its last whole second.
+ *
+ * The certification window carries bare YYYY-MM-DD dates produced by toISOString().slice(0, 10),
+ * so they are UTC calendar dates and are read back as such. Reading them in local time would shift
+ * the day by one in any negative-offset zone and probe a window other than the one reported.
+ *
+ * The two ends are deliberately ASYMMETRIC. process_date_end is an inclusive upper bound on a
+ * TIMESTAMP, and the window's `to` is today — so rendering it at 00:00:00 would ask for a window
+ * that ends the instant today begins, discarding every transaction the supplier has recorded
+ * today. On an API whose whole content is the last week or two, that is the half most likely to
+ * hold a row.
+ */
+function rakutenUtcDayBoundary(value, { endOfDay = false } = {}) {
+  const date = value instanceof Date ? new Date(value) : new Date(String(value));
+  if (Number.isNaN(date.getTime())) return null;
+  return new Date(
+    Date.UTC(
+      date.getUTCFullYear(),
+      date.getUTCMonth(),
+      date.getUTCDate(),
+      endOfDay ? 23 : 0,
+      endOfDay ? 59 : 0,
+      endOfDay ? 59 : 0,
+    ),
+  );
+}
+
+/**
+ * An Events date in the documented "YYYY-MM-DD HH:mm:ss", rendered from UTC components.
+ *
+ * URL encoding of the space is the HTTP client's job, not this function's: encoding here would
+ * double-encode it into %2520.
+ *
+ * Returns null for an unparseable value rather than a malformed string, so the caller can refuse
+ * instead of sending "null" where a date belongs.
+ */
+export function rakutenEventDateParam(value) {
+  const date = value instanceof Date ? new Date(value) : new Date(String(value));
+  if (Number.isNaN(date.getTime())) return null;
+  const pad = (n) => String(n).padStart(2, "0");
+  const day = `${String(date.getUTCFullYear()).padStart(4, "0")}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
+  const time = `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}`;
+  return `${day} ${time}`;
+}
+
+/**
+ * The bounded Events request, built from the service's own window.
+ *
+ * The PROCESS date pair, not the transaction one. Rakuten takes either, and both members of a pair
+ * must travel together — a half-open pair is a request the supplier rejects. Only one pair is ever
+ * sent, so there is no ambiguity about which date the window bounded.
+ *
+ * The final assembly runs through buildRakutenEventParams, which is PRODUCTION'S OWN builder: the
+ * allowlist, the together-or-not-at-all rule for each pair, and the limit/page normalisation are
+ * production's rather than a second implementation of them. A key it does not name cannot reach
+ * the supplier.
+ */
+export function buildRakutenCertificationEventParams(window = {}) {
+  const processDateStart = rakutenEventDateParam(rakutenUtcDayBoundary(window?.from));
+  const processDateEnd = rakutenEventDateParam(rakutenUtcDayBoundary(window?.to, { endOfDay: true }));
+  if (!processDateStart || !processDateEnd) {
+    throw new Error("Rakuten Events certification requires a bounded window with both dates");
+  }
+  return buildRakutenEventParams({
+    process_date_start: processDateStart,
+    process_date_end: processDateEnd,
+    ...RAKUTEN_CERTIFICATION_PAGE_PARAMS,
+  });
+}
+
+/**
  * Every Rakuten source object certification can sample, and the one path each uses.
  *
  * A frozen registry rather than a path argument: there is no call shape through which a caller
@@ -339,6 +429,25 @@ export const RAKUTEN_CERTIFICATION_SPECS = Object.freeze({
     params: RAKUTEN_CERTIFICATION_COUPON_PARAMS,
     xml: true,
     extract: extractRakutenCouponLinks,
+  }),
+  // The second DATED object, and the only one whose parameters are built by production's own
+  // builder rather than declared as a literal.
+  //
+  // ownBounds because the limit/page pair arrives INSIDE buildRakutenCertificationEventParams,
+  // which runs it through buildRakutenEventParams — production's allowlist and pairing rule. A
+  // second spread of the shared pair would bypass that normalisation.
+  //
+  // Rows are returned EXACTLY as the supplier sends them. normalizeRakutenEventEvidence, which
+  // production applies in fetchConversions, is deliberately not used: it renames etransaction_id
+  // to networkConversionComponentId and commissions to baseCommissionCandidate, and certifying a
+  // renamed row would certify MBO's vocabulary instead of the supplier's.
+  events: Object.freeze({
+    method: "GET",
+    path: RAKUTEN_EVENTS_PATH,
+    needs: Object.freeze(["window"]),
+    ownBounds: true,
+    buildParams: buildRakutenCertificationEventParams,
+    collectionKeys: RAKUTEN_EVENTS_COLLECTION_KEYS,
   }),
 });
 
@@ -725,7 +834,9 @@ export function createRakutenAdapter({
           ? {}
           : {
               ...(spec.ownBounds ? {} : RAKUTEN_CERTIFICATION_PAGE_PARAMS),
-              ...(spec.params ?? {}),
+              // A built parameter set is derived from the service's window and from nothing else;
+              // a declared one stays exactly what the frozen table names.
+              ...(spec.buildParams ? spec.buildParams(window) : (spec.params ?? {})),
             },
         headers: { Accept: spec.xml ? "application/xml,text/xml" : "application/json" },
         ...(spec.xml ? { responseType: "text" } : {}),

@@ -526,6 +526,31 @@ const RAKUTEN_PROBES = Object.freeze({
     endpointKey: "GET /coupon/1.0 (resultsperpage=1, pagenumber=1)",
     chain: "rakutenSample",
   },
+  // The Events API: recent transaction confirmations, JSON, Bearer only.
+  //
+  // Named "events" because that is what the Rakuten source-object catalog already calls this
+  // object. Adding a second name for it — "conversions", as other networks spell their own —
+  // would make the same endpoint answerable under two identifiers.
+  //
+  // AN EVENT TRANSACTION IS NOT A FINAL ORDER FINANCE RECORD. Rakuten retains roughly the previous
+  // one to two weeks here and calls it recent, directional evidence; `commissions` on a row is a
+  // supplier-observed event commission, not the final payable one, and not ClientPayable,
+  // NetworkInvoice or NetworkPayment. Nothing here feeds it into commercial or payable logic.
+  //
+  // ONE ORDER CAN HAVE MANY ITEM ROWS. etransaction_id is the transaction identity and order_id is
+  // the order grouping; they are different fields and neither implies the other. Certification
+  // takes one row and reports its shape — it never groups, dedupes or aggregates by order_id, and
+  // an adjustment row carrying a negative sale_amount or commissions is a valid row, not an error.
+  //
+  // Rows reach the dictionary EXACTLY as the supplier sends them. The production normaliser is not
+  // applied, because certifying a renamed row would certify MBO's vocabulary rather than Rakuten's.
+  events: {
+    method: "GET",
+    endpointKey:
+      "GET /events/1.0/transactions (process_date window, limit=1, page=1)",
+    chain: "rakutenSample",
+    dated: true,
+  },
 });
 
 const PROBE_REGISTRY = Object.freeze({

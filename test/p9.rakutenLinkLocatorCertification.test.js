@@ -377,11 +377,12 @@ describe("the explicit-date isolation URL contract", () => {
   });
 
   it("leaves the undated objects needing no window and taking no dates", async () => {
-    // Only links is dated. A window reaching advertisers or offers would be a silent scope change.
+    // links and events are the dated objects. A window reaching advertisers, offers, coupons or
+    // commissioning_lists would be a silent scope change.
     for (const [name, spec] of Object.entries(RAKUTEN_CERTIFICATION_SPECS)) {
-      if (name === "links") continue;
+      if (name !== "links") assert.equal(spec.buildPath, undefined, `${name} must keep its path`);
+      if (name === "links" || name === "events") continue;
       assert.equal(spec.needs, undefined, `${name} must not need a window`);
-      assert.equal(spec.buildPath, undefined, `${name} must keep its static path`);
     }
     const spy = spyHttp({ advertisers: [{ id: 1 }] });
     await adapterWith(spy).fetchCertificationSample("advertisers", { window: WINDOW });
@@ -946,7 +947,7 @@ describe("nothing beyond text links is implemented", () => {
   });
 
   it("adds no probe for the objects still deferred", () => {
-    for (const notYet of ["events", "advanced_reports", "payments", "products"]) {
+    for (const notYet of ["advanced_reports", "payments", "products"]) {
       assert.ok(!listProbeSourceObjects("rakuten").includes(notYet), notYet);
       assert.ok(!Object.hasOwn(RAKUTEN_CERTIFICATION_SPECS, notYet), notYet);
     }
