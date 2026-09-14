@@ -311,6 +311,17 @@ const AWIN_PROBES = Object.freeze({
     endpointKey: "GET /publishers/{publisherId}/programmes",
     chain: "awinCampaigns",
   },
+  // Evidenced by fetchCoupons, which POSTs to exactly this path. A POST that reads: empty filters,
+  // one row requested, no supplier state changed. `/publisher/` is singular here — Awin's own
+  // inconsistency, copied rather than corrected.
+  coupons: {
+    // POST_READONLY, not POST: READ_ONLY_METHODS admits only GET and POST_READONLY, and that guard
+    // stays exactly as it is. The endpointKey still shows the real HTTP verb an operator would
+    // send, because that is what the supplier sees.
+    method: "POST_READONLY",
+    endpointKey: "POST /publisher/{publisherId}/promotions",
+    chain: "awinCoupons",
+  },
 });
 
 const PROBE_REGISTRY = Object.freeze({
@@ -531,21 +542,26 @@ export class NetworkCertificationService {
   }
 
   /**
-   * The Awin campaigns chain: exactly one request, publisher-scoped, no date window.
+   * One bounded Awin sample, shared by campaigns and coupons.
+   *
+   * Both are publisher-scoped list endpoints, both are exactly one request, and both must
+   * distinguish "this account has none" from "certified". Writing the control flow once means the
+   * two cannot drift apart; the verb, path and body differ, and those live in the adapter's own
+   * spec, which is the only place that builds a request.
    *
    * Zero rows is reported as OK_NO_ROWS rather than OK. The distinction matters: OK with an empty
    * field list reads as "certified, no fields", when what happened is that this publisher has no
-   * joined programmes and the row schema is still unknown. An operator seeing OK_NO_ROWS knows to
-   * check the account's programme relationships, not the integration.
+   * joined programmes, or no promotions, and the row schema is still unknown. An operator seeing
+   * OK_NO_ROWS knows to check the account, not the integration.
    *
    * Only structural paths, types and counts leave this method. summarisePayloads never reports a
-   * value, so no advertiser or programme id, name, description, URL, commission range or currency
-   * can reach the response.
+   * value, so no advertiser or programme id, promotion or voucher code, name, description, URL,
+   * commission range, currency or date can reach the response.
    */
-  async certifyAwinCampaigns({ adapter, key, probe, budgetLeft }) {
+  async certifyAwinSample({ adapter, key, probe, budgetLeft, sourceObject }) {
     const base = {
       network: key,
-      sourceObject: "campaigns",
+      sourceObject,
       endpointKey: probe.endpointKey,
       httpMethod: probe.method,
       sampleCount: 0,
@@ -558,7 +574,7 @@ export class NetworkCertificationService {
       // One row is all a field dictionary needs, and one row is all that is held. The adapter
       // already slices; this is the second, independent bound.
       const rows = asRows(
-        await adapter.fetchCertificationSample("campaigns", { timeoutMs }),
+        await adapter.fetchCertificationSample(sourceObject, { timeoutMs }),
       ).slice(0, 1);
 
       if (!rows.length) {
@@ -583,6 +599,14 @@ export class NetworkCertificationService {
     } catch (error) {
       return { ...base, ok: false, statusCategory: statusCategory(error) };
     }
+  }
+
+  async certifyAwinCampaigns(args) {
+    return this.certifyAwinSample({ ...args, sourceObject: "campaigns" });
+  }
+
+  async certifyAwinCoupons(args) {
+    return this.certifyAwinSample({ ...args, sourceObject: "coupons" });
   }
 
   /**
@@ -1158,6 +1182,11 @@ export class NetworkCertificationService {
 
       if (probe.chain === "awinCampaigns") {
         results.push(await this.certifyAwinCampaigns({ adapter, key, probe, budgetLeft }));
+        continue;
+      }
+
+      if (probe.chain === "awinCoupons") {
+        results.push(await this.certifyAwinCoupons({ adapter, key, probe, budgetLeft }));
         continue;
       }
 

@@ -42,6 +42,28 @@ const AWIN_CERTIFICATION_SAMPLES = Object.freeze({
     path: (resolved) => `/publishers/${resolved.publisherId}/programmes`,
     params: () => ({ relationship: "joined" }),
   },
+
+  // Evidenced: fetchCoupons POSTs to exactly this path with a { filters, pagination } body and
+  // reads the same three collection keys. The path is `/publisher/` singular — Awin's promotions
+  // endpoint differs from the plural `/publishers/` used everywhere else, and it is copied, not
+  // corrected.
+  //
+  // A POST that READS. It creates nothing: the body carries empty filters and asks for one row, so
+  // repeating it changes no supplier state. The verb belongs to the endpoint, not to the intent.
+  //
+  // pagination IS part of this endpoint's evidenced contract — unlike programmes, where no page
+  // parameter exists and sending one would be inventing. So the SHAPE is production's and only the
+  // VALUE differs: pageSize 1 instead of 200, which asks the supplier for less, never more. One
+  // request, one page, no loop; `page` is fixed at 1 and nothing increments it.
+  coupons: {
+    // POST_READONLY, the marker the certification service already uses for a POST that reads: its
+    // READ_ONLY_METHODS guard admits GET and POST_READONLY and fails everything else closed. A
+    // plain "POST" is refused there, and rightly — the guard is not weakened to admit this probe.
+    method: "POST_READONLY",
+    collectionKeys: ["data", "promotions", "offers"],
+    path: (resolved) => `/publisher/${resolved.publisherId}/promotions`,
+    body: () => ({ filters: {}, pagination: { page: 1, pageSize: 1 } }),
+  },
 });
 
 export function listAwinCertificationSamples() {
@@ -305,10 +327,15 @@ export function createAwinAdapter({
       }
 
       await awinRateLimiter.acquireSlot();
-      const response = await httpClient.get(spec.path({ publisherId: pubId }), {
-        params: spec.params(),
-        timeout: Number(ctx.timeoutMs || AWIN_CERTIFICATION_TIMEOUT_MS),
-      });
+      const url = spec.path({ publisherId: pubId });
+      const timeout = Number(ctx.timeoutMs || AWIN_CERTIFICATION_TIMEOUT_MS);
+
+      // The verb is the spec's, never a caller's, and each branch sends only what its own spec
+      // builds: a GET sends query parameters and no body, a POST sends a body and no parameters.
+      const response =
+        spec.method === "POST_READONLY"
+          ? await httpClient.post(url, spec.body(), { timeout })
+          : await httpClient.get(url, { params: spec.params(), timeout });
 
       // The same collection reader production uses, so the probe cannot certify a different shape
       // than sync ingests. One row is kept; the rest of the page is discarded unread.

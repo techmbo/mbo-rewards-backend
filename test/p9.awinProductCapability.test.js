@@ -108,12 +108,21 @@ describe("awin — no false product capability remains", () => {
     // count would have flagged that and would miss a product path added alongside it.
     assert.deepEqual([...new Set(paths)].sort(), [
       "/publisher/${pubId}/promotions",
+      "/publisher/${resolved.publisherId}/promotions",
       "/publishers/${pubId}/accounts",
       "/publishers/${pubId}/commissiongroups",
       "/publishers/${pubId}/programmes",
       "/publishers/${pubId}/transactions/",
       "/publishers/${resolved.publisherId}/programmes",
     ]);
+    // Each certification path is a resolved-value copy of one production already builds, so the
+    // set can only grow by mirroring an existing path — never by introducing a new endpoint.
+    for (const certPath of paths.filter((p) => p.includes("resolved.publisherId"))) {
+      assert.ok(
+        paths.includes(certPath.replace("${resolved.publisherId}", "${pubId}")),
+        `${certPath} has no production counterpart`,
+      );
+    }
   });
 
   it("8 — the catalog records product feeds as having no endpoint at all", () => {

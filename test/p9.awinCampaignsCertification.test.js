@@ -95,8 +95,10 @@ const certify = async (opts) => {
 describe("awin is registered in the certification framework", () => {
   it("1 — awin appears as a probeable network with campaigns", () => {
     assert.ok(listProbeNetworks().includes("awin"));
-    assert.deepEqual(listProbeSourceObjects("awin"), ["campaigns"]);
-    assert.deepEqual(listAwinCertificationSamples(), ["campaigns"]);
+    // coupons was added in the phase after this one; campaigns must still be registered, and the
+    // probe registry and the adapter's sample specs must still agree exactly.
+    assert.ok(listProbeSourceObjects("awin").includes("campaigns"));
+    assert.deepEqual(listProbeSourceObjects("awin"), listAwinCertificationSamples());
   });
 
   it("1b — the caller-facing catalog is derived from the registry, not a second list", () => {
@@ -105,7 +107,7 @@ describe("awin is registered in the certification framework", () => {
     assert.ok(!/\["optimise", "partnerize"\]/.test(controller), "a hard-coded network list remains");
   });
 
-  it("1c — only campaigns is registered: no transactions, commission groups or tracking links", () => {
+  it("1c — nothing beyond campaigns and coupons is registered", () => {
     for (const absent of ["transactions", "commission_groups", "offers", "payments", "invoices", "product_feeds"]) {
       assert.ok(!listProbeSourceObjects("awin").includes(absent), absent);
     }
@@ -146,12 +148,22 @@ describe("awin campaigns — the endpoint is pinned to production's", () => {
     const paths = [...code.matchAll(/[`"'](\/[A-Za-z0-9_/{}$().:-]+)[`"']/g)].map((m) => m[1]);
     assert.deepEqual([...new Set(paths)].sort(), [
       "/publisher/${pubId}/promotions",
+      "/publisher/${resolved.publisherId}/promotions",
       "/publishers/${pubId}/accounts",
       "/publishers/${pubId}/commissiongroups",
       "/publishers/${pubId}/programmes",
       "/publishers/${pubId}/transactions/",
       "/publishers/${resolved.publisherId}/programmes",
     ]);
+    // Every certification path is a RESOLVED-value copy of one production already builds.
+    const certPaths = paths.filter((p) => p.includes("resolved.publisherId"));
+    for (const certPath of certPaths) {
+      assert.ok(
+        paths.includes(certPath.replace("${resolved.publisherId}", "${pubId}")),
+        `${certPath} has no production counterpart`,
+      );
+    }
+    assert.equal(certPaths.length, 2, "a certification path was added or removed");
   });
 });
 
@@ -216,11 +228,14 @@ describe("awin campaigns — one request, one row, no pagination", () => {
   });
 
   it("3c — the chain declares no loop and no second sampler call", () => {
-    const start = SERVICE_SRC.indexOf("async certifyAwinCampaigns");
+    // certifyAwinCampaigns is now a thin wrapper; the control flow lives in the shared sampler,
+    // which is where the loop-and-second-call claim has to be made.
+    const start = SERVICE_SRC.indexOf("async certifyAwinSample(");
     const body = SERVICE_SRC.slice(start, SERVICE_SRC.indexOf("\n  }\n", start));
     assert.ok(start > -1);
     assert.equal(body.split("fetchCertification").length - 1, 1, "more than one sampler call");
     assert.ok(!/for \(|while \(|hasMore|offset|page\+\+/.test(body), "the chain loops");
+    assert.match(SERVICE_SRC, /async certifyAwinCampaigns\(args\) \{\s*return this\.certifyAwinSample\(\{ \.\.\.args, sourceObject: "campaigns" \}\);/);
   });
 
   it("3d — the sampler does not retry, so one rejection stays one", () => {
@@ -359,7 +374,7 @@ describe("awin campaigns — honest outcomes", () => {
     const { result } = await certify({ response: envelope([PROGRAMME_ROW]) });
     assert.equal(result.readOnly, true);
     assert.equal(result.network, "awin");
-    const start = SERVICE_SRC.indexOf("async certifyAwinCampaigns");
+    const start = SERVICE_SRC.indexOf("async certifyAwinSample(");
     const body = SERVICE_SRC.slice(start, SERVICE_SRC.indexOf("\n  }\n", start));
     assert.ok(!/this\.db\.|prisma\.|\.create\(|\.update\(|\.upsert\(/.test(body), "the chain writes");
   });
