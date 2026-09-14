@@ -80,15 +80,32 @@ export function extractAdmitadMeta(payload, fallback = {}) {
 /**
  * The action-window date serializer.
  *
- * Admitad's statistics endpoint is sent second-precision UTC with no milliseconds — this is the
- * exact format the production sync job has always used (its private isoSecond), lifted here so
- * certification and sync cannot serialize a window differently. Moving it changes no output: a
- * test asserts byte-identical results for a date, a date string and a datetime string.
+ * Admitad's Publisher Reports API documents status_updated_start / status_updated_end as
+ * %d.%m.%Y %H:%M:%S — "01.05.2012 21:12:01". NOT ISO 8601.
+ *
+ * This was previously an ISO serializer, and /statistics/actions/ answered 400 to every request
+ * production ever made with it. The failure was invisible because fetchAll swallows a failing
+ * source object, so the action ingestion had been silently rejected rather than returning nothing
+ * legitimately. Certification is what surfaced it: the same request, made in isolation, reported
+ * its own 400.
+ *
+ * Components are read in UTC — getUTCDate and friends, never the local-time getters — so the
+ * window MBO computes is the window Admitad is asked for, whatever timezone the runtime happens
+ * to be in. Each component is zero-padded to the width the format specifies.
+ *
+ * One definition, used by production's fetchConversions and by the certification probe alike:
+ * a format this specific must not be able to drift between the request we certify and the request
+ * we ingest with.
  */
 export function admitadActionDateParam(value) {
   const date = value instanceof Date ? new Date(value) : new Date(String(value));
   if (Number.isNaN(date.getTime())) return null;
-  return date.toISOString().replace(/\.\d{3}Z$/, "Z");
+  const pad = (n) => String(n).padStart(2, "0");
+  const day = pad(date.getUTCDate());
+  const month = pad(date.getUTCMonth() + 1);
+  const year = String(date.getUTCFullYear()).padStart(4, "0");
+  const time = `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}`;
+  return `${day}.${month}.${year} ${time}`;
 }
 
 export function buildAdmitadActionParams(params = {}) {

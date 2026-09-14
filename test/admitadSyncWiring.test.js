@@ -22,8 +22,9 @@ describe("Admitad sync persistence wiring", () => {
       now: new Date("2026-09-04T06:00:00Z"),
       overlapDays: 2,
     });
-    assert.equal(params.status_updated_start, "2026-09-01T06:00:00Z");
-    assert.equal(params.status_updated_end, "2026-09-04T06:00:00Z");
+    // Admitad's documented %d.%m.%Y %H:%M:%S, in UTC. Not ISO 8601.
+    assert.equal(params.status_updated_start, "01.09.2026 06:00:00");
+    assert.equal(params.status_updated_end, "04.09.2026 06:00:00");
     assert.equal(params.order_by, "datetime");
   });
 
@@ -36,8 +37,8 @@ describe("Admitad sync persistence wiring", () => {
         status_updated_end: "2026-08-12T00:00:00Z",
       },
     });
-    assert.equal(params.status_updated_start, "2026-08-10T00:00:00Z");
-    assert.equal(params.status_updated_end, "2026-08-12T00:00:00Z");
+    assert.equal(params.status_updated_start, "10.08.2026 00:00:00");
+    assert.equal(params.status_updated_end, "12.08.2026 00:00:00");
   });
 
   it("recognizes all expanded raw network identities without conflating aliases", () => {

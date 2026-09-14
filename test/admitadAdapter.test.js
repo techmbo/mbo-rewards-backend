@@ -20,15 +20,17 @@ describe("Admitad publisher adapter foundation", () => {
 
   it("only forwards verified action filters", () => {
     const params = buildAdmitadActionParams({
-      status_updated_start: "2026-09-01T00:00:00Z",
-      status_updated_end: "2026-09-02T00:00:00Z",
+      // Admitad's documented %d.%m.%Y %H:%M:%S, which is what admitadActionDateParam emits.
+      // buildAdmitadActionParams is an allowlist, not a serializer: it passes these through.
+      status_updated_start: "01.09.2026 00:00:00",
+      status_updated_end: "02.09.2026 00:00:00",
       campaign: 123,
       subid1: "mbo-click-1",
       paid: true,
       invented_field: "must-not-pass",
     });
-    assert.equal(params.status_updated_start, "2026-09-01T00:00:00Z");
-    assert.equal(params.status_updated_end, "2026-09-02T00:00:00Z");
+    assert.equal(params.status_updated_start, "01.09.2026 00:00:00");
+    assert.equal(params.status_updated_end, "02.09.2026 00:00:00");
     assert.equal(params.campaign, 123);
     assert.equal(params.subid1, "mbo-click-1");
     assert.equal(params.paid, true);

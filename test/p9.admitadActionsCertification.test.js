@@ -79,6 +79,25 @@ const EMPTY_PAYLOAD = { results: [], _meta: { count: 0, limit: 1, offset: 0 } };
 
 const WINDOW = { from: "2026-09-07", to: "2026-09-14", preset: "7d" };
 
+/**
+ * Reads back Admitad's DD.MM.YYYY HH:mm:ss so a test can measure the span actually requested.
+ * Date.parse cannot read this format — which is precisely why the ISO serializer was wrong.
+ */
+function parseAdmitadParam(value) {
+  const match = /^(\d{2})\.(\d{2})\.(\d{4}) (\d{2}):(\d{2}):(\d{2})$/.exec(String(value));
+  assert.ok(match, `not Admitad's documented format: ${value}`);
+  const [, d, mo, y, h, mi, sec] = match.map(Number);
+  return Date.UTC(y, mo - 1, d, h, mi, sec);
+}
+
+function windowDays(params) {
+  return (
+    (parseAdmitadParam(params.status_updated_end) -
+      parseAdmitadParam(params.status_updated_start)) /
+    86400000
+  );
+}
+
 function spyHttp(dataOrError = ACTION_PAYLOAD) {
   const calls = [];
   return {
@@ -185,8 +204,8 @@ describe("the actions request is production's own contract", () => {
     assert.deepEqual(spy.calls[0].config.params, {
       limit: 1,
       offset: 0,
-      status_updated_start: "2026-09-07T00:00:00Z",
-      status_updated_end: "2026-09-14T00:00:00Z",
+      status_updated_start: "07.09.2026 00:00:00",
+      status_updated_end: "14.09.2026 00:00:00",
       order_by: "datetime",
     });
   });
@@ -216,11 +235,88 @@ describe("the actions request is production's own contract", () => {
     assert.match(codeOf(SYNC_SRC), /status_updated_end: admitadActionDateParam\(end\)/);
   });
 
-  it("produces second-precision UTC with no milliseconds", () => {
-    assert.equal(admitadActionDateParam(new Date("2026-09-04T06:00:00.123Z")), "2026-09-04T06:00:00Z");
-    assert.equal(admitadActionDateParam("2026-09-04"), "2026-09-04T00:00:00Z");
-    assert.equal(admitadActionDateParam("2026-09-04T06:00:00Z"), "2026-09-04T06:00:00Z");
-    assert.equal(admitadActionDateParam("not-a-date"), null);
+  it("emits Admitad's documented %d.%m.%Y %H:%M:%S, not ISO 8601", () => {
+    assert.equal(admitadActionDateParam("2026-09-14T15:46:59.116Z"), "14.09.2026 15:46:59");
+    // The example from Admitad's own Publisher Reports documentation.
+    assert.equal(admitadActionDateParam("2012-05-01T21:12:01Z"), "01.05.2012 21:12:01");
+  });
+
+  it("accepts a Date object and an ISO datetime string alike", () => {
+    assert.equal(
+      admitadActionDateParam(new Date("2026-09-14T15:46:59.116Z")),
+      admitadActionDateParam("2026-09-14T15:46:59.116Z"),
+    );
+    assert.equal(admitadActionDateParam(new Date(Date.UTC(2026, 8, 14, 15, 46, 59))), "14.09.2026 15:46:59");
+  });
+
+  it("zero-pads every component to its documented width", () => {
+    assert.equal(admitadActionDateParam("2026-01-02T03:04:05Z"), "02.01.2026 03:04:05");
+    assert.equal(admitadActionDateParam("2026-12-31T23:59:59Z"), "31.12.2026 23:59:59");
+    // A date-only input is midnight UTC, and midnight is padded rather than collapsed.
+    assert.equal(admitadActionDateParam("2026-09-07"), "07.09.2026 00:00:00");
+  });
+
+  it("serializes in UTC even when the runtime's local timezone is not UTC", () => {
+    // The CI runner happens to be UTC, which makes the local-time getters indistinguishable from
+    // the UTC ones. Switching TZ is what actually separates them: under Kiritimati (UTC+14) this
+    // instant is already the NEXT DAY locally, so a local-time serializer reports 15.09 and an
+    // hour that is off by fourteen.
+    const previous = process.env.TZ;
+    try {
+      process.env.TZ = "Pacific/Kiritimati";
+      assert.equal(
+        admitadActionDateParam(new Date(Date.UTC(2026, 8, 14, 15, 46, 59))),
+        "14.09.2026 15:46:59",
+      );
+      process.env.TZ = "Asia/Kolkata";
+      assert.equal(admitadActionDateParam("2026-09-14T15:46:59Z"), "14.09.2026 15:46:59");
+      process.env.TZ = "America/Los_Angeles";
+      assert.equal(admitadActionDateParam("2026-01-01T02:30:00Z"), "01.01.2026 02:30:00");
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    }
+  });
+
+  it("reads its components in UTC, not in the runtime's local timezone", () => {
+    const instant = "2026-03-01T00:30:00Z";
+    assert.equal(admitadActionDateParam(instant), "01.03.2026 00:30:00");
+    // Same instant, written with an offset: the serialized UTC form must be identical.
+    assert.equal(admitadActionDateParam("2026-02-28T19:30:00-05:00"), "01.03.2026 00:30:00");
+    assert.equal(admitadActionDateParam("2026-03-01T04:30:00+04:00"), "01.03.2026 00:30:00");
+  });
+
+  it("carries no millisecond, T or Z anywhere in its output", () => {
+    for (const input of [
+      "2026-09-14T15:46:59.116Z",
+      new Date("2026-01-02T03:04:05.999Z"),
+      "2026-09-07",
+    ]) {
+      const out = admitadActionDateParam(input);
+      assert.match(out, /^\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}:\d{2}$/, String(input));
+      assert.ok(!out.includes("T"), String(input));
+      assert.ok(!out.includes("Z"), String(input));
+      // The strict whole-string match above already forbids a fractional-seconds group; these
+      // pin it explicitly. Dots here are the date separators, so a bare /\.\d+/ would be wrong.
+      assert.equal(out.length, 19, String(input));
+      assert.match(out, /:\d{2}$/, `seconds must be exactly two digits: ${input}`);
+      assert.ok(!out.includes("-"), String(input));
+    }
+  });
+
+  it("returns null for an invalid date rather than a malformed parameter", () => {
+    for (const bad of ["not-a-date", "", "31.31.2026", undefined, null, {}]) {
+      assert.equal(admitadActionDateParam(bad), null, String(bad));
+    }
+  });
+
+  it("serializes the request parameters production actually sends", async () => {
+    const spy = spyHttp();
+    await adapterWith(spy).fetchCertificationSample("actions", { window: WINDOW });
+    for (const key of ["status_updated_start", "status_updated_end"]) {
+      const value = spy.calls[0].config.params[key];
+      assert.match(value, /^\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}:\d{2}$/, key);
+    }
   });
 
   it("sends no campaign, programme, action or subid filter", async () => {
@@ -293,23 +389,19 @@ describe("the window is the service's, and it is required", () => {
     assert.equal(DEFAULT_WINDOW_PRESET, "7d");
     assert.equal(WINDOW_PRESETS["7d"], 7);
 
-    const { status_updated_start: start, status_updated_end: end } = spy.calls[0].config.params;
-    const days = (Date.parse(end) - Date.parse(start)) / 86400000;
-    assert.equal(days, 7);
+    assert.equal(windowDays(spy.calls[0].config.params), 7);
   });
 
   it("honours a wider preset when one is selected", async () => {
     const spy = spyHttp();
     await certifyActions(adapterWith(spy), { windowPreset: "30d" });
-    const { status_updated_start: start, status_updated_end: end } = spy.calls[0].config.params;
-    assert.equal((Date.parse(end) - Date.parse(start)) / 86400000, 30);
+    assert.equal(windowDays(spy.calls[0].config.params), 30);
   });
 
   it("falls back to the default rather than honouring an arbitrary preset", async () => {
     const spy = spyHttp();
     await certifyActions(adapterWith(spy), { windowPreset: "9999d" });
-    const { status_updated_start: start, status_updated_end: end } = spy.calls[0].config.params;
-    assert.equal((Date.parse(end) - Date.parse(start)) / 86400000, 7);
+    assert.equal(windowDays(spy.calls[0].config.params), 7);
   });
 
   it("accepts no caller-supplied dates", () => {
@@ -550,7 +642,7 @@ describe("no action value reaches the result", () => {
     const result = await certifyActions(adapterWith(spyHttp()));
     const serialised = JSON.stringify(result);
     assert.ok(!/status_updated_start/.test(serialised));
-    assert.ok(!/T00:00:00Z/.test(serialised));
+    assert.ok(!/\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}:\d{2}/.test(serialised));
   });
 
   it("never returns the raw payload", async () => {
