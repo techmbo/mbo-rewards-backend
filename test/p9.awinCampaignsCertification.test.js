@@ -98,11 +98,17 @@ describe("awin is registered in the certification framework", () => {
     // coupons was added in the phase after this one; campaigns must still be registered, and the
     // probe registry and the adapter's sample specs must still agree exactly.
     assert.ok(listProbeSourceObjects("awin").includes("campaigns"));
-    // Compared as SETS: the probe registry and the adapter's specs are two independent literals
-    // and their declaration order is not part of the contract.
+    // Every adapter sample spec must have a probe. The converse does not hold: commission_groups
+    // is probed through a DEDICATED sampler taking a discovered advertiser id as a named argument,
+    // rather than through fetchCertificationSample, whose ctx surface stays {timeoutMs, window}.
+    const probes = listProbeSourceObjects("awin");
+    for (const spec of listAwinCertificationSamples()) {
+      assert.ok(probes.includes(spec), `${spec} has a spec but no probe`);
+    }
     assert.deepEqual(
-      [...listProbeSourceObjects("awin")].sort(),
-      [...listAwinCertificationSamples()].sort(),
+      probes.filter((name) => !listAwinCertificationSamples().includes(name)),
+      ["commission_groups"],
+      "a probe exists with neither a spec nor a dedicated sampler",
     );
   });
 
@@ -112,8 +118,9 @@ describe("awin is registered in the certification framework", () => {
     assert.ok(!/\["optimise", "partnerize"\]/.test(controller), "a hard-coded network list remains");
   });
 
-  it("1c — nothing beyond campaigns and coupons is registered", () => {
-    for (const absent of ["transactions", "commission_groups", "offers", "payments", "invoices", "product_feeds"]) {
+  it("1c — nothing beyond the four certified objects is registered", () => {
+    // commission_groups joined them in a later phase; these names never became probes.
+    for (const absent of ["transactions", "offers", "payments", "invoices", "product_feeds"]) {
       assert.ok(!listProbeSourceObjects("awin").includes(absent), absent);
     }
   });
@@ -498,9 +505,11 @@ describe("nothing else changed", () => {
     assert.ok(!body.includes("fetchCampaigns"), "certification reuses the sync fetcher");
   });
 
-  it("9d — no tracking-link, commission-group or transaction certification was added", () => {
-    for (const absent of ["awinTransactions", "awinCommissionGroups", "awinTrackingLinks"]) {
+  it("9d — no tracking-link or separate transaction certification was added", () => {
+    // awinCommissionGroups arrived in a later phase, as its own bounded discovery chain.
+    for (const absent of ["awinTransactions", "awinTrackingLinks"]) {
       assert.ok(!SERVICE_SRC.includes(absent), absent);
     }
+    assert.ok(SERVICE_SRC.includes("awinCommissionGroups"));
   });
 });

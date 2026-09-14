@@ -470,9 +470,19 @@ describe("existing behaviour is unchanged", () => {
   });
 
   it("23 - the message is applied generically, at every failure site", () => {
-    // One definition plus one call per site, each passing the run's redaction values.
-    assert.equal((SERVICE_SRC.match(/certificationFailure\(/g) || []).length, 11);
-    assert.equal((SERVICE_SRC.match(/redactionValuesFor\(adapter\)/g) || []).length, 11);
+    // Relational, not a magic number: chains get added, and what must hold is that EVERY
+    // certificationFailure call site passes the run's redaction values — never that there are
+    // exactly N of them.
+    const calls = (SERVICE_SRC.match(/certificationFailure\(/g) || []).length;
+    const redactions = (SERVICE_SRC.match(/redactionValuesFor\(adapter\)/g) || []).length;
+    assert.ok(calls >= 11, `only ${calls} call sites`);
+    assert.equal(redactions, calls, "a failure site does not pass redaction values");
+
+    // And none of them omits the argument: every call has either 4 arguments or `both(...)`.
+    const bare = [...SERVICE_SRC.matchAll(/certificationFailure\([^)]*\)/g)]
+      .map((m) => m[0])
+      .filter((call) => !call.includes("redactionValuesFor") && !call.startsWith("certificationFailure(base, error, extra"));
+    assert.deepEqual(bare, [], `unredacted call site: ${bare[0]}`);
   });
 
   it("24 - no AWIN endpoint, query or body was touched", () => {

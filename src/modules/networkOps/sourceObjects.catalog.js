@@ -22,6 +22,12 @@ export const SOURCE_OBJECT_AVAILABILITY = Object.freeze({
    * object is not syncable and not missing — it arrives by another route.
    */
   MANUAL: "MANUAL_ONLY_NO_ENDPOINT_IN_INTEGRATION",
+  /**
+   * A fetcher EXISTS and nothing calls it. Distinct from DECLARED, where no fetch was ever built,
+   * and from LIVE, which would claim an ingest that does not run. The code is there; the wiring,
+   * the mapping and the certification are not.
+   */
+  IMPLEMENTED_NOT_INGESTED: "IMPLEMENTED_NOT_INGESTED",
 });
 
 function obj({
@@ -149,6 +155,24 @@ const CATALOG = Object.freeze({
     obj({ sourceObject: "programmes", label: "Programmes", endpoint: "GET programmes", live: true, entityType: "campaign" }),
     obj({ sourceObject: "offers", label: "Offers", endpoint: "GET offers / coupons", live: true, entityType: "coupon" }),
     obj({ sourceObject: "transactions", label: "Transactions", endpoint: "GET transactions", live: true, entityType: "conversion" }),
+    // NOT live, and deliberately not marked so until certification returns a row. fetchCommissionGroups
+    // is implemented and correct, but nothing calls it: syncAwinAccount has no commission step, no
+    // Awin commission-group mapper exists, and nothing reaches SupplierCommissionRule. A bounded
+    // certification probe is registered; its result is what would justify changing this entry.
+    obj({
+      sourceObject: "commission_groups",
+      label: "Commission Groups",
+      endpoint: "GET /publishers/{publisherId}/commissiongroups",
+      live: false,
+      availability: SOURCE_OBJECT_AVAILABILITY.IMPLEMENTED_NOT_INGESTED,
+      entityType: "commission_rule",
+      notes:
+        "Advertiser-scoped: requires an advertiserId, discovered from a bounded campaigns sample " +
+        "and never supplied by a caller. Implemented in the adapter but not wired into sync, not " +
+        "mapped, and not written to SupplierCommissionRule. Awin publisher commission is network " +
+        "economics; client commission stays derived by MBO commercial rules. Schema is " +
+        "UNKNOWN_NEEDS_LIVE_DATA until a row is certified.",
+    }),
     // live:false was already correct, but silent about WHY. There is no feed endpoint, no fetcher
     // and not even a src/network-mappings/awin directory — so this is weaker than Partnerize
     // products, which at least has a mapping file. Nothing to certify without inventing a path.

@@ -104,9 +104,17 @@ describe("awin conversions is registered", () => {
   it("1 — conversions is a probeable awin source object", () => {
     assert.ok(listProbeSourceObjects("awin").includes("conversions"));
     assert.ok(listAwinCertificationSamples().includes("conversions"));
+    // Every adapter sample spec must have a probe. The converse does not hold: commission_groups
+    // is probed through a DEDICATED sampler taking a discovered advertiser id as a named argument,
+    // rather than through fetchCertificationSample, whose ctx surface stays {timeoutMs, window}.
+    const probes = listProbeSourceObjects("awin");
+    for (const spec of listAwinCertificationSamples()) {
+      assert.ok(probes.includes(spec), `${spec} has a spec but no probe`);
+    }
     assert.deepEqual(
-      [...listProbeSourceObjects("awin")].sort(),
-      [...listAwinCertificationSamples()].sort(),
+      probes.filter((name) => !listAwinCertificationSamples().includes(name)),
+      ["commission_groups"],
+      "a probe exists with neither a spec nor a dedicated sampler",
     );
   });
 
@@ -117,11 +125,10 @@ describe("awin conversions is registered", () => {
     assert.match(ADAPTER_SRC, /body: \(\) => \(\{ filters: \{\}, pagination: \{ page: 1, pageSize: 200 \} \}\)/);
   });
 
-  it("1c — no commission-group or tracking-link certification came with it", () => {
-    assert.ok(!listProbeSourceObjects("awin").includes("commission_groups"));
-    for (const absent of ["awinCommissionGroups", "awinTrackingLinks"]) {
-      assert.ok(!SERVICE_SRC.includes(absent), absent);
-    }
+  it("1c — no tracking-link certification came with it", () => {
+    assert.ok(!SERVICE_SRC.includes("awinTrackingLinks"));
+    // commission_groups was added in a later phase, with its own bounded discovery chain.
+    assert.ok(listProbeSourceObjects("awin").includes("commission_groups"));
   });
 });
 

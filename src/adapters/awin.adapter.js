@@ -443,6 +443,41 @@ export function createAwinAdapter({
       );
     },
 
+    /**
+     * One bounded commission-group certification request.
+     *
+     * advertiserId is a NAMED parameter, not a ctx field: fetchCertificationSample reads only
+     * timeoutMs and window out of its ctx, and that narrow surface is pinned by tests. Widening it
+     * so a campaign-scoped id could ride along would be the wrong trade. The value is supplied by
+     * the service from a campaigns sample IT read — never by a caller.
+     *
+     * Same pacing discipline as every other probe: the shared limiter is acquired, and the request
+     * goes to httpClient directly so requestWithRetry's three retries are not inherited.
+     */
+    async fetchCertificationCommissionGroupSample({ advertiserId, timeoutMs } = {}) {
+      const id = String(advertiserId ?? "").trim();
+      if (!id || !/^[A-Za-z0-9_-]+$/.test(id)) {
+        throw new Error("Awin commission group certification requires a safe advertiserId");
+      }
+
+      await awinRateLimiter.acquireSlot();
+      const response = await httpClient.get(`/publishers/${pubId}/commissiongroups`, {
+        params: {
+          advertiserId: id,
+          // effectiveDate is omitted: the current structure is what a first certification asks for,
+          // and a date would narrow it to one moment for no schema gain.
+          extraConditionsDetails: true,
+        },
+        timeout: Number(timeoutMs || AWIN_CERTIFICATION_TIMEOUT_MS),
+      });
+
+      // Production's own collection keys, so the probe cannot certify a shape sync would not read.
+      return extractCollection(response?.data, ["commissionGroups", "data"]).slice(
+        0,
+        AWIN_CERTIFICATION_MAX_ROWS,
+      );
+    },
+
     async fetchAll(options = {}) {
       const stats = { requestCount: 0 };
       const [campaigns, coupons] = await Promise.all([

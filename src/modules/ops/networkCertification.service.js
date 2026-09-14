@@ -322,6 +322,14 @@ const AWIN_PROBES = Object.freeze({
     endpointKey: "GET /publishers/{publisherId}/transactions/",
     chain: "awinConversions",
   },
+  // Campaign-scoped, so it needs an advertiser id. That id is taken from a bounded campaigns
+  // sample this service reads itself — never from a caller — which is the one permitted second
+  // request in a source chain.
+  commission_groups: {
+    method: "GET",
+    endpointKey: "GET /publishers/{publisherId}/commissiongroups",
+    chain: "awinCommissionGroups",
+  },
   coupons: {
     // POST_READONLY, not POST: READ_ONLY_METHODS admits only GET and POST_READONLY, and that guard
     // stays exactly as it is. The endpointKey still shows the real HTTP verb an operator would
@@ -626,6 +634,21 @@ export function commissionGroupCampaignIdOf(row = {}) {
   return firstUsableId(row, ["campaignId", "campaign_id"]);
 }
 
+/**
+ * The advertiser id on an Awin PROGRAMME row, read only from evidenced fields.
+ *
+ * `advertiserId` first, which mapAwinTransaction already reads on the transaction shape. Then
+ * `id`, which the canonical spec's programme field table defines as "network campaign/advertiser
+ * programme ID" — the same identifier under the name the programmes endpoint returns it by.
+ *
+ * Nothing else is tried. Guessing a third field name would risk sending the supplier some other
+ * entity's id, and firstUsableId additionally refuses any value carrying path or query syntax so
+ * a value cannot escape the parameter it lands in.
+ */
+export function awinAdvertiserIdOf(row = {}) {
+  return firstUsableId(row, ["advertiserId", "advertiser_id", "id"]);
+}
+
 function asRows(result) {
   if (Array.isArray(result)) return result;
   if (Array.isArray(result?.rows)) return result.rows;
@@ -889,6 +912,103 @@ export class NetworkCertificationService {
         };
       }
       return certificationFailure(base, error, { windowPreset: window?.preset ?? null }, redactionValuesFor(adapter));
+    }
+  }
+
+  /**
+   * The Awin commission-group chain: at most TWO requests, and often one.
+   *
+   * The endpoint is advertiser-scoped, so it needs an id. That id is DISCOVERED — one bounded
+   * campaigns sample, one row, and the advertiser id read out of it by awinAdvertiserIdOf. It is
+   * never accepted from a caller: a caller-supplied id would let the probe be pointed at another
+   * merchant's commission structure, which is exactly the kind of data this chain exists to
+   * certify the shape of without reading.
+   *
+   * Awin campaigns currently return zero rows, so the no-id path is the likely one. That is a
+   * configuration outcome, not a supplier failure: it reports SKIPPED_NO_ADVERTISER_ID and makes
+   * NO second request.
+   *
+   * Only structure leaves this method. No advertiser or programme id, group or rule name,
+   * commission rate, amount or currency can reach the response — summarisePayloads reports paths,
+   * types and categories and never a value, and the discovered id is used and discarded.
+   */
+  async certifyAwinCommissionGroups({ adapter, key, probe, budgetLeft }) {
+    const base = {
+      network: key,
+      sourceObject: "commission_groups",
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+      campaignsInspectedCount: 0,
+      advertiserIdResolved: false,
+    };
+
+    const deadline = Date.now() + Math.max(0, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+    const timeLeft = () => Math.max(MIN_ATTEMPT_MS, deadline - Date.now());
+
+    // Request 1 of at most 2 — one campaign row, for its advertiser id alone.
+    let campaignRows = [];
+    try {
+      campaignRows = asRows(
+        await adapter.fetchCertificationSample("campaigns", { timeoutMs: timeLeft() }),
+      ).slice(0, 1);
+    } catch (error) {
+      return certificationFailure(base, error, {}, redactionValuesFor(adapter));
+    }
+
+    const advertiserId = campaignRows.length ? awinAdvertiserIdOf(campaignRows[0]) : null;
+    const discovery = { ...base, campaignsInspectedCount: campaignRows.length };
+
+    if (!advertiserId) {
+      return {
+        ...discovery,
+        ok: false,
+        statusCategory: "SKIPPED_NO_ADVERTISER_ID",
+        schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        note:
+          "No advertiser id was available from a bounded campaigns sample, so no commission-group " +
+          "request was made. Awin campaigns currently return no rows for this account.",
+      };
+    }
+
+    // Request 2 of 2.
+    try {
+      const rows = asRows(
+        await adapter.fetchCertificationCommissionGroupSample({
+          advertiserId,
+          timeoutMs: timeLeft(),
+        }),
+      ).slice(0, 1);
+
+      if (!rows.length) {
+        return {
+          ...discovery,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+          advertiserIdResolved: true,
+        };
+      }
+
+      const fieldPaths = summarisePayloads(rows);
+      return {
+        ...discovery,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+        advertiserIdResolved: true,
+      };
+    } catch (error) {
+      return certificationFailure(
+        base,
+        error,
+        { campaignsInspectedCount: campaignRows.length, advertiserIdResolved: true },
+        redactionValuesFor(adapter),
+      );
     }
   }
 
@@ -1485,6 +1605,11 @@ export class NetworkCertificationService {
             budgetLeft,
           }),
         );
+        continue;
+      }
+
+      if (probe.chain === "awinCommissionGroups") {
+        results.push(await this.certifyAwinCommissionGroups({ adapter, key, probe, budgetLeft }));
         continue;
       }
 

@@ -99,9 +99,17 @@ describe("awin coupons is registered", () => {
   it("1 — coupons is a probeable awin source object", () => {
     assert.ok(listProbeSourceObjects("awin").includes("coupons"));
     assert.ok(listAwinCertificationSamples().includes("coupons"));
+    // Every adapter sample spec must have a probe. The converse does not hold: commission_groups
+    // is probed through a DEDICATED sampler taking a discovered advertiser id as a named argument,
+    // rather than through fetchCertificationSample, whose ctx surface stays {timeoutMs, window}.
+    const probes = listProbeSourceObjects("awin");
+    for (const spec of listAwinCertificationSamples()) {
+      assert.ok(probes.includes(spec), `${spec} has a spec but no probe`);
+    }
     assert.deepEqual(
-      [...listProbeSourceObjects("awin")].sort(),
-      [...listAwinCertificationSamples()].sort(),
+      probes.filter((name) => !listAwinCertificationSamples().includes(name)),
+      ["commission_groups"],
+      "a probe exists with neither a spec nor a dedicated sampler",
     );
   });
 
@@ -110,11 +118,13 @@ describe("awin coupons is registered", () => {
     assert.ok(SERVICE_SRC.includes('endpointKey: "GET /publishers/{publisherId}/programmes"'));
   });
 
-  it("1c — no transactions, commission-group or tracking-link certification came with it", () => {
-    for (const absent of ["transactions", "commission_groups", "invoices", "payments", "product_feeds"]) {
+  it("1c — no tracking-link certification came with it, and no invented source object", () => {
+    // None of these ever became a probe. commission_groups did, in a later phase.
+    for (const absent of ["transactions", "invoices", "payments", "product_feeds", "offers"]) {
       assert.ok(!listProbeSourceObjects("awin").includes(absent), absent);
     }
-    for (const absent of ["awinTransactions", "awinCommissionGroups", "awinTrackingLinks"]) {
+    // awinCommissionGroups arrived in a later phase as its own bounded discovery chain.
+    for (const absent of ["awinTransactions", "awinTrackingLinks"]) {
       assert.ok(!SERVICE_SRC.includes(absent), absent);
     }
   });
