@@ -1,10 +1,7 @@
 import { createSupplierAdapter } from "../adapters/registry.js";
 import { upsertManyRawEntities } from "../modules/raw/raw.service.js";
-import {
-  getMarketplaceApiKey,
-  getOAuthAccessToken,
-  getNetworkAccountSyncFlags,
-} from "../modules/integrations/oauth.service.js";
+import { getNetworkAccountSyncFlags } from "../modules/integrations/oauth.service.js";
+import { resolveAdmitadAccessToken } from "../modules/integrations/admitadTokenProvider.js";
 import { CREDENTIAL_HEALTH } from "../modules/networkOps/networkAccount.contract.js";
 import {
   getAccountSyncTimestamps,
@@ -70,12 +67,14 @@ export function buildAdmitadIncrementalActionParams({
   };
 }
 
+/**
+ * Shared with certification by construction: both call resolveAdmitadAccessToken, so the sync job
+ * and the probe cannot authenticate differently. The order it applies is unchanged for the two
+ * sources that existed before (ADMITAD_ACCESS_TOKEN, then a stored MarketplaceAccount credential);
+ * a client-credentials exchange is now the fallback behind them.
+ */
 async function resolveAdmitadCredentials(accountLabel = "default") {
-  const accessToken =
-    process.env.ADMITAD_ACCESS_TOKEN ||
-    (await getOAuthAccessToken("admitad", accountLabel)) ||
-    (await getMarketplaceApiKey("admitad", accountLabel)) ||
-    null;
+  const accessToken = await resolveAdmitadAccessToken(accountLabel);
   return accessToken ? { accessToken } : null;
 }
 

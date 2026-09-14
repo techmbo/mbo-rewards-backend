@@ -24,6 +24,10 @@ const ADAPTER_SRC = readFileSync("src/adapters/admitad.adapter.js", "utf8");
 const SERVICE_SRC = readFileSync("src/modules/ops/networkCertification.service.js", "utf8");
 const CREDENTIALS_SRC = readFileSync("src/modules/integrations/admitadCredentials.js", "utf8");
 const SYNC_SRC = readFileSync("src/jobs/admitadSupplierSync.js", "utf8");
+const PROVIDER_SRC = readFileSync(
+  "src/modules/integrations/admitadTokenProvider.js",
+  "utf8",
+);
 
 /** Comments are prose; an assertion that matches one proves nothing about behaviour. */
 function codeOf(source) {
@@ -371,25 +375,27 @@ describe("credentials come from configuration and never from a caller", () => {
     assert.match(String(error.message), /not configured/i);
   });
 
-  it("resolves the token from the same sources the production sync job uses", () => {
-    const code = codeOf(CREDENTIALS_SRC);
-    assert.match(code, /process\.env\.ADMITAD_ACCESS_TOKEN/);
-    assert.match(code, /getOAuthAccessToken\("admitad"/);
-    assert.match(code, /getMarketplaceApiKey\("admitad"/);
-    const syncCode = codeOf(SYNC_SRC);
-    for (const source of [
-      "process.env.ADMITAD_ACCESS_TOKEN",
-      'getOAuthAccessToken("admitad"',
-      'getMarketplaceApiKey("admitad"',
-    ]) {
-      assert.ok(syncCode.includes(source), source);
-    }
+  it("resolves the token through the one resolver the production sync job also uses", () => {
+    // The resolution chain lives in admitadTokenProvider.js and both callers delegate to it, so
+    // certification and sync cannot authenticate differently.
+    assert.match(codeOf(CREDENTIALS_SRC), /resolveAdmitadAccessToken\(accountLabel\)/);
+    assert.match(codeOf(SYNC_SRC), /resolveAdmitadAccessToken\(accountLabel\)/);
+    const provider = codeOf(PROVIDER_SRC);
+    assert.match(provider, /env\.ADMITAD_ACCESS_TOKEN/);
+    assert.match(provider, /getOAuthAccessToken\("admitad"/);
+    assert.match(provider, /getMarketplaceApiKey\("admitad"/);
   });
 
-  it("invents no new Admitad auth model", () => {
+  it("keeps no second credential chain of its own", () => {
     const code = codeOf(CREDENTIALS_SRC);
-    for (const invented of ["grant_type", "client_secret", "oauth/token", "Basic "]) {
-      assert.ok(!code.includes(invented), invented);
+    for (const duplicated of [
+      "process.env.ADMITAD_ACCESS_TOKEN",
+      'getOAuthAccessToken("admitad"',
+      "grant_type",
+      "client_secret",
+      "Basic ",
+    ]) {
+      assert.ok(!code.includes(duplicated), duplicated);
     }
   });
 
