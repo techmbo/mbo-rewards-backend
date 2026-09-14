@@ -23,7 +23,8 @@ export const ADMITAD_CERTIFICATION_PAGE_PARAMS = Object.freeze({ limit: 1, offse
  * A frozen registry rather than a path argument: there is no call shape here through which a
  * caller could reach an endpoint this table does not name. Each path is production's own —
  * /websites/v2/ is what authenticate() calls, /advcampaigns/ is what fetchCampaigns calls when no
- * websiteId is supplied, which is how the sync job calls it.
+ * websiteId is supplied (which is how the sync job calls it), and /coupons/ is fetchCoupons'
+ * only path, taking no campaign, programme or website scope in production either.
  *
  * The programmes path is deliberately the UNSCOPED one. /advcampaigns/website/{w_id}/ would need a
  * website id, and discovering one to then scope a probe by it is a second request and a second
@@ -32,6 +33,7 @@ export const ADMITAD_CERTIFICATION_PAGE_PARAMS = Object.freeze({ limit: 1, offse
 export const ADMITAD_CERTIFICATION_SPECS = Object.freeze({
   websites: Object.freeze({ method: "GET", path: "/websites/v2/" }),
   programs: Object.freeze({ method: "GET", path: "/advcampaigns/" }),
+  coupons: Object.freeze({ method: "GET", path: "/coupons/" }),
 });
 
 function asObject(value) {

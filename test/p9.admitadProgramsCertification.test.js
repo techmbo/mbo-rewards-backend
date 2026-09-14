@@ -124,9 +124,13 @@ describe("programs is registered as an Admitad source object", () => {
     assert.equal(getSourceObject("admitad", "programs")?.endpoint, "GET /advcampaigns/");
   });
 
-  it("shares the bounded sample chain with websites rather than duplicating it", () => {
+  it("shares one bounded sample chain rather than duplicating it per object", () => {
     const code = codeOf(SERVICE_SRC);
-    assert.equal((code.match(/chain: "admitadSample"/g) ?? []).length, 2);
+    // Every Admitad probe routes through the same chain, and the chain exists exactly once.
+    assert.equal(
+      (code.match(/chain: "admitadSample"/g) ?? []).length,
+      listProbeSourceObjects("admitad").length,
+    );
     assert.equal((code.match(/async certifyAdmitadSample\(/g) ?? []).length, 1);
   });
 });
@@ -220,10 +224,10 @@ describe("the request table is the only thing that chooses a path", () => {
   it("refuses a source object it does not name, saying so", async () => {
     const spy = spyHttp();
     await assert.rejects(
-      () => adapterWith(spy).fetchCertificationSample("coupons", {}),
+      () => adapterWith(spy).fetchCertificationSample("actions", {}),
       // A named refusal, not a TypeError from dereferencing a missing spec: an operator reading
       // this must learn which object has no probe, not that something was null.
-      (error) => /No Admitad certification sample is defined for "coupons"/.test(error.message),
+      (error) => /No Admitad certification sample is defined for "actions"/.test(error.message),
     );
     assert.equal(spy.calls.length, 0);
   });
@@ -259,7 +263,7 @@ describe("the request table is the only thing that chooses a path", () => {
   });
 
   it("declares no spec for an object that has no probe", () => {
-    for (const notYet of ["coupons", "actions", "product_feeds"]) {
+    for (const notYet of ["actions", "product_feeds", "statistics"]) {
       assert.ok(!Object.hasOwn(ADMITAD_CERTIFICATION_SPECS, notYet), notYet);
     }
   });

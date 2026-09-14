@@ -373,9 +373,16 @@ const CJ_PROBES = Object.freeze({
  * /advcampaigns/, which is exactly what the sync job runs: the job passes no websiteId, so
  * production never takes the /advcampaigns/website/{w_id}/ branch either.
  *
- * coupons and actions have live fetchers and are catalogued live, but they stay out of this
- * registry until they are certified in their own right. A probe registry entry is an executable
- * claim, not a restatement of the catalog.
+ * coupons joins on the same terms: fetchCoupons takes no campaign, programme or website scope, so
+ * the certified request is production's whole request and not a narrowed version of it.
+ *
+ * Commission evidence observed on programme rows — actions[], actions[].payment_size, currency —
+ * is certified as STRUCTURE only. Nothing here maps a rate, and nothing here treats a coupon's
+ * programme association as commission truth.
+ *
+ * actions has a live fetcher and is catalogued live, but it stays out of this registry until it is
+ * certified in its own right. A probe registry entry is an executable claim, not a restatement of
+ * the catalog.
  */
 const ADMITAD_PROBES = Object.freeze({
   websites: {
@@ -386,6 +393,11 @@ const ADMITAD_PROBES = Object.freeze({
   programs: {
     method: "GET",
     endpointKey: "GET /advcampaigns/ (limit=1, offset=0)",
+    chain: "admitadSample",
+  },
+  coupons: {
+    method: "GET",
+    endpointKey: "GET /coupons/ (limit=1, offset=0)",
     chain: "admitadSample",
   },
 });
@@ -1083,27 +1095,28 @@ export class NetworkCertificationService {
   }
 
   /**
-   * One bounded Admitad sample, shared by websites and programs.
+   * One bounded Admitad sample, shared by websites, programs and coupons.
    *
-   * Both are single-request list endpoints bounded to limit=1, offset=0, both must distinguish
-   * "this account has none" from "certified", and writing the control flow once means the two
-   * cannot drift apart. The path each uses lives in the adapter's own frozen spec table, which is
-   * the only place that builds a request.
+   * All three are single-request list endpoints bounded to limit=1, offset=0, all three must
+   * distinguish "this account has none" from "certified", and writing the control flow once means
+   * they cannot drift apart. The path each uses lives in the adapter's own frozen spec table,
+   * which is the only place that builds a request.
    *
    * ZERO ROWS IS OK_NO_ROWS FOR BOTH, and that is not the judgement made for CJ advertisers. CJ's
    * query is explicitly scoped to advertiser-ids=joined, so emptiness there reports an
    * account-approval blocker. Neither Admitad query carries such a scope: /websites/v2/ lists the
-   * publisher's own registered sites, and the UNSCOPED /advcampaigns/ may return catalogue-wide
-   * programmes rather than only joined ones. Reading "no joined campaigns" out of an empty result
-   * from either would be inventing a finding the query cannot support — so no accountStateBlocker
-   * is reported, for either object.
+   * publisher's own registered sites, the UNSCOPED /advcampaigns/ may return catalogue-wide
+   * programmes rather than only joined ones, and /coupons/ takes no scope at all. Reading "no
+   * joined campaigns" out of an empty result from any of them would be inventing a finding the
+   * query cannot support — so no accountStateBlocker is reported, for any of them.
    *
    * The row schema is still unknown in that case, so schema stays UNKNOWN_NEEDS_LIVE_DATA: a
    * certified-looking OK with an empty field list would read as "this object has no fields".
    *
    * Only structural paths, types and counts leave this method. summarisePayloads never reports a
-   * value, so no website or programme id, name, site or tracking URL, status, category, currency,
-   * commission rate or rate range can reach the response.
+   * value, so no website, programme or coupon id, coupon CODE, name, description, site, tracking
+   * or goto URL, status, category, region, currency, commission rate or date can reach the
+   * response.
    */
   async certifyAdmitadSample({ adapter, key, probe, budgetLeft, sourceObject }) {
     const base = {

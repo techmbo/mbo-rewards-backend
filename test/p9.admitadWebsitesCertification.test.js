@@ -103,12 +103,16 @@ describe("Admitad is registered in the certification framework", () => {
     assert.ok(listProbeNetworks().includes("admitad"));
   });
 
-  it("exposes websites and programs", () => {
-    assert.deepEqual(listProbeSourceObjects("admitad").sort(), ["programs", "websites"]);
+  it("exposes websites, programs and coupons", () => {
+    assert.deepEqual(listProbeSourceObjects("admitad").sort(), [
+      "coupons",
+      "programs",
+      "websites",
+    ]);
   });
 
-  it("does not add coupon, action or product probes yet", () => {
-    for (const notYet of ["coupons", "actions", "campaigns", "product_feeds"]) {
+  it("does not add action or product probes yet", () => {
+    for (const notYet of ["actions", "campaigns", "product_feeds", "statistics"]) {
       assert.ok(!listProbeSourceObjects("admitad").includes(notYet), notYet);
     }
   });
