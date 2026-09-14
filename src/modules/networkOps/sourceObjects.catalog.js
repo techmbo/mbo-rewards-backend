@@ -8,6 +8,14 @@ import { resolveSequenceRank } from "./networkIntegrationSequence.js";
 export const SOURCE_OBJECT_AVAILABILITY = Object.freeze({
   LIVE: "LIVE",
   DECLARED: "DECLARED",
+  /**
+   * An adapter call EXISTS and the supplier refuses it for this account — proven live, not
+   * assumed. Distinct from DECLARED, which means no fetch was ever built, and from LIVE with zero
+   * rows, which means the endpoint answered and the account simply had nothing in the window.
+   */
+  UNAVAILABLE: "NOT_SUPPORTED_OR_UNAVAILABLE_FOR_CURRENT_ACCOUNT",
+  /** No endpoint of this kind exists in the integration at all. */
+  NO_ENDPOINT: "NO_ENDPOINT_IN_INTEGRATION",
 });
 
 function obj({
@@ -18,6 +26,9 @@ function obj({
   entityType = null,
   notes = null,
   sequenceRank = null,
+  // Set only where live evidence contradicts the default LIVE/DECLARED split. Never inferred.
+  availability = null,
+  liveEvidence = null,
 }) {
   const rank = sequenceRank ?? resolveSequenceRank(sourceObject, entityType);
   return Object.freeze({
@@ -25,9 +36,12 @@ function obj({
     label,
     endpoint,
     live: Boolean(live),
-    availability: live ? SOURCE_OBJECT_AVAILABILITY.LIVE : SOURCE_OBJECT_AVAILABILITY.DECLARED,
+    availability:
+      availability ??
+      (live ? SOURCE_OBJECT_AVAILABILITY.LIVE : SOURCE_OBJECT_AVAILABILITY.DECLARED),
     entityType,
     notes,
+    liveEvidence,
     sequenceRank: rank,
   });
 }
@@ -90,7 +104,22 @@ const CATALOG = Object.freeze({
       entityType: "conversion_item",
     }),
     obj({ sourceObject: "analytics", label: "Analytics", endpoint: "derived conversion performance", live: true, entityType: "performance" }),
-    obj({ sourceObject: "payment_information", label: "Payment Information", endpoint: "GET payments", live: true, entityType: "payment" }),
+    // live:false, but NOT "declared and never built": the adapter builds and calls this path. The
+    // supplier answers 404 for this account, proven by a bounded live certification probe. Marking
+    // it LIVE claimed an ingest that has silently returned nothing for as long as it has existed.
+    obj({
+      sourceObject: "payment_information",
+      label: "Payment Information",
+      endpoint: "GET /reporting/report_publisher/publisher/{publisherId}/payment.json",
+      live: false,
+      availability: SOURCE_OBJECT_AVAILABILITY.UNAVAILABLE,
+      liveEvidence: "HTTP 404 / NOT_FOUND on a bounded 7d certification probe",
+      entityType: "payment",
+      notes:
+        "Supplier returns 404 for this publisher account. No alternative payment or settlement " +
+        "endpoint is evidenced anywhere in the integration, and no Partnerize invoice endpoint " +
+        "exists. Schema is UNKNOWN_NO_ACCESSIBLE_SOURCE — not merely empty.",
+    }),
   ]),
   awin: Object.freeze([
     obj({ sourceObject: "programmes", label: "Programmes", endpoint: "GET programmes", live: true, entityType: "campaign" }),

@@ -332,6 +332,40 @@ const PARTNERIZE_CERTIFICATION_SAMPLES = Object.freeze({
   },
 });
 
+/**
+ * Raised when the supplier answers a payment report request with a status that means the endpoint
+ * is not there for this account — today, a 404.
+ *
+ * It exists so the outcome stops being indistinguishable from "this publisher had no payments".
+ * Returning [] on a 404 is what made Partnerize payment ingestion look like a healthy empty
+ * result for as long as the path has existed; the live probe returned NOT_FOUND, not zero rows.
+ *
+ * Carries a status code and a category only — never a URL, a publisher id, a credential or any
+ * part of the supplier's response body.
+ */
+export class PartnerizePaymentsUnavailableError extends Error {
+  constructor(supplierStatusCode) {
+    super("Partnerize payment reporting is unavailable for this account.");
+    this.name = "PartnerizePaymentsUnavailableError";
+    // Consumed by sourceObjectSync as the persisted errorCode.
+    this.code = "SUPPLIER_SOURCE_OBJECT_UNAVAILABLE";
+    this.partnerizePaymentsUnavailable = true;
+    this.supplierStatusCode = supplierStatusCode ?? null;
+    this.reasonCategory = supplierStatusCode === 404 ? "NOT_FOUND" : "UNAVAILABLE";
+  }
+}
+
+/** A safe, structured record of a skipped payment fetch. No URL, id, body or credential. */
+export function partnerizePaymentSkipRecord(supplierStatusCode) {
+  return Object.freeze({
+    sourceObject: "payment_information",
+    status: "unavailable",
+    supplierStatusCode: typeof supplierStatusCode === "number" ? supplierStatusCode : null,
+    reasonCategory: supplierStatusCode === 404 ? "NOT_FOUND" : "UNAVAILABLE",
+    at: new Date().toISOString(),
+  });
+}
+
 /** Raised when no usable publisher id is configured or discoverable. Carries no identifier. */
 export class PartnerizeNoPublisherIdError extends Error {
   constructor() {
@@ -747,7 +781,12 @@ export function createPartnerizeAdapter({
         const data = await get(path, params, stats);
         return asArray(extractRows(data));
       } catch (error) {
-        if (stats) stats.paymentFetchSkipped = error?.response?.status || error?.message;
+        // Still returns [] — this fetcher stays non-blocking, and a 404 is NOT retried
+        // (requestWithRetry breaks on any status outside 429/5xx). What changes is that the skip
+        // is now a structured record a caller can act on instead of a bare status code that
+        // nothing read.
+        const supplierStatusCode = Number(error?.response?.status) || null;
+        if (stats) stats.paymentFetchSkipped = partnerizePaymentSkipRecord(supplierStatusCode);
         return [];
       }
     },

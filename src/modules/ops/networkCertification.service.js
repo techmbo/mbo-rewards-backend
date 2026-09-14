@@ -165,6 +165,16 @@ const PARTNERIZE_PROBES = Object.freeze({
     endpointKey: "GET /reporting/report_publisher/publisher/{publisherId}/conversion.json",
     chain: "partnerizeConversions",
   },
+  // No endpoint of any kind. Partnerize exposes no invoice path in this integration — the adapter
+  // contains zero invoice references — so this is declared as absent rather than left unstated.
+  // `unsupported` short-circuits before any supplier request, so naming it costs nothing.
+  invoices: {
+    method: "GET",
+    endpointKey: "—",
+    unsupported:
+      "NO_ENDPOINT_IN_INTEGRATION: the Partnerize adapter contains no invoice endpoint. Not " +
+      "unavailable for this account — absent from the integration entirely.",
+  },
   // Evidenced by fetchPayments, which builds exactly this path; waveESupplierSync calls it with
   // start_date/end_date. There is no second payments path and no fetchPaginated in fetchPayments,
   // and the adapter has no invoice endpoint at all — invoices stay out of the registry.

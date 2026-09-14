@@ -132,6 +132,7 @@ describe("partnerize commission structure — no invented endpoint", () => {
       "campaigns",
       "vouchers",
       "conversions",
+      "invoices",
       "payments",
       "commission_structure",
     ]);

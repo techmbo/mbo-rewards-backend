@@ -120,6 +120,7 @@ describe("partnerize vouchers — the endpoint is pinned", () => {
       "campaigns",
       "vouchers",
       "conversions",
+      "invoices",
       "payments",
       "commission_structure",
     ]);

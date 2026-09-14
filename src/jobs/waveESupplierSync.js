@@ -1,4 +1,5 @@
 import { createSupplierAdapter } from "../adapters/registry.js";
+import { PartnerizePaymentsUnavailableError } from "../adapters/partnerize.adapter.js";
 import { upsertManyRawEntities } from "../modules/raw/raw.service.js";
 import {
   getMarketplaceApiKey,
@@ -390,7 +391,19 @@ export async function syncPartnerizeAccount(accountLabel = "default") {
       ...runCtx,
       sourceObject: "payment_information",
       endpoint: "GET payments",
-      execute: () => adapter.fetchPayments(partnerizeDateParams, stats),
+      // fetchPayments stays non-blocking and returns [] on any failure. Without this, a 404 —
+      // which is what the live probe actually returns for this account — would be recorded as a
+      // successful run of zero payments. Re-raising the recorded skip makes the run FAILED with a
+      // safe code, which sourceObjectSync persists and returns rather than rethrowing, so campaign
+      // and conversion sync continue untouched.
+      execute: async () => {
+        const rows = await adapter.fetchPayments(partnerizeDateParams, stats);
+        const skip = stats?.paymentFetchSkipped;
+        if (skip?.status === "unavailable") {
+          throw new PartnerizePaymentsUnavailableError(skip.supplierStatusCode);
+        }
+        return rows;
+      },
     });
     sourceObjectRuns.push(summarizeSourceObjectRun(run));
     payments = resultRows(run);

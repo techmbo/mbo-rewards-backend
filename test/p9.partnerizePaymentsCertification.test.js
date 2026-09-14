@@ -255,9 +255,16 @@ test("no invoice endpoint was invented — the adapter has none", () => {
   assert.ok(!spec.includes("invoice"));
 });
 
-test("invoices remain outside the executable registry", () => {
-  assert.ok(!listProbeSourceObjects("partnerize").includes("invoices"));
-  assert.ok(!listPartnerizeCertificationSamples().includes("invoices"));
+test("invoices are declared absent and are never executable", () => {
+  // Superseded by the accuracy pass: invoices are now NAMED as absent rather than left unstated.
+  // What must stay true is that naming them costs no supplier request — an `unsupported` probe
+  // short-circuits, and no certification SAMPLE exists for them.
+  assert.ok(listProbeSourceObjects("partnerize").includes("invoices"));
+  assert.ok(
+    !listPartnerizeCertificationSamples().includes("invoices"),
+    "no adapter sample means no request can be made",
+  );
+  assert.ok(SERVICE_SRC.includes("NO_ENDPOINT_IN_INTEGRATION"));
 });
 
 /* ------------------------------------------- existing certification unchanged */
@@ -285,12 +292,16 @@ test("conversions and payments share one dated sampler and cannot drift", () => 
   assert.equal((SERVICE_SRC.match(/statusCategory: "OK_NO_ROWS"/g) || []).length, 1);
 });
 
-test("production sync fetchPayments is untouched", () => {
+test("production sync fetchPayments keeps its endpoint and non-blocking contract", () => {
+  // The accuracy pass changed only WHAT the skip records — the endpoint, the params pass-through
+  // and the empty-array return are unchanged, which is what keeps the 404 non-blocking.
   const fetcher = ADAPTER_SRC.slice(
     ADAPTER_SRC.indexOf("async fetchPayments("),
-    ADAPTER_SRC.indexOf("async fetchPayments(") + 600,
+    ADAPTER_SRC.indexOf("Voucher codes for a campaign"),
   );
   assert.ok(fetcher.includes("resolvePublisherId"));
   assert.ok(fetcher.includes("get(path, params, stats)"), "still passes its params through");
-  assert.ok(fetcher.includes("paymentFetchSkipped"));
+  assert.ok(fetcher.includes("partnerizePaymentSkipRecord"), "the skip is now structured");
+  assert.ok(fetcher.includes("return [];"), "still non-blocking");
+  assert.ok(!fetcher.includes("throw"), "the fetcher itself must not become blocking");
 });

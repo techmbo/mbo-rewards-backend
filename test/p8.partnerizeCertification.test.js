@@ -58,6 +58,7 @@ describe("Partnerize certification — registry and bounds", () => {
       "campaigns",
       "vouchers",
       "conversions",
+      "invoices",
       "payments",
       "commission_structure",
     ]);
@@ -85,8 +86,10 @@ describe("Partnerize certification — registry and bounds", () => {
     });
     // vouchers moved out of this list once fetchCoupons evidenced its contract; the rest stay.
     // "conversions" is now a certified source object and dispatches; it belongs in test 1.
-    // "payments" now dispatches; it belongs in test 1. Invoices have no adapter path at all.
-    for (const unknown of ["products", "offers", "clicks", "invoices"]) {
+    // "payments" now dispatches; it belongs in test 1. "invoices" is now DECLARED as absent
+    // (an `unsupported` probe that short-circuits before any request), so it dispatches too —
+    // returning UNSUPPORTED rather than rejecting. Neither is an unknown source object.
+    for (const unknown of ["products", "offers", "clicks"]) {
       await assert.rejects(
         () => service.certify("partnerize", { sourceObjects: [unknown] }),
         /unknown source objects/i,
@@ -102,6 +105,8 @@ describe("Partnerize certification — registry and bounds", () => {
       // is evidenced by fetchConversions' first call. Its paginated fallback stays out.
       // "payments" is now executable: GET /reporting/report_publisher/publisher/{id}/payment.json
       // is evidenced by fetchPayments, called with start_date/end_date by waveESupplierSync.
+      // "invoices" is now declared-as-absent rather than merely left out, so it is no longer
+      // "deliberately left out" — it is named NO_ENDPOINT_IN_INTEGRATION and costs no request.
       // "vouchers" is now executable: GET /user/publisher/{id}/campaign/{id}/voucher is evidenced
       // by fetchCoupons. "coupons" stays out — it is not a Partnerize endpoint name.
       "coupons",
@@ -109,7 +114,6 @@ describe("Partnerize certification — registry and bounds", () => {
       "offers",
       "clicks",
       "order_items",
-      "invoices",
       "commission_rules",
     ]) {
       assert.equal(listed.includes(excluded), false, `${excluded} must not be executable yet`);
