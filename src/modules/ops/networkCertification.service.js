@@ -492,7 +492,9 @@ const RAKUTEN_PROBES = Object.freeze({
   // landURL or showURL value, never promotes one to a tracking link, and persists nothing.
   links: {
     method: "GET",
-    endpointKey: "GET /linklocator/1.0/getTextLinks/-1/-1///-1/1",
+    // The operation lives in the QUERY STRING, after "?" — not as a path segment. The first
+    // shipped shape treated it as a path and Rakuten answered 500 "Invalid URL/Verb combination".
+    endpointKey: "GET /linklocator/1.0?getTextLinks/-1/-1///-1/1",
     chain: "rakutenSample",
   },
 });

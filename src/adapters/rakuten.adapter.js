@@ -31,18 +31,28 @@ export const RAKUTEN_CERTIFICATION_MAX_ROWS = 1;
 /**
  * Link Locator's documented text-links operation, at its documented defaults.
  *
- * GET /linklocator/1.0/getTextLinks/{advertiser-id}/{category-id}/{link-start-date}/{link-end-date}/{DEPRECATED-campaign-id}/{page}
+ * GET https://api.linksynergy.com/linklocator/1.0?getTextLinks/{advertiser-id}/{category-id}/{link-start-date}/{link-end-date}/{DEPRECATED-campaign-id}/{page}
  *
- * with advertiser-id -1, category-id -1, both dates BLANK, the deprecated campaign id -1 and
- * page 1 — which is how the two empty date slots become the adjacent separators in the middle.
- * Those empty segments are part of the contract, not a formatting accident; collapsing them would
- * shift every later segment and change the request.
+ * THE OPERATION IS ENCODED AFTER "?", NOT AS A PATH SEGMENT. The resource is /linklocator/1.0 and
+ * everything from getTextLinks onward is the query string. Treating it as a normal slash path —
+ * /linklocator/1.0/getTextLinks/... — is what this integration first shipped, and Rakuten answered
+ * HTTP 500 "Invalid URL/Verb combination" to every such request. The verb was never the problem;
+ * the URL shape was.
  *
- * Rakuten documents NO results-per-page parameter for Link Locator, so none is sent. The probe is
- * bounded by making one request and keeping one row, never by inventing a limit the supplier has
- * not published.
+ * Defaults: advertiser-id -1, category-id -1, both dates BLANK, deprecated campaign id -1, page 1.
+ * The two empty date slots are what produce the adjacent separators in the middle. They are part
+ * of the contract, not a formatting accident: collapsing them shifts every later segment, landing
+ * the deprecated campaign id in the start-date slot and the page in the end-date slot.
+ *
+ * Rakuten documents NO results-per-page parameter for Link Locator, so none is sent — and here
+ * that is load-bearing rather than merely principled. Because the operation already occupies the
+ * query string, any params object axios is given would be appended with "&", turning the request
+ * into ?getTextLinks/...&limit=1 and corrupting the operation itself. The spec's pathBounded flag
+ * is what keeps the params object empty.
+ *
+ * The probe is bounded by making one request and keeping one row.
  */
-export const RAKUTEN_TEXT_LINKS_PATH = "/linklocator/1.0/getTextLinks/-1/-1///-1/1";
+export const RAKUTEN_TEXT_LINKS_PATH = "/linklocator/1.0?getTextLinks/-1/-1///-1/1";
 
 /** The documented fields of one <return> element in a getTextLinksResponse. */
 const RAKUTEN_TEXT_LINK_FIELDS = Object.freeze([

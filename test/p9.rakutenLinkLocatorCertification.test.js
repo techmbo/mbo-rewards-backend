@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+// Used to prove the operation survives real URL building, not just string equality.
+import axios from "axios";
 
 process.env.BACKEND_URL = process.env.BACKEND_URL || "https://backend.test";
 process.env.FRONTEND_URL = process.env.FRONTEND_URL || "https://frontend.test";
@@ -152,14 +154,29 @@ async function certifyLinks(adapter) {
   return serviceWith(adapter).certify("rakuten", { sourceObjects: ["links"] });
 }
 
-describe("the documented Link Locator path is used exactly", () => {
+describe("the documented Link Locator URL contract is used exactly", () => {
   it("is the documented getTextLinks operation at its documented defaults", () => {
-    assert.equal(RAKUTEN_TEXT_LINKS_PATH, "/linklocator/1.0/getTextLinks/-1/-1///-1/1");
+    assert.equal(RAKUTEN_TEXT_LINKS_PATH, "/linklocator/1.0?getTextLinks/-1/-1///-1/1");
     assert.equal(RAKUTEN_CERTIFICATION_SPECS.links.path, RAKUTEN_TEXT_LINKS_PATH);
   });
 
+  it("addresses the resource /linklocator/1.0", () => {
+    assert.equal(RAKUTEN_TEXT_LINKS_PATH.split("?")[0], "/linklocator/1.0");
+  });
+
+  it("puts the operation AFTER the question mark, not in the path", () => {
+    assert.equal(RAKUTEN_TEXT_LINKS_PATH.split("?")[1], "getTextLinks/-1/-1///-1/1");
+    assert.equal(RAKUTEN_TEXT_LINKS_PATH.indexOf("?"), "/linklocator/1.0".length);
+  });
+
+  it("does NOT address the operation as a slash path", () => {
+    // The shape that shipped first, and that Rakuten answered 500 "Invalid URL/Verb combination".
+    assert.ok(!RAKUTEN_TEXT_LINKS_PATH.includes("/linklocator/1.0/getTextLinks"));
+    assert.ok(!RAKUTEN_TEXT_LINKS_PATH.startsWith("/linklocator/1.0/get"));
+  });
+
   it("carries the six documented segments in order, with both date slots BLANK", () => {
-    const segments = RAKUTEN_TEXT_LINKS_PATH.split("/getTextLinks/")[1].split("/");
+    const segments = RAKUTEN_TEXT_LINKS_PATH.split("?getTextLinks/")[1].split("/");
     assert.deepEqual(segments, ["-1", "-1", "", "", "-1", "1"]);
 
     const [advertiserId, categoryId, startDate, endDate, deprecatedCampaignId, page] = segments;
@@ -174,14 +191,36 @@ describe("the documented Link Locator path is used exactly", () => {
   it("keeps the adjacent separators that the two blank slots produce", () => {
     // Collapsing "///" would shift every later segment: the deprecated campaign id would land in
     // the start-date slot and the page in the end-date slot.
-    assert.ok(RAKUTEN_TEXT_LINKS_PATH.includes("/-1/-1///-1/1"));
-    assert.equal(RAKUTEN_TEXT_LINKS_PATH.split("/getTextLinks/")[1].split("/").length, 6);
+    assert.ok(RAKUTEN_TEXT_LINKS_PATH.includes("?getTextLinks/-1/-1///-1/1"));
+    assert.equal(RAKUTEN_TEXT_LINKS_PATH.split("?getTextLinks/")[1].split("/").length, 6);
   });
 
-  it("sends that path verbatim", async () => {
+  it("sends that URL verbatim", async () => {
     const spy = spyHttp();
     await adapterWith(spy).fetchCertificationSample("links", {});
-    assert.equal(spy.calls[0].path, "/linklocator/1.0/getTextLinks/-1/-1///-1/1");
+    assert.equal(spy.calls[0].path, "/linklocator/1.0?getTextLinks/-1/-1///-1/1");
+  });
+
+  it("survives axios URL building without the operation being altered", async () => {
+    // The real risk, and why pathBounded is load-bearing rather than merely principled: the
+    // operation already occupies the query string, so ANY params object would be appended with
+    // "&" — turning ?getTextLinks/... into ?getTextLinks/...&limit=1 and corrupting it.
+    const spy = spyHttp();
+    await adapterWith(spy).fetchCertificationSample("links", {});
+    const built = axios.getUri({ url: spy.calls[0].path, params: spy.calls[0].config.params });
+    assert.equal(built, "/linklocator/1.0?getTextLinks/-1/-1///-1/1");
+    assert.ok(!built.includes("&"));
+    assert.equal(built.split("?").length, 2, "exactly one question mark survives");
+  });
+
+  it("would be corrupted by any query parameter, which is why none is sent", () => {
+    // Stated as an explicit counter-example so the reason for pathBounded cannot be lost.
+    const corrupted = axios.getUri({
+      url: RAKUTEN_TEXT_LINKS_PATH,
+      params: { limit: 1, page: 1 },
+    });
+    assert.equal(corrupted, "/linklocator/1.0?getTextLinks/-1/-1///-1/1&limit=1&page=1");
+    assert.ok(corrupted.includes("&limit="), "this is the shape the probe must never send");
   });
 
   it("sends NO query parameters at all", async () => {
@@ -429,10 +468,12 @@ describe("a discovered link asset is NOT a usable tracking link", () => {
 });
 
 describe("the links outcome vocabulary", () => {
-  it("is registered with its own endpointKey", async () => {
+  it("is registered with an endpointKey naming the REAL request contract", async () => {
     assert.ok(listProbeSourceObjects("rakuten").includes("links"));
     const row = (await certifyLinks(adapterWith(spyHttp()))).results[0];
-    assert.equal(row.endpointKey, "GET /linklocator/1.0/getTextLinks/-1/-1///-1/1");
+    assert.equal(row.endpointKey, "GET /linklocator/1.0?getTextLinks/-1/-1///-1/1");
+    // Not the slash shape Rakuten rejected with 500.
+    assert.ok(!row.endpointKey.includes("/linklocator/1.0/getTextLinks"));
     assert.equal(row.httpMethod, "GET");
     assert.equal(row.sourceObject, "links");
   });
