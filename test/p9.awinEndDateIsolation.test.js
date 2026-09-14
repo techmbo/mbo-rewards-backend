@@ -61,24 +61,26 @@ function serviceWith(response) {
   };
 }
 
-/** Both probes in ONE run, so they see the same resolved window and can be compared directly. */
+/** All three probes in ONE run, so they share a resolved window and compare directly. */
 async function bothRequests(response = envelope([TRANSACTION_ROW])) {
   const { service, spy } = serviceWith(response);
   const result = await service.certify("awin", {
-    sourceObjects: ["conversions", "conversions_enddate_iso"],
+    sourceObjects: ["conversions", "conversions_enddate_iso", "conversions_both_dates_iso"],
   });
   const baseline = spy.calls[0];
   const variant = spy.calls[1];
-  return { result, spy, baseline, variant };
+  const bothDates = spy.calls[2];
+  return { result, spy, baseline, variant, bothDates };
 }
 
 /* ------------------------------------------------------- registration */
 
 describe("the isolation probe is registered alongside the original", () => {
-  it("1 - both conversions probes exist, and the original is untouched", () => {
+  it("1 - all three conversions probes exist, and the original is untouched", () => {
     const objects = listProbeSourceObjects("awin");
     assert.ok(objects.includes("conversions"), "the original probe was replaced");
     assert.ok(objects.includes("conversions_enddate_iso"));
+    assert.ok(objects.includes("conversions_both_dates_iso"));
     assert.deepEqual([...objects].sort(), [...listAwinCertificationSamples()].sort());
   });
 
@@ -90,11 +92,28 @@ describe("the isolation probe is registered alongside the original", () => {
     assert.match(ADAPTER_SRC, /return \{ \.\.\.base, endDate: `\$\{base\.endDate\}T00:00:00` \};/);
   });
 
-  it("3 - its endpointKey says what it is, and the original's is unchanged", () => {
+  it("3 - each endpointKey says what it is, and the original's is unchanged", () => {
     assert.match(SERVICE_SRC, /endpointKey: "GET \/publishers\/\{publisherId\}\/transactions\/",/);
     assert.match(
       SERVICE_SRC,
       /endpointKey: "GET \/publishers\/\{publisherId\}\/transactions\/ \(endDate as ISO datetime\)",/,
+    );
+    assert.match(
+      SERVICE_SRC,
+      /endpointKey: "GET \/publishers\/\{publisherId\}\/transactions\/ \(both dates as ISO datetime\)",/,
+    );
+  });
+
+  it("3b - the both-dates variant also DERIVES rather than restating", () => {
+    assert.match(ADAPTER_SRC, /conversions_both_dates_iso: Object\.freeze\(\{\s*\.\.\.AWIN_CONVERSIONS_SPEC,/);
+    const start = ADAPTER_SRC.indexOf("  conversions_both_dates_iso:");
+    const spec = ADAPTER_SRC.slice(start, ADAPTER_SRC.indexOf("\n  }),", start));
+    assert.match(spec, /const base = AWIN_CONVERSIONS_SPEC\.params\(resolved\);/);
+    assert.ok(!/resolved\.window\./.test(spec), "the variant reads the window directly");
+    // It overrides exactly the two date keys and nothing else.
+    assert.deepEqual(
+      [...new Set([...spec.matchAll(/^\s+([A-Za-z]+): `/gm)].map((m) => m[1]))].sort(),
+      ["endDate", "startDate"],
     );
   });
 });
@@ -160,12 +179,89 @@ describe("endDate is the ONLY request-level difference", () => {
   });
 });
 
+describe("the both-dates variant differs from base in exactly the two dates", () => {
+  it("B1 - the key sets are identical and exactly two values differ", async () => {
+    const { baseline, bothDates } = await bothRequests();
+    assert.deepEqual(
+      Object.keys(baseline.params).sort(),
+      Object.keys(bothDates.params).sort(),
+      "the variant added or dropped a parameter",
+    );
+    const differing = Object.keys(baseline.params)
+      .filter((key) => baseline.params[key] !== bothDates.params[key])
+      .sort();
+    assert.deepEqual(differing, ["endDate", "startDate"]);
+  });
+
+  it("B2 - both dates are ISO datetimes at midnight, same calendar days as the base", async () => {
+    const { baseline, bothDates } = await bothRequests();
+    assert.equal(bothDates.params.startDate, `${baseline.params.startDate}T00:00:00`);
+    assert.equal(bothDates.params.endDate, `${baseline.params.endDate}T00:00:00`);
+    for (const value of [bothDates.params.startDate, bothDates.params.endDate]) {
+      assert.match(value, /^\d{4}-\d{2}-\d{2}T00:00:00$/);
+      assert.ok(!/Z|[+-]\d{2}:\d{2}$/.test(value), "a timezone offset was introduced");
+    }
+  });
+
+  it("B3 - it differs from the endDate-only variant in startDate alone", async () => {
+    const { variant, bothDates } = await bothRequests();
+    const differing = Object.keys(variant.params)
+      .filter((key) => variant.params[key] !== bothDates.params[key])
+      .sort();
+    assert.deepEqual(differing, ["startDate"], "the two variants differ in more than startDate");
+    assert.equal(bothDates.params.endDate, variant.params.endDate);
+  });
+
+  it("B4 - every other parameter keeps production's value", async () => {
+    const { bothDates } = await bothRequests();
+    assert.equal(bothDates.params.dateType, "transaction");
+    assert.equal(bothDates.params.showBasketProducts, true);
+    assert.equal(bothDates.params.status, undefined, "a status filter appeared");
+    assert.equal(bothDates.params.timezone, undefined, "timezone changed during the isolation");
+    assert.equal(bothDates.path, `/publishers/${PUBLISHER_ID}/transactions/`);
+    assert.equal(bothDates.method, "get");
+    assert.equal(bothDates.body, undefined);
+    assert.deepEqual(Object.keys(bothDates.config).sort(), ["params", "timeout"]);
+  });
+
+  it("B5 - the window is still exactly 7 days wide", async () => {
+    const { bothDates, result } = await bothRequests();
+    const days =
+      (Date.parse(bothDates.params.endDate) - Date.parse(bothDates.params.startDate)) / 86400000;
+    assert.equal(Math.round(days), 7);
+    const entry = result.results.find((r) => r.sourceObject === "conversions_both_dates_iso");
+    assert.equal(entry.windowPreset, "7d");
+  });
+
+  it("B6 - it behaves like the others on rows, zero rows and failure", async () => {
+    const many = Array.from({ length: 30 }, (_, i) => ({ ...TRANSACTION_ROW, id: 960000 + i }));
+    const { service: full } = serviceWith(envelope(many));
+    const okRun = await full.certify("awin", { sourceObjects: ["conversions_both_dates_iso"] });
+    assert.equal(okRun.results[0].sampleCount, 1);
+    assert.equal(okRun.results[0].orderItems.present, true);
+
+    const { service: none } = serviceWith(envelope([]));
+    const emptyRun = await none.certify("awin", { sourceObjects: ["conversions_both_dates_iso"] });
+    assert.equal(emptyRun.results[0].statusCategory, "OK_NO_ROWS");
+    assert.equal(emptyRun.results[0].schema, "UNKNOWN_NEEDS_LIVE_DATA");
+
+    const failure = Object.assign(new Error("400"), {
+      response: { status: 400, data: { message: "Wrong data type for parameter 'startDate'" } },
+    });
+    const { service: bad, spy } = serviceWith(failure);
+    const badRun = await bad.certify("awin", { sourceObjects: ["conversions_both_dates_iso"] });
+    assert.equal(spy.calls.length, 1, "the failing request was retried");
+    assert.equal(badRun.results[0].supplierStatusCode, 400);
+    assert.equal(badRun.results[0].supplierMessage, "Wrong data type for parameter 'startDate'");
+  });
+});
+
 /* ------------------------------------------------------- bounds unchanged */
 
 describe("nothing about the probe's limits changed", () => {
   it("9 - one request per probe, and no retry", async () => {
     const { spy } = await bothRequests();
-    assert.equal(spy.calls.length, 2, "a probe made more than one request");
+    assert.equal(spy.calls.length, 3, "a probe made more than one request");
 
     const failure = Object.assign(new Error("boom"), {
       response: { status: 400, data: { message: "Wrong data type for parameter 'endDate'" } },
@@ -246,9 +342,10 @@ describe("production is untouched", () => {
   it("16 - the T00:00:00 suffix exists in exactly one place, the variant", () => {
     const occurrences = (ADAPTER_SRC.match(/T00:00:00/g) || []).length;
     // Once in the spec, and once in the comment that explains the choice.
-    assert.ok(occurrences <= 2, `${occurrences} occurrences`);
+    assert.ok(occurrences <= 6, `${occurrences} occurrences`);
     const code = ADAPTER_SRC.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-    assert.equal((code.match(/T00:00:00/g) || []).length, 1, "a second datetime appeared in code");
+    // Three in code: endDate in variant 1, and startDate + endDate in variant 2. Nowhere else.
+    assert.equal((code.match(/T00:00:00/g) || []).length, 3, "a datetime appeared outside the variants");
     const fetcher = ADAPTER_SRC.slice(
       ADAPTER_SRC.indexOf("async fetchConversions("),
       ADAPTER_SRC.indexOf("async fetchPayments("),

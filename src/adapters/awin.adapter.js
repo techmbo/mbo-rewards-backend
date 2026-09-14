@@ -149,6 +149,28 @@ const AWIN_CERTIFICATION_SAMPLES = Object.freeze({
       return { ...base, endDate: `${base.endDate}T00:00:00` };
     },
   }),
+
+  // ISOLATION PROBE 2, certification only. Production is still untouched.
+  //
+  // The supplier answered the endDate-only variant with the SAME complaint moved one parameter
+  // along: "Wrong data type for parameter 'startDate'". Two live answers, each naming exactly the
+  // parameter still sent as a bare date, is strong evidence that this endpoint wants a datetime
+  // for both — so this variant sends both and asks a third time.
+  //
+  // Still derived from the one spec, and still T00:00:00 for the same reason: midnight denotes the
+  // instants the date-only values already denoted, so representation is the only thing that moves.
+  // The window stays exactly 7 days wide.
+  conversions_both_dates_iso: Object.freeze({
+    ...AWIN_CONVERSIONS_SPEC,
+    params: (resolved) => {
+      const base = AWIN_CONVERSIONS_SPEC.params(resolved);
+      return {
+        ...base,
+        startDate: `${base.startDate}T00:00:00`,
+        endDate: `${base.endDate}T00:00:00`,
+      };
+    },
+  }),
 });
 
 export function listAwinCertificationSamples() {
