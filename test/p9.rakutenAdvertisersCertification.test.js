@@ -158,13 +158,13 @@ describe("Rakuten is registered in the certification framework", () => {
     assert.deepEqual(listProbeSourceObjects("rakuten").sort(), [
       "advertisers",
       "commissioning_lists",
+      "offers",
       "partnerships",
     ]);
   });
 
   it("adds no probe for the objects this phase defers", () => {
     for (const notYet of [
-      "offers",
       "events",
       "advanced_reports",
       "payments",
@@ -310,8 +310,8 @@ describe("the request table is the only thing that chooses a path", () => {
   it("refuses a source object it does not name, saying so", async () => {
     const spy = spyHttp();
     await assert.rejects(
-      () => adapterWith(spy).fetchCertificationSample("offers", {}),
-      (error) => /No Rakuten certification sample is defined for "offers"/.test(error.message),
+      () => adapterWith(spy).fetchCertificationSample("events", {}),
+      (error) => /No Rakuten certification sample is defined for "events"/.test(error.message),
     );
     assert.equal(spy.calls.length, 0);
   });
@@ -630,7 +630,7 @@ describe("credentials match production semantics", () => {
   it("rejects a source object that has no probe", async () => {
     const service = serviceWith(adapterWith(spyHttp()));
     await assert.rejects(
-      () => service.certify("rakuten", { sourceObjects: ["offers"] }),
+      () => service.certify("rakuten", { sourceObjects: ["events"] }),
       (error) => Number(error?.statusCode ?? error?.status) === 400,
     );
   });

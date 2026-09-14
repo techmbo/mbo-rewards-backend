@@ -74,6 +74,22 @@ export const RAKUTEN_CERTIFICATION_SPECS = Object.freeze({
     path: "/v1/commissioninglists",
     collectionKeys: Object.freeze(["commissioninglists", "commissioning_lists"]),
   }),
+  // The ONLY spec that carries extra parameters, and the only object where production makes more
+  // than one request per run.
+  //
+  // fetchOffers walks three statuses — active, upcoming, available — and deduplicates across them,
+  // so a production offers fetch is up to THREE supplier calls. Certification takes exactly one,
+  // by pinning a single status.
+  //
+  // "available" is not a guess: it is one of the three values production itself sends on this
+  // path. It is the right one here because this account has joined nothing, so catalogue-side
+  // evidence is what there is to find — active and upcoming are the relationship-dependent halves.
+  offers: Object.freeze({
+    method: "GET",
+    path: "/v1/offers",
+    collectionKeys: Object.freeze(["offers", "offer"]),
+    params: Object.freeze({ offer_status: "available" }),
+  }),
 });
 
 /** The page every Rakuten certification probe asks for — authenticate()'s own bounds. */
@@ -419,8 +435,12 @@ export function createRakutenAdapter({
      * also skipped, because it wraps requestWithRetry with three retries, and a probe that retries
      * turns one supplier rejection into three.
      *
-     * The collection is read with extractRakutenCollection, production's own extractor, using
-     * fetchAdvertisers' own container keys, so what is sampled is a ROW and never the envelope.
+     * The collection is read with extractRakutenCollection, production's own extractor, using each
+     * object's own container keys, so what is sampled is a ROW and never the envelope.
+     *
+     * A spec may declare extra request parameters. Only offers does, and only to pin ONE
+     * offer_status: production walks three of them per run and deduplicates, which would make a
+     * probe three requests instead of one.
      */
     async fetchCertificationSample(sourceObject, { timeoutMs } = {}) {
       // Object.hasOwn, not a bare lookup: a plain property read would follow the prototype chain
@@ -433,7 +453,9 @@ export function createRakutenAdapter({
       }
 
       const response = await httpClient.get(spec.path, {
-        params: { ...RAKUTEN_CERTIFICATION_PAGE_PARAMS },
+        // Page bounds first, then the spec's own parameters. Only offers declares any, and a
+        // spec cannot widen the bounds: it names a filter, never a limit or a page.
+        params: { ...RAKUTEN_CERTIFICATION_PAGE_PARAMS, ...(spec.params ?? {}) },
         headers: { Accept: "application/json" },
         timeout: Number(timeoutMs || RAKUTEN_CERTIFICATION_TIMEOUT_MS),
       });

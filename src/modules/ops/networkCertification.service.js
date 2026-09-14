@@ -432,9 +432,9 @@ const ADMITAD_PROBES = Object.freeze({
  * OK_NO_ROWS and names no blocker: claiming "no joined campaigns" would assert a scope the
  * integration has never proved.
  *
- * offers, events and the Advanced Reports objects all have live fetchers and catalog entries, and
- * all stay out of this registry until certified in their own right. A probe registry entry is an
- * executable claim, not a restatement of the catalog.
+ * events and the Advanced Reports objects have live fetchers and catalog entries, and stay out of
+ * this registry until certified in their own right. A probe registry entry is an executable claim,
+ * not a restatement of the catalog.
  */
 const RAKUTEN_PROBES = Object.freeze({
   advertisers: {
@@ -466,6 +466,17 @@ const RAKUTEN_PROBES = Object.freeze({
   commissioning_lists: {
     method: "GET",
     endpointKey: "GET /v1/commissioninglists (limit=1, page=1)",
+    chain: "rakutenSample",
+  },
+  // commissioning_lists came back OK_NO_ROWS on an account that has joined nothing, so the
+  // commission-source question the audit raised is still open. offers is the other candidate, and
+  // the one that can return catalogue-side rows without a relationship.
+  //
+  // ONE request, not production's three: the probe pins offer_status=available rather than walking
+  // active, upcoming and available the way fetchOffers does.
+  offers: {
+    method: "GET",
+    endpointKey: "GET /v1/offers (offer_status=available, limit=1, page=1)",
     chain: "rakutenSample",
   },
 });
@@ -1332,12 +1343,17 @@ export class NetworkCertificationService {
   }
 
   /**
-   * One bounded Rakuten sample, shared by advertisers, partnerships and commissioning_lists.
+   * One bounded Rakuten sample, shared by advertisers, partnerships, commissioning_lists and
+   * offers.
    *
-   * All three are single-request list endpoints bounded to limit=1, page=1, all three must
+   * All four are bounded to limit=1, page=1 and to exactly ONE supplier request, all four must
    * distinguish "this account has none" from "certified", and writing the control flow once means
-   * they cannot drift apart. The path and container keys each uses live in the adapter's own
-   * frozen spec table, which is the only place that builds a request.
+   * they cannot drift apart. The path, container keys and any extra parameters each uses live in
+   * the adapter's own frozen spec table, which is the only place that builds a request.
+   *
+   * offers is the one object where production itself makes more than one call — fetchOffers walks
+   * three offer_status values and deduplicates. The probe pins a single evidenced status instead,
+   * so one source object stays one request.
    *
    * ZERO ROWS IS OK_NO_ROWS, AND DELIBERATELY NAMES NO BLOCKER — for both objects, for different
    * reasons, and in neither case is an API defect claimed.
@@ -1346,9 +1362,11 @@ export class NetworkCertificationService {
    * repo proves whether the endpoint returns the network catalogue or only the publisher's own
    * advertisers. Reporting an approval state would assert a scope never established.
    *
-   * For partnerships and commissioning_lists: this account has no joined campaigns, so an empty
-   * result is the expected shape of an account with no relationships — not an unsupported object
-   * and not a broken endpoint. Either claim would be inventing a finding from an absence.
+   * For partnerships, commissioning_lists and offers: this account has no joined campaigns, so an
+   * empty result is the expected shape of an account with no relationships — not an unsupported
+   * object and not a broken endpoint. Either claim would be inventing a finding from an absence.
+   * offers is queried at offer_status=available precisely because that half of the catalogue does
+   * not depend on a relationship, but an empty result there still proves nothing about support.
    *
    * In both cases the row schema is still unknown, which is exactly what OK_NO_ROWS and
    * UNKNOWN_NEEDS_LIVE_DATA say.

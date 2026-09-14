@@ -178,6 +178,7 @@ describe("commissioning_lists is registered as a Rakuten source object", () => {
     assert.deepEqual(listProbeSourceObjects("rakuten").sort(), [
       "advertisers",
       "commissioning_lists",
+      "offers",
       "partnerships",
     ]);
   });
@@ -217,7 +218,6 @@ describe("commissioning_lists is registered as a Rakuten source object", () => {
 
   it("adds no probe for the objects this phase still defers", () => {
     for (const notYet of [
-      "offers",
       "events",
       "advanced_reports",
       "payments",

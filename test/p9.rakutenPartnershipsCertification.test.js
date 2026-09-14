@@ -157,6 +157,7 @@ describe("partnerships is registered as a Rakuten source object", () => {
     assert.deepEqual(listProbeSourceObjects("rakuten").sort(), [
       "advertisers",
       "commissioning_lists",
+      "offers",
       "partnerships",
     ]);
   });
@@ -192,7 +193,6 @@ describe("partnerships is registered as a Rakuten source object", () => {
 
   it("adds no probe for the objects this phase still defers", () => {
     for (const notYet of [
-      "offers",
       "events",
       "advanced_reports",
       "payments",
@@ -573,6 +573,7 @@ describe("certification stays read-only and changes no sync behaviour", () => {
     // The deferred fetchers still exist untouched; they simply have no probe.
     for (const present of ["fetchOffers", "fetchCommissioningLists", "fetchPayments"]) {
       assert.ok(code.includes(present), present);
+      // The METHOD name is never a source object name; probes are named by object.
       assert.ok(!listProbeSourceObjects("rakuten").includes(present), present);
     }
   });
