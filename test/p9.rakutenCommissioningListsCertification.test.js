@@ -178,6 +178,7 @@ describe("commissioning_lists is registered as a Rakuten source object", () => {
     assert.deepEqual(listProbeSourceObjects("rakuten").sort(), [
       "advertisers",
       "commissioning_lists",
+      "coupons",
       "links",
       "offers",
       "partnerships",
@@ -218,13 +219,7 @@ describe("commissioning_lists is registered as a Rakuten source object", () => {
   });
 
   it("adds no probe for the objects this phase still defers", () => {
-    for (const notYet of [
-      "events",
-      "advanced_reports",
-      "payments",
-      "coupons",
-      "products",
-    ]) {
+    for (const notYet of ["events", "advanced_reports", "payments", "products"]) {
       assert.ok(!listProbeSourceObjects("rakuten").includes(notYet), notYet);
       assert.ok(!Object.hasOwn(RAKUTEN_CERTIFICATION_SPECS, notYet), notYet);
     }
@@ -644,10 +639,10 @@ describe("certification stays read-only and changes no sync behaviour", () => {
 
   it("adds no offers, events, payment or asset path", () => {
     const code = codeOf(ADAPTER_SRC);
-    for (const absent of ["fetchCoupons", "fetchProducts", "buildDeepLink", "fetchLinks"]) {
+    for (const absent of ["fetchProducts", "buildDeepLink", "fetchLinks"]) {
       assert.ok(!code.includes(absent), absent);
     }
-    for (const present of ["fetchOffers", "fetchConversions", "fetchPayments"]) {
+    for (const present of ["fetchOffers", "fetchConversions", "fetchPayments", "fetchCoupons"]) {
       assert.ok(code.includes(present), present);
     }
   });

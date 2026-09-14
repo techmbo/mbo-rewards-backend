@@ -163,10 +163,11 @@ async function certifyOffers(adapter) {
 }
 
 describe("offers is registered as a Rakuten source object", () => {
-  it("completes the four certified Rakuten objects", () => {
+  it("completes the certified Rakuten object set", () => {
     assert.deepEqual(listProbeSourceObjects("rakuten").sort(), [
       "advertisers",
       "commissioning_lists",
+      "coupons",
       "links",
       "offers",
       "partnerships",
@@ -205,7 +206,7 @@ describe("offers is registered as a Rakuten source object", () => {
   });
 
   it("adds no probe for the objects this phase still defers", () => {
-    for (const notYet of ["events", "advanced_reports", "payments", "coupons", "products"]) {
+    for (const notYet of ["events", "advanced_reports", "payments", "products"]) {
       assert.ok(!listProbeSourceObjects("rakuten").includes(notYet), notYet);
       assert.ok(!Object.hasOwn(RAKUTEN_CERTIFICATION_SPECS, notYet), notYet);
     }
@@ -303,11 +304,19 @@ describe("the offers request is bounded and evidenced", () => {
     assert.deepEqual({ ...RAKUTEN_CERTIFICATION_PAGE_PARAMS }, { limit: 1, page: 1 });
   });
 
-  it("is the only spec that declares extra parameters", () => {
+  it("is the only spec that declares a FILTER", () => {
+    // coupons also carries params, but they are its own documented BOUNDS (resultsperpage,
+    // pagenumber) rather than a filter narrowing what the supplier returns. Nothing else has any.
     for (const [name, spec] of Object.entries(RAKUTEN_CERTIFICATION_SPECS)) {
-      if (name === "offers") continue;
+      if (name === "offers" || name === "coupons") continue;
       assert.equal(spec.params, undefined, name);
     }
+    assert.ok(!RAKUTEN_CERTIFICATION_SPECS.offers.ownBounds, "offers keeps the shared bounds");
+    assert.equal(RAKUTEN_CERTIFICATION_SPECS.coupons.ownBounds, true);
+    assert.deepEqual({ ...RAKUTEN_CERTIFICATION_SPECS.coupons.params }, {
+      resultsperpage: 1,
+      pagenumber: 1,
+    });
   });
 
   it("copies the frozen bounds rather than handing them over by reference", async () => {
@@ -662,10 +671,10 @@ describe("certification stays read-only and changes no sync behaviour", () => {
 
   it("adds no events, payment, coupon, deeplink or product path", () => {
     const code = codeOf(ADAPTER_SRC);
-    for (const absent of ["fetchCoupons", "fetchProducts", "buildDeepLink", "fetchLinks"]) {
+    for (const absent of ["fetchProducts", "buildDeepLink", "fetchLinks"]) {
       assert.ok(!code.includes(absent), absent);
     }
-    for (const present of ["fetchConversions", "fetchPayments", "fetchAdvancedReport"]) {
+    for (const present of ["fetchConversions", "fetchPayments", "fetchAdvancedReport", "fetchCoupons"]) {
       assert.ok(code.includes(present), present);
     }
   });

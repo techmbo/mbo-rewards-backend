@@ -1,5 +1,5 @@
 import { createHttpClient, requestWithRetry } from "../core/httpClient.js";
-import { tagBlocks, tagText } from "../core/xml.js";
+import { decodeXml, tagBlocks, tagBlocksWithAttributes, tagText } from "../core/xml.js";
 import { SUPPLIER_CAPABILITIES } from "./contract.js";
 
 const DEFAULT_PAGE_LIMIT = 100;
@@ -136,6 +136,113 @@ export function extractRakutenTextLinks(xml) {
 }
 
 /**
+ * Rakuten's Coupon API — coupons and promotional links from partner-advertisers.
+ *
+ * GET /coupon/1.0, Bearer only, XML.
+ *
+ * Officially documented pagination, and the ONLY two parameters this integration sends:
+ *   resultsperpage=<count>   maximum 500, default 500
+ *   pagenumber=<page>        default 1
+ *
+ * No category, network, MID or promotion-type filter is sent. They exist in the supplier's
+ * contract; sending one would scope the read to a slice nobody asked for, and a filter this
+ * integration has never exercised is a request shape it has no evidence about.
+ */
+export const RAKUTEN_COUPON_PATH = "/coupon/1.0";
+export const RAKUTEN_COUPON_MAX_RESULTS_PER_PAGE = 500;
+export const RAKUTEN_COUPON_DEFAULT_RESULTS_PER_PAGE = 500;
+
+/** The certification bounds: the smallest page the documented parameters can express. */
+export const RAKUTEN_CERTIFICATION_COUPON_PARAMS = Object.freeze({
+  resultsperpage: 1,
+  pagenumber: 1,
+});
+
+/**
+ * The two documented parameters, and nothing else.
+ *
+ * An ALLOWLIST rather than a passthrough: a caller cannot widen the request into a filtered one,
+ * because a key this function does not name never reaches the supplier. resultsperpage is clamped
+ * to the documented maximum of 500 rather than forwarded, so an over-large ask becomes the largest
+ * legal page instead of a rejected request.
+ */
+export function buildRakutenCouponParams(params = {}) {
+  const requestedPerPage = Number(params?.resultsperpage);
+  const requestedPage = Number(params?.pagenumber);
+  return {
+    resultsperpage:
+      Number.isFinite(requestedPerPage) && requestedPerPage > 0
+        ? Math.min(Math.trunc(requestedPerPage), RAKUTEN_COUPON_MAX_RESULTS_PER_PAGE)
+        : RAKUTEN_COUPON_DEFAULT_RESULTS_PER_PAGE,
+    pagenumber:
+      Number.isFinite(requestedPage) && requestedPage > 0 ? Math.trunc(requestedPage) : 1,
+  };
+}
+
+/** Documented scalar fields of one coupon <link>. couponcode, couponrestriction and imageurl are
+ *  OPTIONAL — present only when the advertiser supplies them — so a row without them is a complete
+ *  row, not a truncated one. */
+const RAKUTEN_COUPON_FIELDS = Object.freeze([
+  "advertiserid",
+  "advertisername",
+  "network",
+  "offerdescription",
+  "offerstartdate",
+  "offerenddate",
+  "couponcode",
+  "couponrestriction",
+  "imageurl",
+  "clickurl",
+  "impressionpixel",
+]);
+
+/** The two documented REPEATING containers, as [container, item] pairs. Each holds zero or more
+ *  items, so each is read as an array — reading <categories> as text would concatenate every
+ *  category into one meaningless string. */
+const RAKUTEN_COUPON_LIST_FIELDS = Object.freeze([
+  Object.freeze(["categories", "category"]),
+  Object.freeze(["promotiontypes", "promotiontype"]),
+]);
+
+/** Every value of a repeated element, decoded and trimmed, with empties and the literal "null"
+ *  dropped — the same absence rule tagText applies to a single element. */
+function repeatedTagText(xml, tag) {
+  return tagBlocks(xml, tag)
+    .map((block) => decodeXml(block).trim())
+    .filter((value) => value !== "" && value.toLowerCase() !== "null");
+}
+
+/**
+ * Rows out of a couponfeed response.
+ *
+ * <link> is the ROW element; <couponfeed> is the envelope around it, carrying TotalMatches,
+ * TotalPages and PageNumberRequested. Reading the envelope as a row would certify a single object
+ * holding page counters plus every row's fields flattened together — so rows are only ever read
+ * from INSIDE <couponfeed>, and a response without that envelope yields no rows rather than one
+ * wrong one.
+ *
+ * type is the row-kind attribute of the <link> element itself (TEXT or BANNER), not a child
+ * element, which is why the attribute-aware primitive is used here.
+ *
+ * A row here is an AVAILABLE COUPON ASSET. Two things it is not:
+ *   - COUPON_ASSET_AVAILABLE != COUPON_CODE_PRESENT. couponcode exists only where the advertiser
+ *     requires a code; a row without one is still a valid promotional link.
+ *   - COUPON_ROW_AVAILABLE != TRACKING_LINK_USABLE. Nothing here promotes clickurl to a tracking
+ *     link, and certification never returns one.
+ */
+export function extractRakutenCouponLinks(xml) {
+  const feed = tagBlocks(xml, "couponfeed")[0] ?? "";
+  return tagBlocksWithAttributes(feed, "link").map(({ attributes, content }) => {
+    const row = { type: attributes.type ?? null };
+    for (const field of RAKUTEN_COUPON_FIELDS) row[field] = tagText(content, field);
+    for (const [container, item] of RAKUTEN_COUPON_LIST_FIELDS) {
+      row[container] = repeatedTagText(tagBlocks(content, container)[0] ?? "", item);
+    }
+    return row;
+  });
+}
+
+/**
  * Every Rakuten source object certification can sample, and the one path each uses.
  *
  * A frozen registry rather than a path argument: there is no call shape through which a caller
@@ -216,6 +323,22 @@ export const RAKUTEN_CERTIFICATION_SPECS = Object.freeze({
     pathBounded: true,
     xml: true,
     extract: extractRakutenTextLinks,
+  }),
+  // The second XML object, and the only one with documented bounds of its OWN.
+  //
+  // ownBounds suppresses the limit/page pair the JSON objects share. /coupon/1.0 publishes
+  // resultsperpage and pagenumber instead, and sending limit/page alongside them would be sending
+  // an endpoint two parameters it never documented — exactly what the Awin coupons 500 punished.
+  //
+  // resultsperpage=1 is the smallest page the documented contract can express, so the probe asks
+  // the supplier for one row rather than asking for 500 and throwing 499 away.
+  coupons: Object.freeze({
+    method: "GET",
+    path: RAKUTEN_COUPON_PATH,
+    ownBounds: true,
+    params: RAKUTEN_CERTIFICATION_COUPON_PARAMS,
+    xml: true,
+    extract: extractRakutenCouponLinks,
   }),
 });
 
@@ -532,7 +655,8 @@ export function createRakutenAdapter({
           "Bearer token is required for publisher APIs; Advanced Reports also require a separate web security token.",
           "Events are recent directional transaction-component evidence, not the historical/expected-commission ledger.",
           "Advanced Reports payment history is network payment evidence only; Advertiser Payment Date is not MBO receipt evidence.",
-          "Coupon, Product Search and Link Locator are XML surfaces and remain gated until the XML ingestion layer is wired.",
+          "Coupon API has a bounded XML read path (fetchCoupons, GET /coupon/1.0) but no ingestion: no canonical Coupon is written and no sync job calls it, so COUPONS is not declared as a capability.",
+          "Product Search and Link Locator are XML surfaces and remain gated until the XML ingestion layer is wired.",
         ],
       };
     },
@@ -593,12 +717,16 @@ export function createRakutenAdapter({
       const path = spec.buildPath ? spec.buildPath(window) : spec.path;
 
       const response = await httpClient.get(path, {
-        // Page bounds first, then the spec's own parameters. Only offers declares any, and a
-        // spec cannot widen the bounds: it names a filter, never a limit or a page. Where the
-        // bounds live in the path instead, NO query parameter is sent at all.
+        // Where each object's bounds come from. The JSON objects share authenticate()'s limit/page
+        // pair and a spec cannot widen it — a spec names a filter, never a limit or a page. Where
+        // the bounds live in the path, NO query parameter is sent at all. Where the endpoint
+        // publishes its own pair (coupons), the shared one is suppressed rather than sent as well.
         params: spec.pathBounded
           ? {}
-          : { ...RAKUTEN_CERTIFICATION_PAGE_PARAMS, ...(spec.params ?? {}) },
+          : {
+              ...(spec.ownBounds ? {} : RAKUTEN_CERTIFICATION_PAGE_PARAMS),
+              ...(spec.params ?? {}),
+            },
         headers: { Accept: spec.xml ? "application/xml,text/xml" : "application/json" },
         ...(spec.xml ? { responseType: "text" } : {}),
         timeout: Number(timeoutMs || RAKUTEN_CERTIFICATION_TIMEOUT_MS),
@@ -618,6 +746,27 @@ export function createRakutenAdapter({
 
     async fetchCampaigns(params = {}, stats = null) {
       return this.fetchAdvertisers(params, stats);
+    },
+
+    /**
+     * ONE bounded read of the Coupon API.
+     *
+     * One supplier request, no retry, no pagination loop: this deliberately does not use getJson,
+     * whose requestWithRetry would turn a single read into up to four. A caller that wants the
+     * next page asks for it by pagenumber; nothing here walks pages on its own.
+     *
+     * Returns parsed rows and nothing more. No canonical Coupon is written, no clickurl becomes a
+     * TrackingLink, and no sync job calls this — the Coupon API has a read path, not an ingestion
+     * path.
+     */
+    async fetchCoupons(params = {}, stats = null) {
+      if (stats) stats.requestCount = (stats.requestCount || 0) + 1;
+      const response = await httpClient.get(RAKUTEN_COUPON_PATH, {
+        params: buildRakutenCouponParams(params),
+        headers: { Accept: "application/xml,text/xml" },
+        responseType: "text",
+      });
+      return extractRakutenCouponLinks(String(response?.data ?? ""));
     },
 
     async fetchPartnerships(params = {}, stats = null) {

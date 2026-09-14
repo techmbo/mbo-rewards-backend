@@ -158,6 +158,7 @@ describe("Rakuten is registered in the certification framework", () => {
     assert.deepEqual(listProbeSourceObjects("rakuten").sort(), [
       "advertisers",
       "commissioning_lists",
+      "coupons",
       "links",
       "offers",
       "partnerships",
@@ -165,13 +166,7 @@ describe("Rakuten is registered in the certification framework", () => {
   });
 
   it("adds no probe for the objects this phase defers", () => {
-    for (const notYet of [
-      "events",
-      "advanced_reports",
-      "payments",
-      "coupons",
-      "products",
-    ]) {
+    for (const notYet of ["events", "advanced_reports", "payments", "products"]) {
       assert.ok(!listProbeSourceObjects("rakuten").includes(notYet), notYet);
       assert.ok(!Object.hasOwn(RAKUTEN_CERTIFICATION_SPECS, notYet), notYet);
     }
@@ -195,13 +190,14 @@ describe("Rakuten is registered in the certification framework", () => {
     }
   });
 
-  it("leaves the Rakuten catalog exactly as it was", () => {
+  it("leaves the advertisers catalog entry exactly as it was", () => {
     assert.equal(getSourceObject("rakuten", "advertisers")?.live, true);
     assert.equal(getSourceObject("rakuten", "advertisers")?.endpoint, "GET /v2/advertisers");
     for (const untouched of ["partnerships", "offers", "commissioning_lists", "events"]) {
       assert.equal(getSourceObject("rakuten", untouched)?.live, true, untouched);
     }
-    for (const gated of ["coupons", "products", "links"]) {
+    // coupons left this list when a real fetch was built for it. products and links have none.
+    for (const gated of ["products", "links"]) {
       assert.equal(getSourceObject("rakuten", gated)?.live, false, gated);
     }
   });
@@ -681,9 +677,14 @@ describe("certification stays read-only and changes no sync behaviour", () => {
     assert.match(code, /adapter\.fetchAdvertisers\(\{\}, stats\)/);
   });
 
-  it("adds no coupon, deeplink or product path to the adapter", () => {
+  it("adds no deeplink or product path to the adapter", () => {
     const code = codeOf(ADAPTER_SRC);
-    for (const absent of ["fetchCoupons", "fetchProducts", "buildDeepLink", "fetchLinks"]) {
+    for (const absent of ["fetchProducts", "buildDeepLink", "fetchLinks"]) {
+      assert.ok(!code.includes(absent), absent);
+    }
+    // fetchCoupons was built later, as a bounded read. What must stay absent is its INGESTION.
+    assert.ok(code.includes("fetchCoupons"));
+    for (const absent of ["persistCoupon", "normalizeRakutenCoupon", "CouponCodeMaster"]) {
       assert.ok(!code.includes(absent), absent);
     }
   });

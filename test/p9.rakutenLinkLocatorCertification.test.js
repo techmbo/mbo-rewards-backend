@@ -909,16 +909,11 @@ describe("the shared XML utility, and CJ unchanged by the move", () => {
 describe("nothing beyond text links is implemented", () => {
   it("adds no banner, DRM, deep-link POST, coupon or product path", () => {
     const code = codeOf(ADAPTER_SRC);
-    for (const absent of [
-      "getBannerLinks",
-      "getDRMLinks",
-      "createDeepLink",
-      "fetchCoupons",
-      "fetchProducts",
-      "fetchLinks",
-    ]) {
+    for (const absent of ["getBannerLinks", "getDRMLinks", "createDeepLink", "fetchProducts", "fetchLinks"]) {
       assert.ok(!code.includes(absent), absent);
     }
+    // fetchCoupons was built later, against a different API. It is not a Link Locator operation.
+    assert.ok(!code.includes("linklocator/1.0/getCoupons"));
   });
 
   it("declares exactly one Link Locator operation", () => {
@@ -951,7 +946,7 @@ describe("nothing beyond text links is implemented", () => {
   });
 
   it("adds no probe for the objects still deferred", () => {
-    for (const notYet of ["events", "advanced_reports", "payments", "coupons", "products"]) {
+    for (const notYet of ["events", "advanced_reports", "payments", "products"]) {
       assert.ok(!listProbeSourceObjects("rakuten").includes(notYet), notYet);
       assert.ok(!Object.hasOwn(RAKUTEN_CERTIFICATION_SPECS, notYet), notYet);
     }

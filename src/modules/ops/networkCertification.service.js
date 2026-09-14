@@ -506,6 +506,26 @@ const RAKUTEN_PROBES = Object.freeze({
     chain: "rakutenSample",
     dated: true,
   },
+  // The Coupon API: coupons and promotional links from partner-advertisers, XML, Bearer only.
+  //
+  // Its bounds are its own documented pair — resultsperpage and pagenumber — not the limit/page
+  // the JSON objects share. resultsperpage=1 is the smallest page the contract can express.
+  //
+  // TWO THINGS A ROW IS NOT. A coupon asset is not a coupon CODE: couponcode appears only where
+  // the advertiser requires one, so a row without it is complete, not truncated. And a coupon row
+  // is not a usable TRACKING LINK: nothing promotes clickurl into a canonical TrackingLink here.
+  // Certification reports the row's SHAPE and never a code, click URL, impression pixel,
+  // advertiser id or name, offer description or image URL.
+  //
+  // ZERO ROWS IS NOT AN ACCOUNT-STATE FINDING. The docs say this API returns partner-advertiser
+  // data, which makes "no joined campaigns" a plausible READING of an empty feed — but a plausible
+  // reading is not evidence. An empty couponfeed reports OK_NO_ROWS like every other object, and
+  // no accountStateBlocker is invented from it.
+  coupons: {
+    method: "GET",
+    endpointKey: "GET /coupon/1.0 (resultsperpage=1, pagenumber=1)",
+    chain: "rakutenSample",
+  },
 });
 
 const PROBE_REGISTRY = Object.freeze({

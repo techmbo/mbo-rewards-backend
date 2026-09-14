@@ -51,3 +51,37 @@ export function tagBlocks(xml, tag) {
   while ((match = regex.exec(String(xml ?? ""))) !== null) blocks.push(match[1]);
   return blocks;
 }
+
+/**
+ * Like tagBlocks, but also reads the attributes off each opening tag.
+ *
+ * Added when Rakuten's coupon feed made an ATTRIBUTE part of a row's contract: the row element is
+ * <link type="TEXT"> or <link type="BANNER">, and a reader that saw only the inner content could
+ * not tell one kind of row from the other. tagBlocks and every existing caller are untouched.
+ *
+ * This does not turn the module into a general parser. It reads name="value" and name='value'
+ * pairs off the OPENING TAG only; an unquoted or malformed attribute is simply not reported rather
+ * than guessed at, and nothing here looks at namespaces, entities beyond decodeXml, or structure.
+ */
+export function tagBlocksWithAttributes(xml, tag) {
+  const escaped = String(tag).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(`<${escaped}((?:\\s[^>]*)?)>([\\s\\S]*?)<\\/${escaped}>`, "gi");
+  const blocks = [];
+  let match;
+  while ((match = regex.exec(String(xml ?? ""))) !== null) {
+    blocks.push({ attributes: parseAttributes(match[1]), content: match[2] });
+  }
+  return blocks;
+}
+
+/** Attribute names are lower-cased so a caller reads one spelling; values are decoded, not trimmed
+ *  away — an attribute that is genuinely empty is reported as an empty string, not as absent. */
+function parseAttributes(text) {
+  const out = {};
+  const regex = /([A-Za-z_:][\w:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+  let match;
+  while ((match = regex.exec(String(text ?? ""))) !== null) {
+    out[match[1].toLowerCase()] = decodeXml(match[2] ?? match[3]);
+  }
+  return out;
+}

@@ -260,12 +260,16 @@ const CATALOG = Object.freeze({
     obj({ sourceObject: "offers", label: "Offers", endpoint: "GET /v1/offers", live: true, entityType: "offer" }),
     obj({ sourceObject: "commissioning_lists", label: "Commissioning Lists", endpoint: "GET /v1/commissioninglists", live: true, entityType: "commission_rule" }),
     obj({
+      // LIVE because a fetch now exists: fetchCoupons reads GET /coupon/1.0 and parses the
+      // documented couponfeed envelope. That is implementation truth and nothing more — it is not
+      // a claim that this account has coupon rows, and it is not an ingestion path.
       sourceObject: "coupons",
       label: "Coupons",
-      endpoint: "Coupon API (XML)",
-      live: false,
+      endpoint: "GET /coupon/1.0",
+      live: true,
       entityType: "coupon",
-      notes: "Rakuten coupon ingestion remains declared until the XML parser/fixture is wired.",
+      notes:
+        "Read path only: fetchCoupons parses the couponfeed XML, but no canonical Coupon is persisted, no clickurl becomes a TrackingLink, and no sync job calls it. Rows have not yet been observed live.",
     }),
     obj({
       sourceObject: "products",
