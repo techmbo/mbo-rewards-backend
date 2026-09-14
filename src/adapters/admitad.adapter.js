@@ -3,6 +3,19 @@ import { SUPPLIER_CAPABILITIES } from "./contract.js";
 
 const DEFAULT_LIMIT = 500;
 
+/** Certification-only ceiling. Shorter than the shared 30s client default so a probe reports its
+ *  own timeout inside the source budget instead of being killed by the runtime. */
+export const ADMITAD_CERTIFICATION_TIMEOUT_MS = Number(
+  process.env.ADMITAD_CERTIFICATION_TIMEOUT_MS || 15000,
+);
+
+/** A field dictionary needs one row. The service bounds this again, independently. */
+export const ADMITAD_CERTIFICATION_MAX_ROWS = 1;
+
+/** The websites page the certification probe asks for. Not a guess and not smaller than anything
+ *  production sends: authenticate() already issues this exact path with these exact bounds. */
+export const ADMITAD_CERTIFICATION_WEBSITE_PARAMS = Object.freeze({ limit: 1, offset: 0 });
+
 function asObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
@@ -100,15 +113,18 @@ export function normalizeAdmitadActionEvidence(row = {}) {
 export function createAdmitadAdapter({
   accessToken,
   baseURL = process.env.ADMITAD_BASE_URL || "https://api.admitad.com",
+  httpClient: injectedHttpClient = null,
 } = {}) {
   if (!accessToken) throw new Error("Admitad adapter requires accessToken");
 
   const root = String(baseURL).replace(/\/$/, "");
-  const httpClient = createHttpClient({
-    baseURL: root,
-    apiKey: `Bearer ${accessToken}`,
-    headers: { Accept: "application/json" },
-  });
+  const httpClient =
+    injectedHttpClient ??
+    createHttpClient({
+      baseURL: root,
+      apiKey: `Bearer ${accessToken}`,
+      headers: { Accept: "application/json" },
+    });
 
   async function get(path, params = {}, stats = null) {
     if (stats) stats.requestCount = (stats.requestCount || 0) + 1;
@@ -188,6 +204,36 @@ export function createAdmitadAdapter({
     async fetchWebsites(params = {}, stats = null) {
       const result = await fetchOffsetPaginated("/websites/v2/", params, stats);
       return result.rows;
+    },
+
+    /**
+     * One bounded websites certification request.
+     *
+     * GET /websites/v2/ with limit=1, offset=0 — the exact request authenticate() already makes in
+     * production, so certification asks the supplier for nothing new and nothing smaller. That is
+     * the point the Awin coupons 500 made: asking for LESS than production ever asks for is still
+     * asking for something unevidenced. Here the bounded form IS the evidenced form.
+     *
+     * fetchOffsetPaginated is deliberately NOT used — it loops until the meta count is exhausted,
+     * and a probe has no business paginating. The private get() helper is also skipped, because it
+     * wraps requestWithRetry with three retries, which would turn one supplier rejection into
+     * three.
+     *
+     * websites is PUBLISHER-scoped, not campaign-scoped: it lists this publisher's own registered
+     * sites, so it returns rows whether or not any programme has been joined. That is why it is
+     * the first Admitad object certified, and why an empty result here is OK_NO_ROWS rather than
+     * an account-state blocker.
+     *
+     * The collection is read with extractAdmitadCollection, production's own extractor, so what is
+     * sampled is a ROW and never the {results, _meta} envelope around it.
+     */
+    async fetchCertificationWebsiteSample({ timeoutMs } = {}) {
+      const response = await httpClient.get("/websites/v2/", {
+        params: { ...ADMITAD_CERTIFICATION_WEBSITE_PARAMS },
+        timeout: Number(timeoutMs || ADMITAD_CERTIFICATION_TIMEOUT_MS),
+      });
+
+      return extractAdmitadCollection(response?.data).slice(0, ADMITAD_CERTIFICATION_MAX_ROWS);
     },
 
     async fetchCampaigns(params = {}, stats = null) {

@@ -4,10 +4,12 @@ import { createOptimiseAdapter } from "../../adapters/optimise.adapter.js";
 import { createPartnerizeAdapter } from "../../adapters/partnerize.adapter.js";
 import { createAwinAdapter } from "../../adapters/awin.adapter.js";
 import { createCjAdapter } from "../../adapters/cj.adapter.js";
+import { createAdmitadAdapter } from "../../adapters/admitad.adapter.js";
 import { resolveOptimiseCredentials } from "../integrations/optimiseCredentials.js";
 import { resolvePartnerizeCertificationCredentials } from "../integrations/partnerizeCredentials.js";
 import { resolveAwinCertificationCredentials } from "../integrations/awinCredentials.js";
 import { resolveCjCertificationCredentials } from "../integrations/cjCredentials.js";
+import { resolveAdmitadCertificationCredentials } from "../integrations/admitadCredentials.js";
 import { comparePathSets, summarisePayloads } from "./payloadShape.js";
 
 /**
@@ -358,11 +360,33 @@ const CJ_PROBES = Object.freeze({
   },
 });
 
+/**
+ * Admitad probe registry — websites only.
+ *
+ * websites is the one Admitad object that is PUBLISHER-scoped rather than campaign-scoped: it
+ * lists this publisher's own registered sites, so it returns rows on an account with no joined
+ * programmes. That makes it the object that separates "the token works" from "this account has
+ * joined nothing", which every campaign-scoped Admitad probe added later will need to have
+ * already been settled.
+ *
+ * programs, coupons and actions have live fetchers and are catalogued live, but they stay out of
+ * this registry until they are certified in their own right. A probe registry entry is an
+ * executable claim, not a restatement of the catalog.
+ */
+const ADMITAD_PROBES = Object.freeze({
+  websites: {
+    method: "GET",
+    endpointKey: "GET /websites/v2/ (limit=1, offset=0)",
+    chain: "admitadWebsites",
+  },
+});
+
 const PROBE_REGISTRY = Object.freeze({
   optimise: OPTIMISE_PROBES,
   partnerize: PARTNERIZE_PROBES,
   awin: AWIN_PROBES,
   cj: CJ_PROBES,
+  admitad: ADMITAD_PROBES,
 });
 
 /**
@@ -374,6 +398,7 @@ const ADAPTER_BUILDERS = Object.freeze({
   partnerize: "buildPartnerizeAdapter",
   awin: "buildAwinAdapter",
   cj: "buildCjAdapter",
+  admitad: "buildAdmitadAdapter",
 });
 
 /** The networks with an executable probe registry. One source of truth, so a caller-facing
@@ -686,6 +711,8 @@ export class NetworkCertificationService {
     this.partnerizeCredentialResolver = deps.partnerizeCredentialResolver ?? resolvePartnerizeCertificationCredentials;
     this.awinCredentialResolver = deps.awinCredentialResolver ?? resolveAwinCertificationCredentials;
     this.cjCredentialResolver = deps.cjCredentialResolver ?? resolveCjCertificationCredentials;
+    this.admitadCredentialResolver =
+      deps.admitadCredentialResolver ?? resolveAdmitadCertificationCredentials;
   }
 
   /**
@@ -1006,6 +1033,90 @@ export class NetworkCertificationService {
           note:
             "The query is scoped to advertiser-ids=joined, so an empty result means this account " +
             "has no approved advertiser relationships. Not a supplier or integration failure.",
+        };
+      }
+
+      const fieldPaths = summarisePayloads(rows);
+      return {
+        ...base,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+      };
+    } catch (error) {
+      return certificationFailure(base, error, {}, redactionValuesFor(adapter));
+    }
+  }
+
+  /**
+   * Admitad certification adapter.
+   *
+   * One secret, resolved here from configuration and handed to the adapter at construction.
+   * Certification never accepts a token from a caller and never discovers one: a caller-supplied
+   * bearer would let the probe be pointed at another publisher's account entirely.
+   *
+   * The base URL is the adapter's own default (or ADMITAD_BASE_URL), never a caller's — there is
+   * no parameter here through which a host could be substituted.
+   */
+  async buildAdmitadAdapter({ accountLabel }) {
+    const credentials = await this.admitadCredentialResolver(accountLabel);
+    if (!credentials?.accessToken) {
+      // Only whether the credential resolved is reported; nothing about it.
+      throw fail("Admitad credentials are not configured for this account label.", 424);
+    }
+    const factory = this.adapterFactory ?? createAdmitadAdapter;
+    return recordRedactionValues(
+      factory({ accessToken: credentials.accessToken }),
+      [credentials.accessToken],
+    );
+  }
+
+  /**
+   * The Admitad websites chain: exactly one request, publisher-scoped, no date window, no paging.
+   *
+   * Zero rows IS OK_NO_ROWS here, and that is not the same judgement made for CJ advertisers.
+   * CJ's query is explicitly scoped to advertiser-ids=joined, so emptiness there reports an
+   * account-approval blocker. /websites/v2/ carries no such scope: it lists the publisher's own
+   * registered sites, which exist independently of any programme relationship. An empty result
+   * means this publisher has registered no websites — a real, ordinary account state that names
+   * no blocker and implies nothing about joined campaigns. Reporting a blocker here would be
+   * inventing one.
+   *
+   * The row schema is still unknown in that case, so schema stays UNKNOWN_NEEDS_LIVE_DATA: a
+   * certified-looking OK with an empty field list would read as "this object has no fields".
+   *
+   * Only structural paths, types and counts leave this method. summarisePayloads never reports a
+   * value, so no website id, name, site URL, status, verification state or category can reach the
+   * response.
+   */
+  async certifyAdmitadWebsites({ adapter, key, probe, budgetLeft }) {
+    const base = {
+      network: key,
+      sourceObject: "websites",
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+    };
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      // One row is all a field dictionary needs. The adapter already slices; this is the second,
+      // independent bound.
+      const rows = asRows(
+        await adapter.fetchCertificationWebsiteSample({ timeoutMs }),
+      ).slice(0, 1);
+
+      if (!rows.length) {
+        return {
+          ...base,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
         };
       }
 
@@ -1718,6 +1829,11 @@ export class NetworkCertificationService {
 
       if (probe.chain === "cjAdvertisers") {
         results.push(await this.certifyCjAdvertisers({ adapter, key, probe, budgetLeft }));
+        continue;
+      }
+
+      if (probe.chain === "admitadWebsites") {
+        results.push(await this.certifyAdmitadWebsites({ adapter, key, probe, budgetLeft }));
         continue;
       }
 
