@@ -510,9 +510,12 @@ describe("certification stays read-only", () => {
     assert.match(code, /fetchOffsetPaginated\(path, requestParams, stats\)/);
   });
 
-  it("does not touch the declared DEEP_LINK capability", () => {
+  it("builds no deeplink, and does not re-declare the removed capability", () => {
+    // This assertion once required DEEP_LINK to still be declared, because the websites phase was
+    // scoped not to touch it. The capability-truth cleanup has since removed it as unimplemented,
+    // so the claim inverts: nothing here re-adds it, and nothing here builds one.
     const code = codeOf(ADAPTER_SRC);
-    assert.match(code, /SUPPLIER_CAPABILITIES\.DEEP_LINK/);
+    assert.ok(!code.includes("SUPPLIER_CAPABILITIES.DEEP_LINK"));
     assert.ok(!code.includes("fetchDeepLink"));
     assert.ok(!code.includes("buildDeepLink"));
   });

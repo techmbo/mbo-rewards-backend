@@ -72,9 +72,9 @@ export const SUPPLIER_CAPABILITY_CATALOG = Object.freeze({
   },
   ADMITAD: {
     implementationStatus: "IMPLEMENTED",
-    capabilities: [SUPPLIER_CAPABILITIES.CAMPAIGNS, SUPPLIER_CAPABILITIES.COUPONS, SUPPLIER_CAPABILITIES.CONVERSIONS, SUPPLIER_CAPABILITIES.DEEP_LINK, SUPPLIER_CAPABILITIES.TRACKING_SUBID, SUPPLIER_CAPABILITIES.REPORTING],
+    capabilities: [SUPPLIER_CAPABILITIES.CAMPAIGNS, SUPPLIER_CAPABILITIES.COUPONS, SUPPLIER_CAPABILITIES.CONVERSIONS, SUPPLIER_CAPABILITIES.TRACKING_SUBID, SUPPLIER_CAPABILITIES.REPORTING],
     pagination: "offset",
-    notes: ["OAuth2 Bearer publisher API foundation implemented for websites, programmes, coupons and /statistics/actions/.", "Action status plus processed/paid are separate source facts; do not collapse payment evidence into order approval.", "status_updated windows are the incremental action-status path.", "Product CSV/XML feed ingestion remains gated on a live feed fixture."],
+    notes: ["OAuth2 Bearer publisher API foundation implemented for websites, programmes, coupons and /statistics/actions/.", "Action status plus processed/paid are separate source facts; do not collapse payment evidence into order approval.", "status_updated windows are the incremental action-status path.", "Product CSV/XML feed ingestion remains gated on a live feed fixture.", "DEEP_LINK was DECLARED_ONLY and is now undeclared: NO_ENDPOINT_IN_INTEGRATION — no deeplink builder, endpoint, method or caller exists. allow_deeplink on a programme row is supplier permission, not integration capability.", "TRACKING_SUBID is retained on read evidence only: subid and subid1-4 are filterable request params and are preserved on every action row; no outbound link injection exists, and networkPerformanceFact ingestion still skips Admitad."],
   },
   CJ: {
     implementationStatus: "IMPLEMENTED_DISCOVERY",

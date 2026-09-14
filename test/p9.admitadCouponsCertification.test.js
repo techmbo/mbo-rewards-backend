@@ -450,8 +450,9 @@ describe("nothing here maps commission truth or changes tracking", () => {
     assert.ok(!code.includes("buildDeepLink"));
     assert.ok(!code.includes("fetchDeepLink"));
     assert.ok(!code.includes("trackingUrl"));
-    // The declared capability is left exactly as it was.
-    assert.match(code, /SUPPLIER_CAPABILITIES\.DEEP_LINK/);
+    // DEEP_LINK is no longer declared: it was removed as unimplemented in the capability-truth
+    // cleanup. Nothing in this phase re-adds it or builds the deeplink it used to claim.
+    assert.ok(!code.includes("SUPPLIER_CAPABILITIES.DEEP_LINK"));
   });
 
   it("adds no product-feed path", () => {

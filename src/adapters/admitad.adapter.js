@@ -236,11 +236,21 @@ export function createAdmitadAdapter({
 
     getCapabilities() {
       return {
+        // DEEP_LINK removed: this integration has no Admitad deeplink builder, endpoint, method,
+        // production caller or output path — zero references anywhere in src/. The capability was
+        // declared and never implemented, and it survived because DEEP_LINK is descriptive rather
+        // than method-backed, so assertAdapterContract had nothing to check it against.
+        //
+        // A programme's allow_deeplink field does NOT re-justify it. That field says the SUPPLIER
+        // permits deeplinks for that programme; it says nothing about whether MBO can build one.
+        // Reading capability out of it would be exactly the inference this cleanup exists to undo.
         capabilities: [
           SUPPLIER_CAPABILITIES.CAMPAIGNS,
           SUPPLIER_CAPABILITIES.COUPONS,
           SUPPLIER_CAPABILITIES.CONVERSIONS,
-          SUPPLIER_CAPABILITIES.DEEP_LINK,
+          // TRACKING_SUBID is KEPT, and it is implemented: buildAdmitadActionParams allowlists
+          // subid and subid1-4 as request filters, and normalizeAdmitadActionEvidence extracts all
+          // five onto every action row fetchConversions returns.
           SUPPLIER_CAPABILITIES.TRACKING_SUBID,
           SUPPLIER_CAPABILITIES.REPORTING,
         ],
@@ -250,6 +260,8 @@ export function createAdmitadAdapter({
           "Programmes, coupons and action reporting use verified publisher API endpoints.",
           "status, processed and paid remain separate source facts.",
           "Product CSV/XML feed ingestion is deferred until a live feed fixture is captured.",
+          "Deeplink generation is NO_ENDPOINT_IN_INTEGRATION: no builder, endpoint or caller exists. A programme's allow_deeplink flag is supplier permission, not MBO capability.",
+          "TRACKING_SUBID is read-only here: subids are filterable and are preserved on action rows, but nothing in this integration injects one into an outbound link.",
         ],
       };
     },

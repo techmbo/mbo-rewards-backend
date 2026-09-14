@@ -693,7 +693,7 @@ describe("nothing here maps commission, payments or tracking", () => {
     assert.ok(!code.includes("buildDeepLink"));
     assert.ok(!code.includes("fetchDeepLink"));
     assert.ok(!code.includes("trackingUrl"));
-    assert.match(code, /SUPPLIER_CAPABILITIES\.DEEP_LINK/);
+    assert.ok(!code.includes("SUPPLIER_CAPABILITIES.DEEP_LINK"));
   });
 });
 
