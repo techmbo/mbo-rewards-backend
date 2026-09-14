@@ -29,30 +29,74 @@ export const RAKUTEN_CERTIFICATION_TIMEOUT_MS = Number(
 export const RAKUTEN_CERTIFICATION_MAX_ROWS = 1;
 
 /**
- * Link Locator's documented text-links operation, at its documented defaults.
+ * Link Locator's documented text-links operation.
  *
- * GET https://api.linksynergy.com/linklocator/1.0?getTextLinks/{advertiser-id}/{category-id}/{link-start-date}/{link-end-date}/{DEPRECATED-campaign-id}/{page}
+ * GET /linklocator/1.0/getTextLinks/{advertiser-id}/{category-id}/{link-start-date}/{link-end-date}/{DEPRECATED-campaign-id}/{page}
  *
- * THE OPERATION IS ENCODED AFTER "?", NOT AS A PATH SEGMENT. The resource is /linklocator/1.0 and
- * everything from getTextLinks onward is the query string. Treating it as a normal slash path —
- * /linklocator/1.0/getTextLinks/... — is what this integration first shipped, and Rakuten answered
- * HTTP 500 "Invalid URL/Verb combination" to every such request. The verb was never the problem;
- * the URL shape was.
+ * TWO SHAPES HAVE BEEN PROBED LIVE AND BOTH ANSWERED HTTP 500 "Invalid URL/Verb combination": the
+ * official slash path with the two date slots left BLANK, and the same operation moved into the
+ * query string after "?". Both carried blank dates, and both failed identically — so the path form
+ * is not what separates them, and the variable never yet isolated is the DATES. An empty path
+ * segment is exactly what a router may collapse before Rakuten's own dispatch ever sees it, and a
+ * collapsed pair shifts every later segment into the wrong slot, presenting an operation Rakuten
+ * cannot match.
  *
- * Defaults: advertiser-id -1, category-id -1, both dates BLANK, deprecated campaign id -1, page 1.
- * The two empty date slots are what produce the adjacent separators in the middle. They are part
- * of the contract, not a formatting accident: collapsing them shifts every later segment, landing
- * the deprecated campaign id in the start-date slot and the page in the end-date slot.
- *
- * Rakuten documents NO results-per-page parameter for Link Locator, so none is sent — and here
- * that is load-bearing rather than merely principled. Because the operation already occupies the
- * query string, any params object axios is given would be appended with "&", turning the request
- * into ?getTextLinks/...&limit=1 and corrupting the operation itself. The spec's pathBounded flag
- * is what keeps the params object empty.
- *
- * The probe is bounded by making one request and keeping one row.
+ * Kept as evidence so neither shape can be quietly reintroduced.
  */
-export const RAKUTEN_TEXT_LINKS_PATH = "/linklocator/1.0?getTextLinks/-1/-1///-1/1";
+export const RAKUTEN_TEXT_LINKS_REJECTED_PATHS = Object.freeze([
+  "/linklocator/1.0/getTextLinks/-1/-1///-1/1",
+  "/linklocator/1.0?getTextLinks/-1/-1///-1/1",
+]);
+
+/** The operation as the official OpenAPI definition places it: a path segment of the resource. */
+export const RAKUTEN_TEXT_LINKS_RESOURCE = "/linklocator/1.0/getTextLinks";
+
+/**
+ * A Link Locator date in MMDDYYYY, the form Rakuten's own worked examples use.
+ *
+ * Read in UTC because the certification window is written in UTC: its from/to come from
+ * toISOString().slice(0, 10), so re-reading them in local time could shift the day by one and
+ * probe a window other than the one reported.
+ *
+ * Returns null for an unparseable value rather than a malformed string, so the path builder can
+ * refuse instead of sending "null" into a date slot.
+ */
+export function rakutenLinkDateParam(value) {
+  const date = value instanceof Date ? new Date(value) : new Date(String(value));
+  if (Number.isNaN(date.getTime())) return null;
+  const pad = (n) => String(n).padStart(2, "0");
+  const month = pad(date.getUTCMonth() + 1);
+  const day = pad(date.getUTCDate());
+  const year = String(date.getUTCFullYear()).padStart(4, "0");
+  return `${month}${day}${year}`;
+}
+
+/**
+ * The explicit-date isolation path, built from the service's own bounded window.
+ *
+ * CERTIFICATION ISOLATION ONLY. Its single purpose is to answer whether blank date slots are what
+ * Rakuten rejects. Nothing in production builds or sends this, and no general Link Locator
+ * behaviour changes with it.
+ *
+ * Every segment except the two dates is held at the documented default the rejected probes already
+ * used — advertiser-id -1, category-id -1, deprecated campaign id -1, page 1 — so the dates are the
+ * ONLY variable between those failed requests and this one. That is the whole design: if this
+ * succeeds, blank dates were the cause; if it returns the same 500, the dates are exonerated and
+ * the path form becomes the next hypothesis. A probe that changed two things at once could not
+ * settle either.
+ *
+ * The dates come from the window and never from a caller. Both must resolve: a window that cannot
+ * produce two MMDDYYYY values yields no path at all rather than a request with "null" where a date
+ * belongs.
+ */
+export function buildRakutenTextLinksIsolationPath(window = {}) {
+  const start = rakutenLinkDateParam(window?.from);
+  const end = rakutenLinkDateParam(window?.to);
+  if (!start || !end) {
+    throw new Error("Rakuten Link Locator isolation requires a bounded window with both dates");
+  }
+  return `${RAKUTEN_TEXT_LINKS_RESOURCE}/-1/-1/${start}/${end}/-1/1`;
+}
 
 /** The documented fields of one <return> element in a getTextLinksResponse. */
 const RAKUTEN_TEXT_LINK_FIELDS = Object.freeze([
@@ -154,14 +198,21 @@ export const RAKUTEN_CERTIFICATION_SPECS = Object.freeze({
     collectionKeys: Object.freeze(["offers", "offer"]),
     params: Object.freeze({ offer_status: "available" }),
   }),
-  // The one XML object, and the one whose bounds live entirely in the path.
+  // The one XML object, the one DATED object, and the one whose bounds live entirely in the path.
+  //
+  // The only spec with no static path: its path is built per-run from the window, because the
+  // whole point of this probe is that the two date slots carry explicit values. needs ["window"]
+  // is what refuses to build a request without one — and that window is the SERVICE's, computed
+  // from a frozen preset, never a caller's dates.
   //
   // pathBounded suppresses the limit/page pair every JSON object sends. Rakuten publishes no
   // results-per-page parameter for Link Locator, so sending one would be inventing a parameter —
   // and sending a bound an endpoint never documented is exactly what the Awin coupons 500 punished.
+  // Page 1 already sits in the path, which is where Link Locator puts it.
   links: Object.freeze({
     method: "GET",
-    path: RAKUTEN_TEXT_LINKS_PATH,
+    needs: Object.freeze(["window"]),
+    buildPath: buildRakutenTextLinksIsolationPath,
     pathBounded: true,
     xml: true,
     extract: extractRakutenTextLinks,
@@ -518,7 +569,7 @@ export function createRakutenAdapter({
      * offer_status: production walks three of them per run and deduplicates, which would make a
      * probe three requests instead of one.
      */
-    async fetchCertificationSample(sourceObject, { timeoutMs } = {}) {
+    async fetchCertificationSample(sourceObject, { timeoutMs, window = null } = {}) {
       // Object.hasOwn, not a bare lookup: a plain property read would follow the prototype chain
       // and let a name like "constructor" resolve to something that is not a spec.
       const spec = Object.hasOwn(RAKUTEN_CERTIFICATION_SPECS, String(sourceObject))
@@ -528,7 +579,20 @@ export function createRakutenAdapter({
         throw new Error(`No Rakuten certification sample is defined for "${sourceObject}"`);
       }
 
-      const response = await httpClient.get(spec.path, {
+      // Checked BEFORE the request: a dated object with no window costs no supplier call and is
+      // reported as its own failure, never as an unbounded query the supplier happens to accept.
+      const ctx = { window };
+      for (const need of spec.needs ?? []) {
+        if (!ctx[need]) {
+          throw new Error(`Rakuten certification sample "${sourceObject}" requires ${need}`);
+        }
+      }
+
+      // A built path is derived from the service's window and from nothing else; a static path
+      // stays exactly what the frozen table names. Neither reads a caller argument.
+      const path = spec.buildPath ? spec.buildPath(window) : spec.path;
+
+      const response = await httpClient.get(path, {
         // Page bounds first, then the spec's own parameters. Only offers declares any, and a
         // spec cannot widen the bounds: it names a filter, never a limit or a page. Where the
         // bounds live in the path instead, NO query parameter is sent at all.

@@ -490,12 +490,21 @@ const RAKUTEN_PROBES = Object.freeze({
   // partnership is active and blocks their use until it is, so a returned row proves the asset
   // exists and nothing more. Certification reports the row's SHAPE; it never returns a clickURL,
   // landURL or showURL value, never promotes one to a tracking link, and persists nothing.
+  //
+  // EXPLICIT-DATE ISOLATION. Two shapes have been probed live and both answered HTTP 500 "Invalid
+  // URL/Verb combination": the official slash path with BLANK date slots, and the same operation
+  // moved after "?". Both carried blank dates, so the path form is not what separates them. This
+  // probe changes exactly one variable — the dates become explicit MMDDYYYY values from the
+  // service window — and holds every other segment at the default the failed probes used.
+  //
+  // dated is what makes the run report which window preset produced those dates; without it a
+  // reader could not tell what a result was a result FOR.
   links: {
     method: "GET",
-    // The operation lives in the QUERY STRING, after "?" — not as a path segment. The first
-    // shipped shape treated it as a path and Rakuten answered 500 "Invalid URL/Verb combination".
-    endpointKey: "GET /linklocator/1.0?getTextLinks/-1/-1///-1/1",
+    endpointKey:
+      "GET /linklocator/1.0/getTextLinks/-1/-1/{MMDDYYYY-start}/{MMDDYYYY-end}/-1/1 (explicit-date isolation)",
     chain: "rakutenSample",
+    dated: true,
   },
 });
 
@@ -1409,7 +1418,7 @@ export class NetworkCertificationService {
    * response. A commission rule is certified as SHAPE — including how many outcomes a row can
    * hold — and never as a number; a link asset is certified as SHAPE and never as a URL.
    */
-  async certifyRakutenSample({ adapter, key, probe, budgetLeft, sourceObject }) {
+  async certifyRakutenSample({ adapter, key, probe, budgetLeft, sourceObject, window = null }) {
     const base = {
       network: key,
       sourceObject,
@@ -1417,6 +1426,9 @@ export class NetworkCertificationService {
       httpMethod: probe.method,
       sampleCount: 0,
       fieldPaths: [],
+      // Only a dated probe reports a preset. Stamping one onto advertisers or offers would claim a
+      // window bounded a request that carries no dates at all.
+      ...(probe.dated ? { windowPreset: window?.preset ?? null } : {}),
     };
 
     const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
@@ -1424,8 +1436,11 @@ export class NetworkCertificationService {
     try {
       // One row is all a field dictionary needs. The adapter already slices; this is the second,
       // independent bound.
+      //
+      // The window is handed to every object and used only by the one whose spec declares it needs
+      // one. It is the SERVICE's window, computed from a frozen preset — never a caller's dates.
       const rows = asRows(
-        await adapter.fetchCertificationSample(sourceObject, { timeoutMs }),
+        await adapter.fetchCertificationSample(sourceObject, { timeoutMs, window }),
       ).slice(0, 1);
 
       if (!rows.length) {
@@ -2157,7 +2172,15 @@ export class NetworkCertificationService {
 
       if (probe.chain === "rakutenSample") {
         results.push(
-          await this.certifyRakutenSample({ adapter, key, probe, budgetLeft, sourceObject }),
+          await this.certifyRakutenSample({
+            adapter,
+            key,
+            probe,
+            budgetLeft,
+            sourceObject,
+            // The service's own window, computed from the frozen preset. Never a caller's dates.
+            window: { ...ctx.window, preset: resolvedWindowPreset },
+          }),
         );
         continue;
       }

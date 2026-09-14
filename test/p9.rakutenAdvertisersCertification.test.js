@@ -335,7 +335,12 @@ describe("the request table is the only thing that chooses a path", () => {
     for (const leak of ["params.path", "ctx.path", "options.path", "accessToken", "securityToken"]) {
       assert.ok(!body.includes(leak), leak);
     }
-    assert.match(body, /httpClient\.get\(spec\.path,/);
+    // Two path sources, both the spec's own: its static path, or its own builder fed the service
+    // window. No third branch, and no argument that could name a path.
+    assert.match(body, /const path = spec\.buildPath \? spec\.buildPath\(window\) : spec\.path;/);
+    assert.match(body, /httpClient\.get\(path,/);
+    assert.equal((body.match(/const path =/g) ?? []).length, 1);
+    assert.equal((body.match(/httpClient\.get\(/g) ?? []).length, 1);
   });
 
   it("keeps the spec table and every entry frozen", () => {
