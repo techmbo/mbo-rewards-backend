@@ -551,6 +551,25 @@ const RAKUTEN_PROBES = Object.freeze({
     chain: "rakutenSample",
     dated: true,
   },
+  // Advanced Reports, report 1 — the PAYMENT HISTORY SUMMARY, and the only one of the repo's five
+  // report ids a single bounded request can reach. Reports 22 and 23 are not date-scoped: 22 needs
+  // a payid and 23 an invoiceid, so production walks report 1 -> payment_id -> report 22 ->
+  // invoice_number -> report 23. Neither is touched here.
+  //
+  // UPSTREAM PAYMENT-SUMMARY EVIDENCE ONLY. Not individual transaction truth, not item-level
+  // commission, and not ClientPayable, NetworkInvoice, NetworkPayment or an MBO receipt — those
+  // remain separate downstream objects, and a report answering is not proof of settlement.
+  //
+  // The one CSV probe, so it has its own chain: a CSV carries a HEADER row as well as data rows,
+  // and the difference between "headers but no data" and "nothing at all" is exactly what an
+  // operator needs to tell a quiet window from a silent endpoint.
+  advanced_reports: {
+    method: "GET",
+    endpointKey: "GET /advancedreports/1.0 (reportid=1, bdate/edate window)",
+    reportId: 1,
+    chain: "rakutenAdvancedReport",
+    dated: true,
+  },
 });
 
 const PROBE_REGISTRY = Object.freeze({
@@ -1513,6 +1532,95 @@ export class NetworkCertificationService {
   }
 
   /**
+   * The Rakuten Advanced Reports chain: exactly ONE request, and sometimes none.
+   *
+   * CSV, so the header row is evidence in its own right. Three outcomes are distinguished rather
+   * than collapsed into "no rows":
+   *   - headers and a data row      -> OK, schema KNOWN_FROM_HEADERS
+   *   - headers and no data row     -> OK_NO_ROWS, schema KNOWN_FROM_HEADERS. The columns ARE
+   *                                    known; the window simply held no payment.
+   *   - nothing at all              -> OK_NO_ROWS, schema UNKNOWN_NEEDS_LIVE_DATA
+   * An empty report is a quiet window, never an account-state blocker: this account has no joined
+   * campaigns, so having no payments is the expected state and not a finding about the endpoint.
+   *
+   * A missing web security token is reported as SKIPPED_NO_SECURITY_TOKEN and makes NO request.
+   * Advanced Reports is the one Rakuten surface needing it, production gates its whole finance
+   * chain on the same condition, and "not configured" is not a network failure.
+   *
+   * Only structure leaves this method. The field dictionary reports column names, types and
+   * categories — never a payment id, check number, currency value or amount — and the CSV body is
+   * never returned.
+   */
+  async certifyRakutenAdvancedReport({ adapter, key, probe, budgetLeft, sourceObject, window = null }) {
+    const base = {
+      network: key,
+      sourceObject,
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      reportId: probe.reportId,
+      sampleCount: 0,
+      fieldPaths: [],
+      windowPreset: window?.preset ?? null,
+    };
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      const sample = await adapter.fetchCertificationCsvSample(sourceObject, { timeoutMs, window });
+      const headers = Array.isArray(sample?.headers) ? sample.headers : [];
+      // One row is all a field dictionary needs. The adapter already slices; this is the second,
+      // independent bound.
+      const rows = asRows(sample?.rows).slice(0, 1);
+
+      if (!headers.length) {
+        return {
+          ...base,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        };
+      }
+
+      // With no data row, the columns are summarised as present-but-unobserved rather than
+      // discarded: every header is reported with presentCount 0. Dropping them would throw away
+      // the schema the header row just proved.
+      const fieldPaths = summarisePayloads(
+        rows.length ? rows : [Object.fromEntries(headers.map((header) => [header, null]))],
+      );
+
+      return {
+        ...base,
+        ok: true,
+        statusCategory: rows.length ? "OK" : "OK_NO_ROWS",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+        schema: "KNOWN_FROM_HEADERS",
+      };
+    } catch (error) {
+      if (error?.rakutenSecurityTokenMissing) {
+        return {
+          ...base,
+          ok: false,
+          statusCategory: "SKIPPED_NO_SECURITY_TOKEN",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+          note:
+            "Advanced Reports needs the Rakuten web security token in addition to the Bearer, and " +
+            "none is configured for this account label. No supplier request was made.",
+        };
+      }
+      return certificationFailure(
+        base,
+        error,
+        { windowPreset: window?.preset ?? null },
+        redactionValuesFor(adapter),
+      );
+    }
+  }
+
+  /**
    * The Awin commission-group chain: at most TWO requests, and often one.
    *
    * The endpoint is advertiser-scoped, so it needs an id. That id is DISCOVERED — one bounded
@@ -2218,6 +2326,21 @@ export class NetworkCertificationService {
       if (probe.chain === "rakutenSample") {
         results.push(
           await this.certifyRakutenSample({
+            adapter,
+            key,
+            probe,
+            budgetLeft,
+            sourceObject,
+            // The service's own window, computed from the frozen preset. Never a caller's dates.
+            window: { ...ctx.window, preset: resolvedWindowPreset },
+          }),
+        );
+        continue;
+      }
+
+      if (probe.chain === "rakutenAdvancedReport") {
+        results.push(
+          await this.certifyRakutenAdvancedReport({
             adapter,
             key,
             probe,

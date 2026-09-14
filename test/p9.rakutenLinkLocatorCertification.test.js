@@ -381,7 +381,7 @@ describe("the explicit-date isolation URL contract", () => {
     // commissioning_lists would be a silent scope change.
     for (const [name, spec] of Object.entries(RAKUTEN_CERTIFICATION_SPECS)) {
       if (name !== "links") assert.equal(spec.buildPath, undefined, `${name} must keep its path`);
-      if (name === "links" || name === "events") continue;
+      if (name === "links" || name === "events" || name === "advanced_reports") continue;
       assert.equal(spec.needs, undefined, `${name} must not need a window`);
     }
     const spy = spyHttp({ advertisers: [{ id: 1 }] });
@@ -505,7 +505,9 @@ describe("exactly one request, no retry, no pagination", () => {
   it("does not route through the retrying or paginating helpers", () => {
     const code = codeOf(ADAPTER_SRC);
     const start = code.indexOf("async fetchCertificationSample(");
-    const body = code.slice(start, code.indexOf("async fetchAdvertisers", start));
+    // The JSON sampler ends where the CSV sampler begins; slicing to fetchAdvertisers would
+    // swallow fetchCertificationCsvSample, which legitimately uses getCsv.
+    const body = code.slice(start, code.indexOf("async fetchCertificationCsvSample(", start));
     assert.ok(!body.includes("requestWithRetry"));
     assert.ok(!body.includes("fetchPagedJson"));
     assert.equal((body.match(/httpClient\.get\(/g) ?? []).length, 1);
@@ -947,7 +949,7 @@ describe("nothing beyond text links is implemented", () => {
   });
 
   it("adds no probe for the objects still deferred", () => {
-    for (const notYet of ["advanced_reports", "payments", "products"]) {
+    for (const notYet of ["payments", "products"]) {
       assert.ok(!listProbeSourceObjects("rakuten").includes(notYet), notYet);
       assert.ok(!Object.hasOwn(RAKUTEN_CERTIFICATION_SPECS, notYet), notYet);
     }

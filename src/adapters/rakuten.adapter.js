@@ -333,6 +333,85 @@ export function buildRakutenCertificationEventParams(window = {}) {
 }
 
 /**
+ * Rakuten Advanced Reports — the reporting surface, reached as CSV.
+ *
+ * GET /advancedreports/1.0, scoped by reportid. The repo wires five report ids and this phase
+ * certifies exactly one of them: report 1, the PAYMENT HISTORY SUMMARY, which fetchPaymentHistory
+ * already requests.
+ *
+ * Report 1 is upstream payment-summary evidence and nothing more. It is not individual transaction
+ * truth, not item-level commission, and it is not ClientPayable, NetworkInvoice, NetworkPayment or
+ * an MBO receipt — those stay separate downstream objects. Report availability is not proof of
+ * settlement.
+ *
+ * Reports 22 and 23 are deliberately untouched here. Neither is date-scoped: 22 needs a payid and
+ * 23 needs an invoiceid, so production reaches them only by walking
+ * report 1 -> payment_id -> report 22 -> invoice_number -> report 23. Report 1 is the only one a
+ * single bounded request can reach.
+ */
+export const RAKUTEN_ADVANCED_REPORTS_PATH = "/advancedreports/1.0";
+export const RAKUTEN_PAYMENT_HISTORY_REPORT_ID = 1;
+
+/**
+ * A bdate/edate value in the YYYYMMDD Rakuten requires here.
+ *
+ * PRODUCTION'S FORMAT, not a new one: buildRakutenPaymentHistoryWindow renders the same bound as
+ * toISOString().slice(0, 10) with the dashes removed, which is this exact string for the same
+ * instant. Read in UTC for the same reason every other Rakuten date is — the certification window
+ * carries UTC calendar dates, and a local-time read would shift the day in any negative-offset
+ * zone.
+ *
+ * Returns null for an unparseable value rather than a malformed string.
+ */
+export function rakutenAdvancedReportDateParam(value) {
+  const date = value instanceof Date ? new Date(value) : new Date(String(value));
+  if (Number.isNaN(date.getTime())) return null;
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${String(date.getUTCFullYear()).padStart(4, "0")}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}`;
+}
+
+/**
+ * The bounded report 1 request, built from the service's own window.
+ *
+ * bdate and edate only. reportid is added by the sampler from the frozen spec, and the security
+ * token by getCsv — so no caller-reachable key can widen or re-point this request.
+ */
+export function buildRakutenCertificationPaymentHistoryParams(window = {}) {
+  const bdate = rakutenAdvancedReportDateParam(window?.from);
+  const edate = rakutenAdvancedReportDateParam(window?.to);
+  if (!bdate || !edate) {
+    throw new Error("Rakuten Advanced Report 1 certification requires a bounded window with both dates");
+  }
+  return { bdate, edate };
+}
+
+/**
+ * The exact supplier header row, and at most one data row keyed by those headers.
+ *
+ * Headers are used VERBATIM — not trimmed, not lower-cased, not mapped. Production's rowObject
+ * trims them and normalizeRakutenAdvancedReportRow then renames them ("SKU #" becomes sku_number,
+ * "Actual Commission" becomes actual_commission); certifying either would certify MBO's vocabulary
+ * rather than the supplier's column names.
+ *
+ * parseCsv drops rows that are entirely blank, so a header-only report yields one row here — the
+ * headers — and an empty body yields none. That difference is what lets the caller tell
+ * "the columns are known, this window held nothing" from "nothing came back at all".
+ */
+export function extractRakutenCsvSample(text, { maxRows = RAKUTEN_CERTIFICATION_MAX_ROWS } = {}) {
+  const table = parseCsv(text);
+  if (!table.length) return { headers: [], rows: [] };
+  const headers = table[0].map((header) => String(header ?? ""));
+  const rows = table.slice(1, 1 + Math.max(0, maxRows)).map((values) => {
+    const row = {};
+    headers.forEach((header, index) => {
+      row[header] = values[index] ?? "";
+    });
+    return row;
+  });
+  return { headers, rows };
+}
+
+/**
  * Every Rakuten source object certification can sample, and the one path each uses.
  *
  * A frozen registry rather than a path argument: there is no call shape through which a caller
@@ -448,6 +527,22 @@ export const RAKUTEN_CERTIFICATION_SPECS = Object.freeze({
     ownBounds: true,
     buildParams: buildRakutenCertificationEventParams,
     collectionKeys: RAKUTEN_EVENTS_COLLECTION_KEYS,
+  }),
+  // The only CSV object, and the only one reached through getCsv rather than the JSON client.
+  //
+  // csv routes it to fetchCertificationCsvSample, which returns the supplier's header row
+  // alongside the sampled data rows. The JSON sampler refuses it outright rather than reading a
+  // CSV body as if it were a collection.
+  //
+  // reportid is carried by the SPEC, not by the parameter builder, so a caller cannot reach report
+  // 22 or 23 — neither of which is date-scoped, and neither of which this phase touches.
+  advanced_reports: Object.freeze({
+    method: "GET",
+    path: RAKUTEN_ADVANCED_REPORTS_PATH,
+    reportId: RAKUTEN_PAYMENT_HISTORY_REPORT_ID,
+    needs: Object.freeze(["window"]),
+    csv: true,
+    buildParams: buildRakutenCertificationPaymentHistoryParams,
   }),
 });
 
@@ -698,7 +793,11 @@ export function createRakutenAdapter({
     return response?.data;
   }
 
-  async function getCsv(path, params = {}, stats = null) {
+  // retries defaults to production's 3. Certification passes 1 — attempt once, never retry — so
+  // one bounded probe stays one supplier request instead of up to four. Everything else about the
+  // request (the security token, the per-run call budget, the Accept header, the stats counters)
+  // stays in this one place rather than being duplicated into a parallel client.
+  async function getCsv(path, params = {}, stats = null, { retries = 3, timeout = null } = {}) {
     if (!securityToken) throw new Error("Rakuten Advanced Reports require securityToken");
     if (advancedReportCalls >= advancedReportCallBudget) {
       const error = new Error("Rakuten Advanced Reports per-run call budget exhausted");
@@ -715,8 +814,9 @@ export function createRakutenAdapter({
         params: { ...params, token: securityToken },
         responseType: "text",
         headers: { Accept: "text/csv,text/plain,*/*" },
+        ...(timeout ? { timeout: Number(timeout) } : {}),
       }),
-      { retries: 3, delayMs: 1000 },
+      { retries, delayMs: 1000 },
     );
     return String(response?.data ?? "");
   }
@@ -811,6 +911,13 @@ export function createRakutenAdapter({
       if (!spec) {
         throw new Error(`No Rakuten certification sample is defined for "${sourceObject}"`);
       }
+      // A CSV report has a header row as well as data rows, so it has its own sampler. Reading one
+      // here would hand a CSV body to the JSON collection reader and certify nothing.
+      if (spec.csv) {
+        throw new Error(
+          `Rakuten certification sample "${sourceObject}" is CSV; use fetchCertificationCsvSample`,
+        );
+      }
 
       // Checked BEFORE the request: a dated object with no window costs no supplier call and is
       // reported as its own failure, never as an unbounded query the supplier happens to accept.
@@ -849,6 +956,57 @@ export function createRakutenAdapter({
         : extractRakutenCollection(response?.data, [...spec.collectionKeys]);
 
       return rows.slice(0, RAKUTEN_CERTIFICATION_MAX_ROWS);
+    },
+
+    /**
+     * ONE bounded CSV certification sample: the supplier's header row, and at most one data row.
+     *
+     * Goes through getCsv — the SAME fetcher fetchAdvancedReport uses — with retries pinned to a
+     * single attempt. Not a parallel client: the security-token requirement, the per-run call
+     * budget and the request headers are production's, in production's one place.
+     *
+     * What it deliberately skips is parseRakutenAdvancedReport, whose
+     * normalizeRakutenAdvancedReportRow renames the supplier's columns into MBO names. Certifying
+     * those would certify our own vocabulary instead of Rakuten's.
+     *
+     * A missing security token is reported as its own condition BEFORE any supplier call, because
+     * "Advanced Reports is not configured for this account" is not a network failure and must not
+     * be read as one.
+     */
+    async fetchCertificationCsvSample(sourceObject, { timeoutMs, window = null } = {}) {
+      // Object.hasOwn, not a bare lookup: a plain property read would follow the prototype chain
+      // and let a name like "constructor" resolve to something that is not a spec.
+      const spec = Object.hasOwn(RAKUTEN_CERTIFICATION_SPECS, String(sourceObject))
+        ? RAKUTEN_CERTIFICATION_SPECS[String(sourceObject)]
+        : null;
+      if (!spec?.csv) {
+        throw new Error(`No Rakuten CSV certification sample is defined for "${sourceObject}"`);
+      }
+
+      // Checked BEFORE the request: a dated object with no window costs no supplier call.
+      const ctx = { window };
+      for (const need of spec.needs ?? []) {
+        if (!ctx[need]) {
+          throw new Error(`Rakuten certification sample "${sourceObject}" requires ${need}`);
+        }
+      }
+
+      if (!securityToken) {
+        const error = new Error("Rakuten Advanced Reports require securityToken");
+        error.rakutenSecurityTokenMissing = true;
+        throw error;
+      }
+
+      const text = await getCsv(
+        spec.path,
+        // The report id comes from the frozen spec and the window from the service; between them
+        // there is no key a caller could supply.
+        { ...spec.buildParams(window), reportid: spec.reportId },
+        null,
+        { retries: 1, timeout: Number(timeoutMs || RAKUTEN_CERTIFICATION_TIMEOUT_MS) },
+      );
+
+      return extractRakutenCsvSample(text);
     },
 
     async fetchAdvertisers(params = {}, stats = null) {

@@ -156,6 +156,7 @@ describe("Rakuten is registered in the certification framework", () => {
   it("exposes advertisers alongside the objects certified after it", () => {
     // This file remains the advertisers probe's own tests; the siblings joined the registry later.
     assert.deepEqual(listProbeSourceObjects("rakuten").sort(), [
+      "advanced_reports",
       "advertisers",
       "commissioning_lists",
       "coupons",
@@ -167,7 +168,7 @@ describe("Rakuten is registered in the certification framework", () => {
   });
 
   it("adds no probe for the objects this phase defers", () => {
-    for (const notYet of ["advanced_reports", "payments", "products"]) {
+    for (const notYet of ["payments", "products"]) {
       assert.ok(!listProbeSourceObjects("rakuten").includes(notYet), notYet);
       assert.ok(!Object.hasOwn(RAKUTEN_CERTIFICATION_SPECS, notYet), notYet);
     }
@@ -275,7 +276,9 @@ describe("the request is production's own bounded advertiser call", () => {
   it("does not route through the paginating or retrying helpers", () => {
     const code = codeOf(ADAPTER_SRC);
     const start = code.indexOf("async fetchCertificationSample(");
-    const body = code.slice(start, code.indexOf("async fetchAdvertisers", start));
+    // The JSON sampler ends where the CSV sampler begins; slicing to fetchAdvertisers would
+    // swallow fetchCertificationCsvSample, which legitimately uses getCsv.
+    const body = code.slice(start, code.indexOf("async fetchCertificationCsvSample(", start));
     assert.ok(!body.includes("fetchPagedJson"));
     assert.ok(!body.includes("requestWithRetry"));
     assert.ok(!body.includes("getCsv"));
@@ -307,9 +310,8 @@ describe("the request table is the only thing that chooses a path", () => {
   it("refuses a source object it does not name, saying so", async () => {
     const spy = spyHttp();
     await assert.rejects(
-      () => adapterWith(spy).fetchCertificationSample("advanced_reports", {}),
-      (error) =>
-        /No Rakuten certification sample is defined for "advanced_reports"/.test(error.message),
+      () => adapterWith(spy).fetchCertificationSample("products", {}),
+      (error) => /No Rakuten certification sample is defined for "products"/.test(error.message),
     );
     assert.equal(spy.calls.length, 0);
   });
@@ -329,7 +331,9 @@ describe("the request table is the only thing that chooses a path", () => {
   it("accepts no path, page or token from a caller", () => {
     const code = codeOf(ADAPTER_SRC);
     const start = code.indexOf("async fetchCertificationSample(");
-    const body = code.slice(start, code.indexOf("async fetchAdvertisers", start));
+    // The JSON sampler ends where the CSV sampler begins; slicing to fetchAdvertisers would
+    // swallow fetchCertificationCsvSample, which legitimately uses getCsv.
+    const body = code.slice(start, code.indexOf("async fetchCertificationCsvSample(", start));
     for (const leak of ["params.path", "ctx.path", "options.path", "accessToken", "securityToken"]) {
       assert.ok(!body.includes(leak), leak);
     }
@@ -633,7 +637,7 @@ describe("credentials match production semantics", () => {
   it("rejects a source object that has no probe", async () => {
     const service = serviceWith(adapterWith(spyHttp()));
     await assert.rejects(
-      () => service.certify("rakuten", { sourceObjects: ["advanced_reports"] }),
+      () => service.certify("rakuten", { sourceObjects: ["products"] }),
       (error) => Number(error?.statusCode ?? error?.status) === 400,
     );
   });

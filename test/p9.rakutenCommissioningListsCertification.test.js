@@ -176,6 +176,7 @@ async function certifyLists(adapter) {
 describe("commissioning_lists is registered as a Rakuten source object", () => {
   it("is listed alongside advertisers and partnerships", () => {
     assert.deepEqual(listProbeSourceObjects("rakuten").sort(), [
+      "advanced_reports",
       "advertisers",
       "commissioning_lists",
       "coupons",
@@ -203,10 +204,13 @@ describe("commissioning_lists is registered as a Rakuten source object", () => {
 
   it("shares the one bounded chain rather than adding a third", () => {
     const code = codeOf(SERVICE_SRC);
+    // Every JSON object shares one chain. advanced_reports is the single exception: CSV carries a
+    // header row, which the JSON chain has no way to report.
     assert.equal(
       (code.match(/chain: "rakutenSample"/g) ?? []).length,
-      listProbeSourceObjects("rakuten").length,
+      listProbeSourceObjects("rakuten").length - 1,
     );
+    assert.equal((code.match(/chain: "rakutenAdvancedReport"/g) ?? []).length, 1);
     assert.equal((code.match(/async certifyRakutenSample\(/g) ?? []).length, 1);
   });
 
@@ -220,7 +224,7 @@ describe("commissioning_lists is registered as a Rakuten source object", () => {
   });
 
   it("adds no probe for the objects this phase still defers", () => {
-    for (const notYet of ["advanced_reports", "payments", "products"]) {
+    for (const notYet of ["payments", "products"]) {
       assert.ok(!listProbeSourceObjects("rakuten").includes(notYet), notYet);
       assert.ok(!Object.hasOwn(RAKUTEN_CERTIFICATION_SPECS, notYet), notYet);
     }

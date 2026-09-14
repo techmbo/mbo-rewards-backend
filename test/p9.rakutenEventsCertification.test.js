@@ -634,8 +634,12 @@ describe("an event transaction is not a final order finance record", () => {
     const code = codeOf(ADAPTER_SRC);
     // The payment/finance surface is Advanced Reports, and it is untouched by this phase.
     assert.ok(code.includes("/advancedreports/1.0"));
-    assert.ok(!listProbeSourceObjects("rakuten").includes("advanced_reports"));
-    assert.ok(!Object.hasOwn(RAKUTEN_CERTIFICATION_SPECS, "advanced_reports"));
+    // Advanced Reports gained a probe of its own later, on a separate chain. What matters here is
+    // that the Events probe neither reaches it nor changes it.
+    assert.equal(RAKUTEN_CERTIFICATION_SPECS.events.reportId, undefined);
+    assert.ok(!RAKUTEN_CERTIFICATION_SPECS.events.csv);
+    const production = code.split("async fetchAdvancedReport")[1].split("async fetchPaymentHistory")[0];
+    assert.ok(production.includes("[1, 2, 3, 22, 23]"));
   });
 });
 
