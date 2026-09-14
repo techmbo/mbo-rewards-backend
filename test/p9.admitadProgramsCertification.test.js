@@ -224,10 +224,11 @@ describe("the request table is the only thing that chooses a path", () => {
   it("refuses a source object it does not name, saying so", async () => {
     const spy = spyHttp();
     await assert.rejects(
-      () => adapterWith(spy).fetchCertificationSample("actions", {}),
+      () => adapterWith(spy).fetchCertificationSample("product_feeds", {}),
       // A named refusal, not a TypeError from dereferencing a missing spec: an operator reading
       // this must learn which object has no probe, not that something was null.
-      (error) => /No Admitad certification sample is defined for "actions"/.test(error.message),
+      (error) =>
+        /No Admitad certification sample is defined for "product_feeds"/.test(error.message),
     );
     assert.equal(spy.calls.length, 0);
   });
@@ -263,7 +264,7 @@ describe("the request table is the only thing that chooses a path", () => {
   });
 
   it("declares no spec for an object that has no probe", () => {
-    for (const notYet of ["actions", "product_feeds", "statistics"]) {
+    for (const notYet of ["product_feeds", "products", "payments", "invoices"]) {
       assert.ok(!Object.hasOwn(ADMITAD_CERTIFICATION_SPECS, notYet), notYet);
     }
   });

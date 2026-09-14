@@ -103,16 +103,17 @@ describe("Admitad is registered in the certification framework", () => {
     assert.ok(listProbeNetworks().includes("admitad"));
   });
 
-  it("exposes websites, programs and coupons", () => {
+  it("exposes websites, programs, coupons and actions", () => {
     assert.deepEqual(listProbeSourceObjects("admitad").sort(), [
+      "actions",
       "coupons",
       "programs",
       "websites",
     ]);
   });
 
-  it("does not add action or product probes yet", () => {
-    for (const notYet of ["actions", "campaigns", "product_feeds", "statistics"]) {
+  it("does not add product-feed or payment probes", () => {
+    for (const notYet of ["product_feeds", "products", "payments", "invoices", "campaigns"]) {
       assert.ok(!listProbeSourceObjects("admitad").includes(notYet), notYet);
     }
   });
@@ -218,7 +219,11 @@ describe("the Admitad websites request is exactly one bounded GET", () => {
     assert.ok(!sampler.includes("fetchOffsetPaginated"));
     assert.ok(!sampler.includes("requestWithRetry"));
     assert.ok(!/\bawait get\(/.test(sampler));
-    assert.ok(!/for\s*\(|while\s*\(/.test(sampler));
+    // Exactly one request is issued, and nothing loops around it. The spec's declared-needs check
+    // is a loop over a frozen list before the request, which is why the whole body is not scanned.
+    assert.equal((sampler.match(/httpClient\.get\(/g) ?? []).length, 1);
+    const afterRequest = sampler.slice(sampler.indexOf("httpClient.get("));
+    assert.ok(!/for\s*\(|while\s*\(|do\s*\{/.test(afterRequest));
   });
 });
 
@@ -463,7 +468,7 @@ describe("credentials come from configuration and never from a caller", () => {
   it("rejects a source object that has no probe", async () => {
     const service = serviceWith(adapterWith(spyHttp()));
     await assert.rejects(
-      () => service.certify("admitad", { sourceObjects: ["actions"] }),
+      () => service.certify("admitad", { sourceObjects: ["product_feeds"] }),
       (error) => Number(error?.statusCode ?? error?.status) === 400,
     );
   });

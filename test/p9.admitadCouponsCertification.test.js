@@ -106,8 +106,9 @@ async function certifyCoupons(adapter) {
 }
 
 describe("coupons is registered as an Admitad source object", () => {
-  it("is listed alongside websites and programs", () => {
+  it("is listed alongside websites, programs and actions", () => {
     assert.deepEqual(listProbeSourceObjects("admitad").sort(), [
+      "actions",
       "coupons",
       "programs",
       "websites",
@@ -139,8 +140,8 @@ describe("coupons is registered as an Admitad source object", () => {
     }
   });
 
-  it("adds no actions or product-feed probe", () => {
-    for (const notYet of ["actions", "statistics", "product_feeds", "campaigns"]) {
+  it("adds no product-feed, payment or invoice probe", () => {
+    for (const notYet of ["product_feeds", "products", "payments", "invoices", "campaigns"]) {
       assert.ok(!listProbeSourceObjects("admitad").includes(notYet), notYet);
       assert.ok(!Object.hasOwn(ADMITAD_CERTIFICATION_SPECS, notYet), notYet);
     }

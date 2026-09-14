@@ -1,4 +1,5 @@
 import { createSupplierAdapter } from "../adapters/registry.js";
+import { admitadActionDateParam } from "../adapters/admitad.adapter.js";
 import { upsertManyRawEntities } from "../modules/raw/raw.service.js";
 import { getNetworkAccountSyncFlags } from "../modules/integrations/oauth.service.js";
 import { resolveAdmitadAccessToken } from "../modules/integrations/admitadTokenProvider.js";
@@ -25,10 +26,6 @@ function validDate(value) {
   if (!value) return null;
   const date = value instanceof Date ? new Date(value) : new Date(String(value));
   return Number.isNaN(date.getTime()) ? null : date;
-}
-
-function isoSecond(date) {
-  return date.toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
 /**
@@ -61,8 +58,8 @@ export function buildAdmitadIncrementalActionParams({
 
   return {
     ...explicit,
-    status_updated_start: isoSecond(start),
-    status_updated_end: isoSecond(end),
+    status_updated_start: admitadActionDateParam(start),
+    status_updated_end: admitadActionDateParam(end),
     order_by: explicit.order_by || "datetime",
   };
 }

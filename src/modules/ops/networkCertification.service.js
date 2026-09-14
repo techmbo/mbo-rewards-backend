@@ -380,9 +380,10 @@ const CJ_PROBES = Object.freeze({
  * is certified as STRUCTURE only. Nothing here maps a rate, and nothing here treats a coupon's
  * programme association as commission truth.
  *
- * actions has a live fetcher and is catalogued live, but it stays out of this registry until it is
- * certified in its own right. A probe registry entry is an executable claim, not a restatement of
- * the catalog.
+ * actions is the only DATED Admitad object. Its window comes from the service's frozen preset —
+ * 7d by default — and is serialized by production's own admitadActionDateParam into the
+ * status_updated_start/status_updated_end pair fetchConversions already sends. The sampler refuses
+ * to build the request without a window rather than asking the supplier for all time.
  */
 const ADMITAD_PROBES = Object.freeze({
   websites: {
@@ -398,6 +399,11 @@ const ADMITAD_PROBES = Object.freeze({
   coupons: {
     method: "GET",
     endpointKey: "GET /coupons/ (limit=1, offset=0)",
+    chain: "admitadSample",
+  },
+  actions: {
+    method: "GET",
+    endpointKey: "GET /statistics/actions/ (status_updated window, limit=1, offset=0)",
     chain: "admitadSample",
   },
 });
@@ -1095,30 +1101,36 @@ export class NetworkCertificationService {
   }
 
   /**
-   * One bounded Admitad sample, shared by websites, programs and coupons.
+   * One bounded Admitad sample, shared by websites, programs, coupons and actions.
    *
-   * All three are single-request list endpoints bounded to limit=1, offset=0, all three must
+   * All four are single-request list endpoints bounded to limit=1, offset=0, all four must
    * distinguish "this account has none" from "certified", and writing the control flow once means
-   * they cannot drift apart. The path each uses lives in the adapter's own frozen spec table,
-   * which is the only place that builds a request.
+   * they cannot drift apart. The path and parameters each uses live in the adapter's own frozen
+   * spec table, which is the only place that builds a request.
+   *
+   * The window is passed to every object and used only by the one whose spec declares it needs
+   * one. It is the SERVICE's window, computed from a frozen preset — never a caller's dates.
    *
    * ZERO ROWS IS OK_NO_ROWS FOR BOTH, and that is not the judgement made for CJ advertisers. CJ's
    * query is explicitly scoped to advertiser-ids=joined, so emptiness there reports an
    * account-approval blocker. Neither Admitad query carries such a scope: /websites/v2/ lists the
    * publisher's own registered sites, the UNSCOPED /advcampaigns/ may return catalogue-wide
-   * programmes rather than only joined ones, and /coupons/ takes no scope at all. Reading "no
-   * joined campaigns" out of an empty result from any of them would be inventing a finding the
-   * query cannot support — so no accountStateBlocker is reported, for any of them.
+   * programmes rather than only joined ones, and /coupons/ takes no scope at all. actions is
+   * scoped only by a date window: an account with no joined programmes has no actions to report,
+   * which is an ordinary account state and emphatically NOT an unsupported object — the endpoint
+   * is live and answered. Reading "no joined campaigns" or "unsupported" out of an empty result
+   * from any of them would be inventing a finding the query cannot support, so no
+   * accountStateBlocker is reported, for any of them.
    *
    * The row schema is still unknown in that case, so schema stays UNKNOWN_NEEDS_LIVE_DATA: a
    * certified-looking OK with an empty field list would read as "this object has no fields".
    *
    * Only structural paths, types and counts leave this method. summarisePayloads never reports a
-   * value, so no website, programme or coupon id, coupon CODE, name, description, site, tracking
-   * or goto URL, status, category, region, currency, commission rate or date can reach the
-   * response.
+   * value, so no website, programme, coupon or ACTION id, order id, subid, coupon code, customer
+   * data, name, description, site, tracking or goto URL, status, category, region, currency,
+   * monetary amount, commission value, payment flag or date can reach the response.
    */
-  async certifyAdmitadSample({ adapter, key, probe, budgetLeft, sourceObject }) {
+  async certifyAdmitadSample({ adapter, key, probe, budgetLeft, sourceObject, window = null }) {
     const base = {
       network: key,
       sourceObject,
@@ -1134,7 +1146,7 @@ export class NetworkCertificationService {
       // One row is all a field dictionary needs. The adapter already slices; this is the second,
       // independent bound.
       const rows = asRows(
-        await adapter.fetchCertificationSample(sourceObject, { timeoutMs }),
+        await adapter.fetchCertificationSample(sourceObject, { timeoutMs, window }),
       ).slice(0, 1);
 
       if (!rows.length) {
@@ -1861,7 +1873,15 @@ export class NetworkCertificationService {
 
       if (probe.chain === "admitadSample") {
         results.push(
-          await this.certifyAdmitadSample({ adapter, key, probe, budgetLeft, sourceObject }),
+          await this.certifyAdmitadSample({
+            adapter,
+            key,
+            probe,
+            budgetLeft,
+            sourceObject,
+            // The service's own window, computed from the frozen preset. Never a caller's dates.
+            window: { ...ctx.window, preset: resolvedWindowPreset },
+          }),
         );
         continue;
       }

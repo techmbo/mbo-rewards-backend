@@ -34,6 +34,21 @@ export const ADMITAD_CERTIFICATION_SPECS = Object.freeze({
   websites: Object.freeze({ method: "GET", path: "/websites/v2/" }),
   programs: Object.freeze({ method: "GET", path: "/advcampaigns/" }),
   coupons: Object.freeze({ method: "GET", path: "/coupons/" }),
+  actions: Object.freeze({
+    method: "GET",
+    path: "/statistics/actions/",
+    // The only dated Admitad object. The window is the service's, computed from a frozen preset;
+    // the sampler refuses to build a request without one rather than silently asking for all time.
+    needs: ["window"],
+    // Production's own parameter construction, not a reimplementation of it:
+    // buildAdmitadActionParams is what fetchConversions runs, so the allowlist and the
+    // order_by=datetime default are production's, and the dates use production's serializer.
+    params: (window) =>
+      buildAdmitadActionParams({
+        status_updated_start: admitadActionDateParam(window.from),
+        status_updated_end: admitadActionDateParam(window.to),
+      }),
+  }),
 });
 
 function asObject(value) {
@@ -60,6 +75,20 @@ export function extractAdmitadMeta(payload, fallback = {}) {
     limit: Number.isFinite(limit) && limit > 0 ? limit : Number(fallback.limit) || DEFAULT_LIMIT,
     offset: Number.isFinite(offset) && offset >= 0 ? offset : Number(fallback.offset) || 0,
   };
+}
+
+/**
+ * The action-window date serializer.
+ *
+ * Admitad's statistics endpoint is sent second-precision UTC with no milliseconds — this is the
+ * exact format the production sync job has always used (its private isoSecond), lifted here so
+ * certification and sync cannot serialize a window differently. Moving it changes no output: a
+ * test asserts byte-identical results for a date, a date string and a datetime string.
+ */
+export function admitadActionDateParam(value) {
+  const date = value instanceof Date ? new Date(value) : new Date(String(value));
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
 export function buildAdmitadActionParams(params = {}) {
@@ -248,7 +277,7 @@ export function createAdmitadAdapter({
      * The collection is read with extractAdmitadCollection, production's own extractor, so what is
      * sampled is a ROW and never the {results, _meta} envelope around it.
      */
-    async fetchCertificationSample(sourceObject, { timeoutMs } = {}) {
+    async fetchCertificationSample(sourceObject, { timeoutMs, window = null } = {}) {
       // Object.hasOwn, not a bare lookup: a plain property read would follow the prototype chain
       // and let a name like "constructor" resolve to something that is not a spec.
       const spec = Object.hasOwn(ADMITAD_CERTIFICATION_SPECS, String(sourceObject))
@@ -258,8 +287,20 @@ export function createAdmitadAdapter({
         throw new Error(`No Admitad certification sample is defined for "${sourceObject}"`);
       }
 
+      // Checked BEFORE the request: a dated object with no window costs no supplier call and is
+      // reported as its own failure, never as an unbounded query the supplier happens to accept.
+      const ctx = { window };
+      for (const need of spec.needs ?? []) {
+        if (!ctx[need]) {
+          throw new Error(`Admitad certification sample "${sourceObject}" requires ${need}`);
+        }
+      }
+      if (spec.needs?.includes("window") && (!window.from || !window.to)) {
+        throw new Error(`Admitad certification sample "${sourceObject}" requires a bounded window`);
+      }
+
       const response = await httpClient.get(spec.path, {
-        params: { ...ADMITAD_CERTIFICATION_PAGE_PARAMS },
+        params: { ...ADMITAD_CERTIFICATION_PAGE_PARAMS, ...(spec.params?.(window) ?? {}) },
         timeout: Number(timeoutMs || ADMITAD_CERTIFICATION_TIMEOUT_MS),
       });
 
