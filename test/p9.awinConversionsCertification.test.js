@@ -165,9 +165,13 @@ describe("awin conversions — production's request contract", () => {
 
   it("6 — the collection keys are production's", () => {
     assert.match(ADAPTER_SRC, /extractCollection\(data, \["transactions", "data"\]\)/);
-    const start = ADAPTER_SRC.indexOf("  conversions: {");
-    const spec = ADAPTER_SRC.slice(start, ADAPTER_SRC.indexOf("\n  },", start));
+    // The spec is hoisted as AWIN_CONVERSIONS_SPEC so the endDate isolation variant can derive
+    // from it; the conversions entry is that same object.
+    const start = ADAPTER_SRC.indexOf("const AWIN_CONVERSIONS_SPEC");
+    const spec = ADAPTER_SRC.slice(start, ADAPTER_SRC.indexOf("\n});", start));
+    assert.ok(start > -1);
     assert.match(spec, /collectionKeys: \["transactions", "data"\],/);
+    assert.match(ADAPTER_SRC, /^  conversions: AWIN_CONVERSIONS_SPEC,$/m);
   });
 });
 
@@ -511,12 +515,19 @@ describe("the adapter sampler itself", () => {
     assert.ok(!JSON.stringify(spy.calls).includes("1999-01-01"));
     assert.ok(!JSON.stringify(spy.calls).includes("2030-01-01"));
     // And the spec reads the two canonical keys only.
-    const start = ADAPTER_SRC.indexOf("  conversions: {");
-    const spec = ADAPTER_SRC.slice(start, ADAPTER_SRC.indexOf("\n  },", start));
+    const start = ADAPTER_SRC.indexOf("const AWIN_CONVERSIONS_SPEC");
+    const spec = ADAPTER_SRC.slice(start, ADAPTER_SRC.indexOf("\n});", start));
+    assert.ok(start > -1);
     assert.deepEqual(
       [...new Set([...spec.matchAll(/resolved\.window\.([A-Za-z_]+)/g)].map((m) => m[1]))].sort(),
       ["from", "to"],
     );
+    // The isolation variant reads nothing out of the window on its own account either.
+    const variant = ADAPTER_SRC.slice(
+      ADAPTER_SRC.indexOf("  conversions_enddate_iso:"),
+      ADAPTER_SRC.indexOf("\n  }),", ADAPTER_SRC.indexOf("  conversions_enddate_iso:")),
+    );
+    assert.ok(!/resolved\.window\./.test(variant), "the variant reads the window directly");
   });
 
   it("30c — the SERVICE bounds the row too, independently of the adapter", async () => {

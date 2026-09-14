@@ -54,6 +54,24 @@ export class AwinWindowTooWideError extends Error {
  * `path` receives the adapter's RESOLVED values, never a caller's ctx, so the one place an
  * identifier enters a URL is visibly fed from configuration alone.
  */
+/**
+ * The transactions request, exactly as fetchConversions builds it. Hoisted so the endDate
+ * isolation variant can DERIVE from it instead of restating it.
+ */
+const AWIN_CONVERSIONS_SPEC = Object.freeze({
+  method: "GET",
+  collectionKeys: ["transactions", "data"],
+  needs: ["window"],
+  maxWindowDays: AWIN_MAX_TRANSACTION_WINDOW_DAYS,
+  path: (resolved) => `/publishers/${resolved.publisherId}/transactions/`,
+  params: (resolved) => ({
+    startDate: resolved.window.from,
+    endDate: resolved.window.to,
+    dateType: "transaction",
+    showBasketProducts: true,
+  }),
+});
+
 const AWIN_CERTIFICATION_SAMPLES = Object.freeze({
   campaigns: {
     method: "GET",
@@ -107,19 +125,30 @@ const AWIN_CERTIFICATION_SAMPLES = Object.freeze({
   // Dates arrive as `resolved.window`, computed by the service from a frozen preset token. No date
   // is ever accepted from a caller. The 31-day ceiling below is production's own rule, enforced
   // here too rather than left to the supplier to reject.
-  conversions: {
-    method: "GET",
-    collectionKeys: ["transactions", "data"],
-    needs: ["window"],
-    maxWindowDays: AWIN_MAX_TRANSACTION_WINDOW_DAYS,
-    path: (resolved) => `/publishers/${resolved.publisherId}/transactions/`,
-    params: (resolved) => ({
-      startDate: resolved.window.from,
-      endDate: resolved.window.to,
-      dateType: "transaction",
-      showBasketProducts: true,
-    }),
-  },
+  conversions: AWIN_CONVERSIONS_SPEC,
+
+  // ISOLATION PROBE, certification only. Production is untouched.
+  //
+  // The live 400 said, exactly: "Wrong data type for parameter 'endDate'". It named endDate and
+  // not startDate, even though both are sent in the same YYYY-MM-DD form — so this variant changes
+  // ONE THING and asks the supplier again.
+  //
+  // It is DERIVED from the conversions spec rather than written out beside it: everything but the
+  // endDate key is literally the same object and the same params call, so the two cannot drift and
+  // "only endDate differs" is structural rather than a claim a test has to take on trust.
+  //
+  // T00:00:00, not T23:59:59. The point is to learn which TYPE the endpoint accepts, and midnight
+  // denotes the same instant the date-only value already denoted — a pure change of
+  // representation. An end-of-day value would also move the window, leaving two variables. That
+  // may mean this probe sees fewer rows than a date-only one would; row yield is not what it is
+  // asking.
+  conversions_enddate_iso: Object.freeze({
+    ...AWIN_CONVERSIONS_SPEC,
+    params: (resolved) => {
+      const base = AWIN_CONVERSIONS_SPEC.params(resolved);
+      return { ...base, endDate: `${base.endDate}T00:00:00` };
+    },
+  }),
 });
 
 export function listAwinCertificationSamples() {
