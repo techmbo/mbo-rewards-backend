@@ -99,7 +99,10 @@ describe("awin coupons is registered", () => {
   it("1 — coupons is a probeable awin source object", () => {
     assert.ok(listProbeSourceObjects("awin").includes("coupons"));
     assert.ok(listAwinCertificationSamples().includes("coupons"));
-    assert.deepEqual(listProbeSourceObjects("awin"), listAwinCertificationSamples());
+    assert.deepEqual(
+      [...listProbeSourceObjects("awin")].sort(),
+      [...listAwinCertificationSamples()].sort(),
+    );
   });
 
   it("1b — campaigns is untouched by its addition", () => {
@@ -285,7 +288,10 @@ describe("awin coupons — nothing is caller-controlled", () => {
     const body = ADAPTER_SRC.slice(start, ADAPTER_SRC.indexOf("\n    },", start));
     assert.match(body, /spec\.method === "POST_READONLY"/);
     assert.ok(!/ctx\.method/.test(body), "the verb can be chosen by a caller");
-    assert.deepEqual([...new Set([...body.matchAll(/ctx\.([A-Za-z_]+)/g)].map((m) => m[1]))], ["timeoutMs"]);
+    assert.deepEqual(
+      [...new Set([...body.matchAll(/ctx\.([A-Za-z_]+)/g)].map((m) => m[1]))].sort(),
+      ["timeoutMs", "window"],
+    );
   });
 });
 

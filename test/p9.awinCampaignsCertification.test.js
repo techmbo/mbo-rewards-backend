@@ -98,7 +98,12 @@ describe("awin is registered in the certification framework", () => {
     // coupons was added in the phase after this one; campaigns must still be registered, and the
     // probe registry and the adapter's sample specs must still agree exactly.
     assert.ok(listProbeSourceObjects("awin").includes("campaigns"));
-    assert.deepEqual(listProbeSourceObjects("awin"), listAwinCertificationSamples());
+    // Compared as SETS: the probe registry and the adapter's specs are two independent literals
+    // and their declaration order is not part of the contract.
+    assert.deepEqual(
+      [...listProbeSourceObjects("awin")].sort(),
+      [...listAwinCertificationSamples()].sort(),
+    );
   });
 
   it("1b — the caller-facing catalog is derived from the registry, not a second list", () => {
@@ -154,6 +159,7 @@ describe("awin campaigns — the endpoint is pinned to production's", () => {
       "/publishers/${pubId}/programmes",
       "/publishers/${pubId}/transactions/",
       "/publishers/${resolved.publisherId}/programmes",
+      "/publishers/${resolved.publisherId}/transactions/",
     ]);
     // Every certification path is a RESOLVED-value copy of one production already builds.
     const certPaths = paths.filter((p) => p.includes("resolved.publisherId"));
@@ -163,7 +169,7 @@ describe("awin campaigns — the endpoint is pinned to production's", () => {
         `${certPath} has no production counterpart`,
       );
     }
-    assert.equal(certPaths.length, 2, "a certification path was added or removed");
+    assert.equal(certPaths.length, 3, "a certification path was added or removed");
   });
 });
 
@@ -285,10 +291,19 @@ describe("awin campaigns — the publisher id is never caller-controlled", () =>
     assert.ok(!JSON.stringify(spy.calls).includes("zzattackerzz"));
   });
 
-  it("4a3 — the sampler reads only timeoutMs out of ctx", () => {
+  it("4a3 — the sampler reads only timeoutMs and window out of ctx", () => {
     const start = ADAPTER_SRC.indexOf("async fetchCertificationSample(");
     const body = ADAPTER_SRC.slice(start, ADAPTER_SRC.indexOf("\n    },", start));
-    assert.deepEqual([...new Set([...body.matchAll(/ctx\.([A-Za-z_]+)/g)].map((m) => m[1]))], ["timeoutMs"]);
+    // window was added for the date-bounded conversions probe. It is NOT a caller value: the
+    // service computes it from a frozen preset token and passes it in, which the service-side
+    // tests pin. Nothing else may be read out of ctx — least of all an id, path or verb.
+    assert.deepEqual(
+      [...new Set([...body.matchAll(/ctx\.([A-Za-z_]+)/g)].map((m) => m[1]))].sort(),
+      ["timeoutMs", "window"],
+    );
+    for (const forbidden of ["ctx.publisherId", "ctx.path", "ctx.method", "ctx.body", "ctx.params"]) {
+      assert.ok(!body.includes(forbidden), forbidden);
+    }
   });
 
   it("4b — the id comes from the resolver, and the resolver reads configuration only", () => {

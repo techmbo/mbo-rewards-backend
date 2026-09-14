@@ -25,6 +25,25 @@ export const AWIN_CERTIFICATION_TIMEOUT_MS = Number(
 export const AWIN_CERTIFICATION_MAX_ROWS = 1;
 
 /**
+ * Awin refuses a transaction window wider than 31 days, and fetchConversions already enforces that
+ * before making a request. Certification enforces the same ceiling for the same reason: a 90d
+ * preset would otherwise become a request the supplier rejects, reported as a supplier failure
+ * when in fact the window was never valid.
+ */
+export const AWIN_MAX_TRANSACTION_WINDOW_DAYS = 31;
+
+/** Raised when a preset resolves to a window this endpoint cannot accept. Not a supplier error. */
+export class AwinWindowTooWideError extends Error {
+  constructor(days, maxDays) {
+    super("The requested window is wider than this Awin endpoint accepts.");
+    this.name = "AwinWindowTooWideError";
+    this.awinWindowTooWide = true;
+    this.requestedDays = Number.isFinite(days) ? Math.round(days) : null;
+    this.maxWindowDays = maxDays;
+  }
+}
+
+/**
  * The certification request contract, one entry per source object.
  *
  * Every entry's shape is evidenced by production code that already runs. `campaigns` is
@@ -71,6 +90,35 @@ const AWIN_CERTIFICATION_SAMPLES = Object.freeze({
     collectionKeys: ["data", "promotions", "offers"],
     path: (resolved) => `/publisher/${resolved.publisherId}/promotions`,
     body: () => ({ filters: {}, pagination: { page: 1, pageSize: 200 } }),
+  },
+
+  // Evidenced: fetchConversions builds exactly this path and sends exactly these parameter names.
+  // The trailing slash is production's and is kept.
+  //
+  // showBasketProducts stays TRUE because the embedded basket structure is the point: it is how
+  // ORDER ITEMS arrive on this integration — inside a transaction, not from a product feed. The
+  // two must never be read as evidence of each other, and certification is where that distinction
+  // gets recorded.
+  //
+  // dateType "transaction" is production's own default. status and timezone are OPTIONAL in
+  // production and omitted here: certification sends the unfiltered default view, so no caller and
+  // no default can narrow which transactions the supplier considers.
+  //
+  // Dates arrive as `resolved.window`, computed by the service from a frozen preset token. No date
+  // is ever accepted from a caller. The 31-day ceiling below is production's own rule, enforced
+  // here too rather than left to the supplier to reject.
+  conversions: {
+    method: "GET",
+    collectionKeys: ["transactions", "data"],
+    needs: ["window"],
+    maxWindowDays: AWIN_MAX_TRANSACTION_WINDOW_DAYS,
+    path: (resolved) => `/publishers/${resolved.publisherId}/transactions/`,
+    params: (resolved) => ({
+      startDate: resolved.window.from,
+      endDate: resolved.window.to,
+      dateType: "transaction",
+      showBasketProducts: true,
+    }),
   },
 });
 
@@ -334,8 +382,22 @@ export function createAwinAdapter({
         throw new Error(`No Awin certification sample is defined for "${sourceObject}"`);
       }
 
+      for (const need of spec.needs ?? []) {
+        if (!ctx[need]) throw new Error(`Awin certification sample "${sourceObject}" requires ${need}`);
+      }
+
+      // Checked BEFORE the limiter and before any request: an impossible window costs no supplier
+      // call and is reported as its own outcome, never as a supplier failure.
+      if (spec.maxWindowDays && ctx.window) {
+        const days =
+          (new Date(ctx.window.to).getTime() - new Date(ctx.window.from).getTime()) / 86400000;
+        if (days > spec.maxWindowDays + 0.0001) {
+          throw new AwinWindowTooWideError(days, spec.maxWindowDays);
+        }
+      }
+
       await awinRateLimiter.acquireSlot();
-      const url = spec.path({ publisherId: pubId });
+      const url = spec.path({ publisherId: pubId, window: ctx.window });
       const timeout = Number(ctx.timeoutMs || AWIN_CERTIFICATION_TIMEOUT_MS);
 
       // The verb is the spec's, never a caller's, and each branch sends only what its own spec
@@ -343,7 +405,7 @@ export function createAwinAdapter({
       const response =
         spec.method === "POST_READONLY"
           ? await httpClient.post(url, spec.body(), { timeout })
-          : await httpClient.get(url, { params: spec.params(), timeout });
+          : await httpClient.get(url, { params: spec.params({ publisherId: pubId, window: ctx.window }), timeout });
 
       // The same collection reader production uses, so the probe cannot certify a different shape
       // than sync ingests. One row is kept; the rest of the page is discarded unread.

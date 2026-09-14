@@ -114,6 +114,7 @@ describe("awin — no false product capability remains", () => {
       "/publishers/${pubId}/programmes",
       "/publishers/${pubId}/transactions/",
       "/publishers/${resolved.publisherId}/programmes",
+      "/publishers/${resolved.publisherId}/transactions/",
     ]);
     // Each certification path is a resolved-value copy of one production already builds, so the
     // set can only grow by mirroring an existing path — never by introducing a new endpoint.

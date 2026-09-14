@@ -314,6 +314,14 @@ const AWIN_PROBES = Object.freeze({
   // Evidenced by fetchCoupons, which POSTs to exactly this path. A POST that reads: empty filters,
   // one row requested, no supplier state changed. `/publisher/` is singular here — Awin's own
   // inconsistency, copied rather than corrected.
+  // Evidenced by fetchConversions: same path, same parameter names, same dateType default, and
+  // showBasketProducts left on. Date-bounded by a frozen preset the service resolves; never a
+  // caller's dates.
+  conversions: {
+    method: "GET",
+    endpointKey: "GET /publishers/{publisherId}/transactions/",
+    chain: "awinConversions",
+  },
   coupons: {
     // POST_READONLY, not POST: READ_ONLY_METHODS admits only GET and POST_READONLY, and that guard
     // stays exactly as it is. The endpointKey still shows the real HTTP verb an operator would
@@ -642,6 +650,97 @@ export class NetworkCertificationService {
 
   async certifyAwinCoupons(args) {
     return this.certifyAwinSample({ ...args, sourceObject: "coupons" });
+  }
+
+  /**
+   * The Awin conversions chain: one request, publisher-scoped, date-bounded by a frozen preset.
+   *
+   * It does not reuse certifyAwinSample because it reports one thing the list endpoints do not:
+   * whether the transaction carried embedded basket lines, and what shape they have.
+   *
+   * ORDER ITEMS, NOT A PRODUCT FEED. basketProducts arrives INSIDE a transaction. Awin exposes no
+   * product feed in this integration at all — its catalog entry says NO_ENDPOINT_IN_INTEGRATION —
+   * and the two must never be read as evidence of each other. Reporting the basket shape here, on
+   * the conversion, is what keeps that distinction recorded rather than assumed. The item paths are
+   * summarised SEPARATELY from the transaction's own, because order-item fields and transaction
+   * fields are different vocabularies and merging them makes the result unreadable as either.
+   *
+   * Only structure leaves this method. summarisePayloads reports paths, types and categories and
+   * never a value, so no transaction or order id, click reference, voucher code, URL, customer
+   * detail, commission amount, order value or currency can reach the response — which is what
+   * makes certifying the most sensitive object on this integration safe at all.
+   */
+  async certifyAwinConversions({ adapter, key, probe, window, budgetLeft }) {
+    const base = {
+      network: key,
+      sourceObject: "conversions",
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+    };
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      const rows = asRows(
+        await adapter.fetchCertificationSample("conversions", { timeoutMs, window }),
+      ).slice(0, 1);
+
+      if (!rows.length) {
+        return {
+          ...base,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+          windowPreset: window?.preset ?? null,
+          orderItems: {
+            sourceObject: "order_items",
+            present: false,
+            observedType: null,
+            itemSampleCount: 0,
+            itemFieldPaths: [],
+            note: "No transaction in this window, so basket presence is unknown — not absent.",
+          },
+        };
+      }
+
+      const fieldPaths = summarisePayloads(rows);
+      const basket = rows[0]?.basketProducts;
+      const items = Array.isArray(basket) ? basket.slice(0, 1) : [];
+
+      return {
+        ...base,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+        windowPreset: window?.preset ?? null,
+        orderItems: {
+          sourceObject: "order_items",
+          // Presence is reported as a boolean, never as a count of the customer's basket.
+          present: basket !== undefined && basket !== null,
+          observedType: Array.isArray(basket) ? "ARRAY" : basket === null ? "NULL" : typeof basket === "object" && basket !== undefined ? "OBJECT" : basket === undefined ? null : "SCALAR",
+          itemSampleCount: items.length,
+          itemFieldPaths: summarisePayloads(items),
+          note: "Order items embedded in a transaction. Awin exposes no product feed in this integration; a basket line is not feed evidence.",
+        },
+      };
+    } catch (error) {
+      if (error?.awinWindowTooWide) {
+        return {
+          ...base,
+          ok: false,
+          statusCategory: "WINDOW_EXCEEDS_SUPPLIER_LIMIT",
+          windowPreset: window?.preset ?? null,
+          maxWindowDays: error.maxWindowDays,
+          note: "Awin refuses a transaction window wider than its own limit; choose a narrower preset. No supplier request was made.",
+        };
+      }
+      return certificationFailure(base, error, { windowPreset: window?.preset ?? null });
+    }
   }
 
   /**
@@ -1221,6 +1320,20 @@ export class NetworkCertificationService {
 
       if (probe.chain === "awinCampaigns") {
         results.push(await this.certifyAwinCampaigns({ adapter, key, probe, budgetLeft }));
+        continue;
+      }
+
+      if (probe.chain === "awinConversions") {
+        results.push(
+          await this.certifyAwinConversions({
+            adapter,
+            key,
+            probe,
+            // The service's own window, computed from the frozen preset. Never a caller's dates.
+            window: { ...ctx.window, preset: resolvedWindowPreset },
+            budgetLeft,
+          }),
+        );
         continue;
       }
 
