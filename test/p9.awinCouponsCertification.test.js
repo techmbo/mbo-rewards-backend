@@ -34,7 +34,9 @@ const PROMOTION_ROW = {
   deepLink: "https://zzmerchantzz.example/sale",
   startDate: "2026-09-01T00:00:00",
   endDate: null,
-  commission: { amount: 7.5, currency: "GBP" },
+  // Distinctive on purpose: a short value like 7.5 also occurs inside probedAt's ISO
+  // timestamp (…:07.512Z), which made the leak assertion below fail about 1 run in 100.
+  commission: { amount: 6543.21, currency: "GBP" },
   regions: [{ countryCode: "GB" }],
 };
 
@@ -396,7 +398,7 @@ describe("awin coupons — nothing but structure leaves", () => {
       "zzcreadzz",
       "556677",
       "998877",
-      "7.5",
+      "6543.21",
       "GBP",
       "2026-09-01",
       "awin1.com",

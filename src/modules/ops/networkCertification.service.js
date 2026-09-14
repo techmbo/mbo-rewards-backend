@@ -432,9 +432,9 @@ const ADMITAD_PROBES = Object.freeze({
  * OK_NO_ROWS and names no blocker: claiming "no joined campaigns" would assert a scope the
  * integration has never proved.
  *
- * offers, commissioning_lists, events and the Advanced Reports objects all have live fetchers and
- * catalog entries, and all stay out of this registry until certified in their own right. A probe
- * registry entry is an executable claim, not a restatement of the catalog.
+ * offers, events and the Advanced Reports objects all have live fetchers and catalog entries, and
+ * all stay out of this registry until certified in their own right. A probe registry entry is an
+ * executable claim, not a restatement of the catalog.
  */
 const RAKUTEN_PROBES = Object.freeze({
   advertisers: {
@@ -451,6 +451,21 @@ const RAKUTEN_PROBES = Object.freeze({
   partnerships: {
     method: "GET",
     endpointKey: "GET /v1/partnerships (limit=1, page=1)",
+    chain: "rakutenSample",
+  },
+  // Rakuten's structured commission-rule source, certified for STRUCTURE only.
+  //
+  // What this probe is for is discovering whether a row carries an advertiser reference, a rule or
+  // group id, an action/event type, percentage and fixed payout components, currency, category,
+  // country and date conditions, a status, and — the field that matters most — whether ONE row can
+  // carry MULTIPLE payout outcomes.
+  //
+  // Nothing here maps, averages or collapses any of it. Each distinct payout rule is later a
+  // separate SupplierCommissionRule; a probe that merged outcomes now would destroy exactly the
+  // distinction that mapping depends on.
+  commissioning_lists: {
+    method: "GET",
+    endpointKey: "GET /v1/commissioninglists (limit=1, page=1)",
     chain: "rakutenSample",
   },
 });
@@ -1317,12 +1332,12 @@ export class NetworkCertificationService {
   }
 
   /**
-   * One bounded Rakuten sample, shared by advertisers and partnerships.
+   * One bounded Rakuten sample, shared by advertisers, partnerships and commissioning_lists.
    *
-   * Both are single-request list endpoints bounded to limit=1, page=1, both must distinguish "this
-   * account has none" from "certified", and writing the control flow once means they cannot drift
-   * apart. The path and container keys each uses live in the adapter's own frozen spec table,
-   * which is the only place that builds a request.
+   * All three are single-request list endpoints bounded to limit=1, page=1, all three must
+   * distinguish "this account has none" from "certified", and writing the control flow once means
+   * they cannot drift apart. The path and container keys each uses live in the adapter's own
+   * frozen spec table, which is the only place that builds a request.
    *
    * ZERO ROWS IS OK_NO_ROWS, AND DELIBERATELY NAMES NO BLOCKER — for both objects, for different
    * reasons, and in neither case is an API defect claimed.
@@ -1331,9 +1346,9 @@ export class NetworkCertificationService {
    * repo proves whether the endpoint returns the network catalogue or only the publisher's own
    * advertisers. Reporting an approval state would assert a scope never established.
    *
-   * For partnerships: this account has no joined campaigns, so an empty result is the expected
-   * shape of an account with no relationships — not an unsupported object and not a broken
-   * endpoint. Either claim would be inventing a finding from an absence.
+   * For partnerships and commissioning_lists: this account has no joined campaigns, so an empty
+   * result is the expected shape of an account with no relationships — not an unsupported object
+   * and not a broken endpoint. Either claim would be inventing a finding from an absence.
    *
    * In both cases the row schema is still unknown, which is exactly what OK_NO_ROWS and
    * UNKNOWN_NEEDS_LIVE_DATA say.
@@ -1342,8 +1357,9 @@ export class NetworkCertificationService {
    * handler — a rejected Bearer and an empty account are different findings.
    *
    * Only structural paths, types and counts leave this method. summarisePayloads never reports a
-   * value, so no advertiser id, name, URL, category, contact, currency or commission term can
-   * reach the response.
+   * value, so no advertiser or rule id, name, URL, category, contact, country, date, currency,
+   * percentage rate, fixed amount or commission term can reach the response. A commission rule is
+   * certified as SHAPE — including how many outcomes a row can hold — and never as a number.
    */
   async certifyRakutenSample({ adapter, key, probe, budgetLeft, sourceObject }) {
     const base = {

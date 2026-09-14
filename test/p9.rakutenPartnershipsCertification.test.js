@@ -153,8 +153,12 @@ async function certifyPartnerships(adapter) {
 }
 
 describe("partnerships is registered as a Rakuten source object", () => {
-  it("is listed alongside advertisers", () => {
-    assert.deepEqual(listProbeSourceObjects("rakuten").sort(), ["advertisers", "partnerships"]);
+  it("is listed alongside advertisers and commissioning_lists", () => {
+    assert.deepEqual(listProbeSourceObjects("rakuten").sort(), [
+      "advertisers",
+      "commissioning_lists",
+      "partnerships",
+    ]);
   });
 
   it("declares a read-only GET with its bounds in the endpointKey", () => {
@@ -189,7 +193,6 @@ describe("partnerships is registered as a Rakuten source object", () => {
   it("adds no probe for the objects this phase still defers", () => {
     for (const notYet of [
       "offers",
-      "commissioning_lists",
       "events",
       "advanced_reports",
       "payments",

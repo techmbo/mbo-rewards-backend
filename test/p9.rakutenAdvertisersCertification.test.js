@@ -153,15 +153,18 @@ describe("Rakuten is registered in the certification framework", () => {
     assert.ok(listProbeNetworks().includes("rakuten"));
   });
 
-  it("exposes advertisers and partnerships", () => {
-    // partnerships joined the registry later. This file remains the advertisers probe's own tests.
-    assert.deepEqual(listProbeSourceObjects("rakuten").sort(), ["advertisers", "partnerships"]);
+  it("exposes advertisers alongside the objects certified after it", () => {
+    // This file remains the advertisers probe's own tests; the siblings joined the registry later.
+    assert.deepEqual(listProbeSourceObjects("rakuten").sort(), [
+      "advertisers",
+      "commissioning_lists",
+      "partnerships",
+    ]);
   });
 
   it("adds no probe for the objects this phase defers", () => {
     for (const notYet of [
       "offers",
-      "commissioning_lists",
       "events",
       "advanced_reports",
       "payments",

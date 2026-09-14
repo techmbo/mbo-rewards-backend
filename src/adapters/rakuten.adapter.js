@@ -61,6 +61,19 @@ export const RAKUTEN_CERTIFICATION_SPECS = Object.freeze({
     path: "/v1/partnerships",
     collectionKeys: Object.freeze(["partnerships", "partnership"]),
   }),
+  // The structured commission-rule source. The catalog already types this entityType
+  // "commission_rule" while offers are "offer", so the repo's own classification treats this as
+  // the rule surface — but that is a catalog assertion, not evidence. A field dictionary is what
+  // turns it into evidence.
+  //
+  // Same bounds caveat as partnerships: the parameter vocabulary is production's (fetchPagedJson
+  // sends limit and page here under maxLimit 200), but limit=1 page=1 is not itself a request
+  // production has been observed making — it asks for the default 100.
+  commissioning_lists: Object.freeze({
+    method: "GET",
+    path: "/v1/commissioninglists",
+    collectionKeys: Object.freeze(["commissioninglists", "commissioning_lists"]),
+  }),
 });
 
 /** The page every Rakuten certification probe asks for — authenticate()'s own bounds. */
