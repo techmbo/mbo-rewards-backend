@@ -931,7 +931,6 @@ describe("read-only, and production behaviour unchanged", () => {
       "reconcile",
       "persistConversion",
       "saveTransaction",
-      "fetchProducts",
     ]) {
       assert.ok(!code.includes(absent), absent);
     }

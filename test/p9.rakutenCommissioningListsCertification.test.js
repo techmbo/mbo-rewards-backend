@@ -184,6 +184,7 @@ describe("commissioning_lists is registered as a Rakuten source object", () => {
       "links",
       "offers",
       "partnerships",
+      "products",
     ]);
   });
 
@@ -224,7 +225,7 @@ describe("commissioning_lists is registered as a Rakuten source object", () => {
   });
 
   it("adds no probe for the objects this phase still defers", () => {
-    for (const notYet of ["payments", "products"]) {
+    for (const notYet of ["payments"]) {
       assert.ok(!listProbeSourceObjects("rakuten").includes(notYet), notYet);
       assert.ok(!Object.hasOwn(RAKUTEN_CERTIFICATION_SPECS, notYet), notYet);
     }
@@ -644,10 +645,10 @@ describe("certification stays read-only and changes no sync behaviour", () => {
 
   it("adds no offers, events, payment or asset path", () => {
     const code = codeOf(ADAPTER_SRC);
-    for (const absent of ["fetchProducts", "buildDeepLink", "fetchLinks"]) {
+    for (const absent of ["buildDeepLink", "fetchLinks"]) {
       assert.ok(!code.includes(absent), absent);
     }
-    for (const present of ["fetchOffers", "fetchConversions", "fetchPayments", "fetchCoupons"]) {
+    for (const present of ["fetchProducts", "fetchOffers", "fetchConversions", "fetchPayments", "fetchCoupons"]) {
       assert.ok(code.includes(present), present);
     }
   });

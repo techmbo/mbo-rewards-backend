@@ -272,12 +272,16 @@ const CATALOG = Object.freeze({
         "Read path only: fetchCoupons parses the couponfeed XML, but no canonical Coupon is persisted, no clickurl becomes a TrackingLink, and no sync job calls it. Rows have not yet been observed live.",
     }),
     obj({
+      // LIVE because a fetch now exists: fetchProducts reads GET /productsearch/1.0 and parses the
+      // documented <result>/<item> envelope. Implementation truth only — not a claim that this
+      // account has product rows, not an ingestion path, and NOT evidence of a bulk product feed.
       sourceObject: "products",
       label: "Products",
-      endpoint: "Product Search (XML)",
-      live: false,
+      endpoint: "GET /productsearch/1.0",
+      live: true,
       entityType: "product",
-      notes: "Rakuten Product Search is XML-only; no JSON shape is invented here.",
+      notes:
+        "Search read path only: fetchProducts parses the Product Search XML, but nothing is persisted from it, no linkurl becomes a tracking link, and no sync job calls it. A search surface is not a product feed. Rows have not yet been observed live, and whether Rakuten accepts an unfiltered search is not yet established.",
     }),
     obj({
       sourceObject: "links",

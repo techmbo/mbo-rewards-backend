@@ -551,6 +551,28 @@ const RAKUTEN_PROBES = Object.freeze({
     chain: "rakutenSample",
     dated: true,
   },
+  // Product Search: a SEARCH surface over partner-advertiser product data, XML, Bearer only.
+  //
+  // THREE BOUNDARIES. A row is not a canonical Product; its linkurl is not a usable tracking link;
+  // and a search endpoint answering is not evidence that a bulk PRODUCT FEED exists for this
+  // account. Certification reports the row's SHAPE and never a mid, merchant name, link id, SKU,
+  // product name, description, keyword, price, UPC or URL.
+  //
+  // NO FILTER IS SENT — max=1 and pagenumber=1 alone. Whether Rakuten accepts an unfiltered search
+  // is the one part of this contract the repo cannot establish: the documented capabilities list
+  // keyword, exact, one, none, cat and mid without saying one is required. Inventing a keyword or
+  // borrowing an advertiser mid from another endpoint's row would both be guesses; the bounds
+  // alone are the shape that assumes nothing, and a REQUEST_REJECTED answer captures the missing
+  // contract at a cost of one request.
+  //
+  // ZERO ROWS IS NOT AN ACCOUNT-STATE FINDING. Product Search searches PARTNER-advertisers, so an
+  // account with no joined campaigns having no products is the expected state — not evidence of an
+  // unsupported object, a missing partnership or a blocker.
+  products: {
+    method: "GET",
+    endpointKey: "GET /productsearch/1.0 (max=1, pagenumber=1, no filter)",
+    chain: "rakutenSample",
+  },
   // Advanced Reports, report 1 — the PAYMENT HISTORY SUMMARY, and the only one of the repo's five
   // report ids a single bounded request can reach. Reports 22 and 23 are not date-scoped: 22 needs
   // a payid and 23 an invoiceid, so production walks report 1 -> payment_id -> report 22 ->

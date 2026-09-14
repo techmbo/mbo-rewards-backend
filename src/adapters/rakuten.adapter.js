@@ -437,6 +437,140 @@ export function extractRakutenCsvSample(text, { maxRows = RAKUTEN_CERTIFICATION_
 }
 
 /**
+ * Rakuten's Product Search — a SEARCH surface over partner-advertiser product data.
+ *
+ * GET /productsearch/1.0, Bearer only, XML, returning a <result> envelope of <item> rows.
+ *
+ * Three boundaries this does not cross:
+ *   - PRODUCT_SEARCH_ROW != CANONICAL_PRODUCT. Nothing here writes Product, ProductSource,
+ *     ProductFeed or ProductFeedItem.
+ *   - PRODUCT_LINK_DISCOVERABLE != TRACKING_LINK_USABLE. linkurl is discovered, never promoted.
+ *   - PRODUCT_AVAILABLE != PRODUCT_FEED_AVAILABLE. A search endpoint answering is not evidence
+ *     that a bulk product feed exists for this account.
+ *
+ * ONE PART OF THE CONTRACT IS NOT ESTABLISHED: whether Rakuten accepts a search with NO filter —
+ * no keyword, exact, one, none, cat or mid — and only the bounds below. The documented query
+ * capabilities list those filters without stating that one is required, and this repo has never
+ * made the call. The probe therefore sends the bounds ALONE. That is the one shape that invents
+ * nothing: a keyword would be a search term nobody asked for, and a mid would point the probe at a
+ * particular advertiser taken from another endpoint's row. If Rakuten requires a filter, the
+ * bounded probe answers REQUEST_REJECTED and the supplier's own message captures the contract at a
+ * cost of one request.
+ */
+export const RAKUTEN_PRODUCT_SEARCH_PATH = "/productsearch/1.0";
+
+/** The documented bounds, and the whole certification request. */
+export const RAKUTEN_CERTIFICATION_PRODUCT_PARAMS = Object.freeze({ max: 1, pagenumber: 1 });
+
+/**
+ * The documented query capabilities, as an ALLOWLIST for the general read method.
+ *
+ * A caller cannot reach a parameter this list does not name. Certification never supplies any of
+ * the filters — it sends max and pagenumber only.
+ */
+export const RAKUTEN_PRODUCT_SEARCH_PARAMS = Object.freeze([
+  "keyword",
+  "exact",
+  "one",
+  "none",
+  "cat",
+  "language",
+  "max",
+  "pagenumber",
+  "mid",
+  "sort",
+  "sorttype",
+]);
+
+/** Documented scalar fields of one <item>. All optional: a row missing any of them is a row. */
+const RAKUTEN_PRODUCT_FIELDS = Object.freeze([
+  "mid",
+  "merchantname",
+  "linkid",
+  "createdon",
+  "sku",
+  "productname",
+  "upccode",
+  "keywords",
+  "linkurl",
+  "imageurl",
+]);
+
+/** The documented NESTED containers, as [container, children]. Read as nested objects because
+ *  that is their shape: flattening category into one string would lose which level a value came
+ *  from, and reading the container as text would concatenate its children. */
+const RAKUTEN_PRODUCT_NESTED_FIELDS = Object.freeze([
+  Object.freeze(["category", Object.freeze(["primary", "secondary"])]),
+  Object.freeze(["description", Object.freeze(["short", "long"])]),
+]);
+
+/** The documented ATTRIBUTE-CARRYING money elements: <price currency="USD">…</price>. The currency
+ *  lives on the element, not beside it, so a reader seeing only inner content would report an
+ *  amount with no idea what it is denominated in. */
+const RAKUTEN_PRODUCT_MONEY_FIELDS = Object.freeze(["price", "saleprice"]);
+
+/**
+ * Rows out of a Product Search response.
+ *
+ * <item> is the ROW element; <result> is the envelope around it, carrying TotalMatches, TotalPages
+ * and PageNumber. Reading the envelope as a row would certify page counters flattened together
+ * with every row's fields — so rows are only ever read from INSIDE <result>, and a response
+ * without that envelope yields no rows rather than one wrong one.
+ *
+ * A row here is a DISCOVERED PRODUCT RECORD and nothing more. It is not a canonical Product, its
+ * linkurl is not a usable tracking link, and its existence says nothing about whether a bulk
+ * product feed exists.
+ */
+export function extractRakutenProducts(xml) {
+  const result = tagBlocks(xml, "result")[0] ?? "";
+  return tagBlocks(result, "item").map((block) => {
+    const row = {};
+    for (const field of RAKUTEN_PRODUCT_FIELDS) row[field] = tagText(block, field);
+
+    for (const [container, children] of RAKUTEN_PRODUCT_NESTED_FIELDS) {
+      const inner = tagBlocks(block, container)[0];
+      row[container] =
+        inner === undefined
+          ? null
+          : Object.fromEntries(children.map((child) => [child, tagText(inner, child)]));
+    }
+
+    for (const field of RAKUTEN_PRODUCT_MONEY_FIELDS) {
+      const [money] = tagBlocksWithAttributes(block, field);
+      if (!money) {
+        row[field] = null;
+        continue;
+      }
+      const amount = decodeXml(money.content).trim();
+      row[field] = {
+        currency: money.attributes.currency ?? null,
+        amount: amount === "" || amount.toLowerCase() === "null" ? null : amount,
+      };
+    }
+
+    return row;
+  });
+}
+
+/**
+ * The two documented bounds, plus whatever documented filters a caller names — and nothing else.
+ *
+ * An ALLOWLIST rather than a passthrough: a key this list does not name never reaches the
+ * supplier. max and pagenumber default to the certification bounds so an unqualified call stays
+ * one small page rather than becoming an unbounded search.
+ */
+export function buildRakutenProductSearchParams(params = {}) {
+  const out = {};
+  for (const key of RAKUTEN_PRODUCT_SEARCH_PARAMS) {
+    const value = params?.[key];
+    if (value !== undefined && value !== null && value !== "") out[key] = value;
+  }
+  out.max = finitePositive(out.max, RAKUTEN_CERTIFICATION_PRODUCT_PARAMS.max);
+  out.pagenumber = finitePositive(out.pagenumber, RAKUTEN_CERTIFICATION_PRODUCT_PARAMS.pagenumber);
+  return out;
+}
+
+/**
  * Every Rakuten source object certification can sample, and the one path each uses.
  *
  * A frozen registry rather than a path argument: there is no call shape through which a caller
@@ -561,6 +695,21 @@ export const RAKUTEN_CERTIFICATION_SPECS = Object.freeze({
   //
   // reportid is carried by the SPEC, not by the parameter builder, so a caller cannot reach report
   // 22 or 23 — neither of which is date-scoped, and neither of which this phase touches.
+  // The third XML object. Its bounds are its own documented pair (max, pagenumber), so ownBounds
+  // suppresses the limit/page pair the JSON objects share — sending an endpoint two parameters it
+  // never published is what the Awin coupons 500 punished.
+  //
+  // NO FILTER IS SENT. keyword, exact, one, none, cat and mid are all documented, and none is
+  // invented here: a keyword would be a search term nobody asked for, and a mid would point the
+  // probe at one advertiser taken from another endpoint's row.
+  products: Object.freeze({
+    method: "GET",
+    path: RAKUTEN_PRODUCT_SEARCH_PATH,
+    ownBounds: true,
+    params: RAKUTEN_CERTIFICATION_PRODUCT_PARAMS,
+    xml: true,
+    extract: extractRakutenProducts,
+  }),
   advanced_reports: Object.freeze({
     method: "GET",
     path: RAKUTEN_ADVANCED_REPORTS_PATH,
@@ -890,7 +1039,8 @@ export function createRakutenAdapter({
           "Events are recent directional transaction-component evidence, not the historical/expected-commission ledger.",
           "Advanced Reports payment history is network payment evidence only; Advertiser Payment Date is not MBO receipt evidence.",
           "Coupon API has a bounded XML read path (fetchCoupons, GET /coupon/1.0) but no ingestion: no canonical Coupon is written and no sync job calls it, so COUPONS is not declared as a capability.",
-          "Product Search and Link Locator are XML surfaces and remain gated until the XML ingestion layer is wired.",
+          "Product Search has a bounded XML read path (fetchProducts, GET /productsearch/1.0) but no ingestion: nothing is persisted from it and no sync job calls it, so PRODUCTS is not declared as a capability. A search surface is also not evidence that a bulk product feed exists for this account.",
+          "Link Locator is an XML surface and remains gated until the XML ingestion layer is wired.",
         ],
       };
     },
@@ -1061,6 +1211,27 @@ export function createRakutenAdapter({
         responseType: "text",
       });
       return extractRakutenCouponLinks(String(response?.data ?? ""));
+    },
+
+    /**
+     * ONE bounded Product Search read.
+     *
+     * One supplier request, no retry, no pagination loop: this deliberately does not use getJson,
+     * whose requestWithRetry would turn a single read into up to four. A caller that wants the
+     * next page asks for it by pagenumber; nothing here walks pages on its own.
+     *
+     * Returns parsed rows and nothing more. Nothing is persisted, no linkurl becomes a tracking
+     * link, and no sync job calls this — Product Search has a read path, not an ingestion path,
+     * and it is not a product feed.
+     */
+    async fetchProducts(params = {}, stats = null) {
+      if (stats) stats.requestCount = (stats.requestCount || 0) + 1;
+      const response = await httpClient.get(RAKUTEN_PRODUCT_SEARCH_PATH, {
+        params: buildRakutenProductSearchParams(params),
+        headers: { Accept: "application/xml,text/xml" },
+        responseType: "text",
+      });
+      return extractRakutenProducts(String(response?.data ?? ""));
     },
 
     async fetchPartnerships(params = {}, stats = null) {

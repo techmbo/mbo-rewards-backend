@@ -164,11 +164,12 @@ describe("Rakuten is registered in the certification framework", () => {
       "links",
       "offers",
       "partnerships",
+      "products",
     ]);
   });
 
   it("adds no probe for the objects this phase defers", () => {
-    for (const notYet of ["payments", "products"]) {
+    for (const notYet of ["payments"]) {
       assert.ok(!listProbeSourceObjects("rakuten").includes(notYet), notYet);
       assert.ok(!Object.hasOwn(RAKUTEN_CERTIFICATION_SPECS, notYet), notYet);
     }
@@ -198,8 +199,8 @@ describe("Rakuten is registered in the certification framework", () => {
     for (const untouched of ["partnerships", "offers", "commissioning_lists", "events"]) {
       assert.equal(getSourceObject("rakuten", untouched)?.live, true, untouched);
     }
-    // coupons left this list when a real fetch was built for it. products and links have none.
-    for (const gated of ["products", "links"]) {
+    // coupons and products left this list when real fetches were built for them. links has none.
+    for (const gated of ["links"]) {
       assert.equal(getSourceObject("rakuten", gated)?.live, false, gated);
     }
   });
@@ -310,8 +311,8 @@ describe("the request table is the only thing that chooses a path", () => {
   it("refuses a source object it does not name, saying so", async () => {
     const spy = spyHttp();
     await assert.rejects(
-      () => adapterWith(spy).fetchCertificationSample("products", {}),
-      (error) => /No Rakuten certification sample is defined for "products"/.test(error.message),
+      () => adapterWith(spy).fetchCertificationSample("payments", {}),
+      (error) => /No Rakuten certification sample is defined for "payments"/.test(error.message),
     );
     assert.equal(spy.calls.length, 0);
   });
@@ -637,7 +638,7 @@ describe("credentials match production semantics", () => {
   it("rejects a source object that has no probe", async () => {
     const service = serviceWith(adapterWith(spyHttp()));
     await assert.rejects(
-      () => service.certify("rakuten", { sourceObjects: ["products"] }),
+      () => service.certify("rakuten", { sourceObjects: ["payments"] }),
       (error) => Number(error?.statusCode ?? error?.status) === 400,
     );
   });
@@ -685,7 +686,10 @@ describe("certification stays read-only and changes no sync behaviour", () => {
 
   it("adds no deeplink or product path to the adapter", () => {
     const code = codeOf(ADAPTER_SRC);
-    for (const absent of ["fetchProducts", "buildDeepLink", "fetchLinks"]) {
+    // fetchProducts was built later, as a bounded search read. What must stay absent is product
+    // INGESTION and anything that would make it look like a feed.
+    assert.ok(code.includes("fetchProducts"));
+    for (const absent of ["buildDeepLink", "fetchLinks", "ProductFeed", "ProductFeedItem", "ProductSource"]) {
       assert.ok(!code.includes(absent), absent);
     }
     // fetchCoupons was built later, as a bounded read. What must stay absent is its INGESTION.

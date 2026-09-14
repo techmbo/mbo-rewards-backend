@@ -262,10 +262,10 @@ describe("the documented Coupon API request contract", () => {
   });
 
   it("declares bounds of its own, as only the endpoints that publish their own do", () => {
-    // events joined later: its limit/page pair arrives inside production's own parameter builder,
-    // so spreading the shared pair alongside would bypass that normalisation. Nothing else.
+    // events, products and advanced_reports joined later, each publishing its own bounds. Nothing
+    // else: every remaining object shares authenticate()'s limit/page pair.
     for (const [name, spec] of Object.entries(RAKUTEN_CERTIFICATION_SPECS)) {
-      if (name === "coupons" || name === "events") continue;
+      if (["coupons", "events", "products", "advanced_reports"].includes(name)) continue;
       assert.ok(!spec.ownBounds, `${name} must keep the shared bounds`);
     }
     assert.equal(RAKUTEN_CERTIFICATION_SPECS.coupons.ownBounds, true);
@@ -811,10 +811,12 @@ describe("read-only, and nothing beyond a bounded read is implemented", () => {
 
   it("adds no coupon persistence, product search or deep link", () => {
     const code = codeOf(ADAPTER_SRC);
+    // Product Search became a real read later. What must stay absent from the COUPON path is any
+    // product persistence, and from the adapter any feed surface.
+    assert.ok(code.includes("fetchProducts"));
     for (const absent of [
-      "fetchProducts",
-      "productsearch",
-      "ProductSearch",
+      "ProductFeed",
+      "ProductFeedItem",
       "persistCoupon",
       "saveCoupon",
       "assignClient",
@@ -858,7 +860,7 @@ describe("catalog truth", () => {
   it("leaves the still-gated XML objects alone", () => {
     // Network support is not implementation support: Product Search and Link Locator have no
     // general read method, so neither is upgraded by this phase.
-    for (const stillDeclared of ["products", "links"]) {
+    for (const stillDeclared of ["links"]) {
       assert.equal(getSourceObject("rakuten", stillDeclared).live, false, stillDeclared);
     }
   });

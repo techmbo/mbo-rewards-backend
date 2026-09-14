@@ -77,10 +77,11 @@ describe("source object catalog", () => {
     assert.equal(getSourceObject("rakuten", "events")?.live, true);
     assert.equal(getSourceObject("admitad", "product_feeds")?.live, false);
     assert.equal(getSourceObject("cj", "products")?.live, false);
-    // Rakuten coupons became live when fetchCoupons was built against GET /coupon/1.0. Product
-    // Search still has no fetch of any kind, so it is the Rakuten object that stays declared.
+    // Rakuten coupons and products became live when fetchCoupons and fetchProducts were built.
+    // Link Locator still has no general read method, so links is the object that stays declared.
     assert.equal(getSourceObject("rakuten", "coupons")?.live, true);
-    assert.equal(getSourceObject("rakuten", "products")?.live, false);
+    assert.equal(getSourceObject("rakuten", "products")?.live, true);
+    assert.equal(getSourceObject("rakuten", "links")?.live, false);
     assert.equal(getSourceObject("optimise", "campaigns")?.live, true);
     assert.equal(getSourceObject("boostiny", "settlement")?.live, false);
   });

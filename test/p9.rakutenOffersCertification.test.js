@@ -173,6 +173,7 @@ describe("offers is registered as a Rakuten source object", () => {
       "links",
       "offers",
       "partnerships",
+      "products",
     ]);
   });
 
@@ -211,7 +212,7 @@ describe("offers is registered as a Rakuten source object", () => {
   });
 
   it("adds no probe for the objects this phase still defers", () => {
-    for (const notYet of ["payments", "products"]) {
+    for (const notYet of ["payments"]) {
       assert.ok(!listProbeSourceObjects("rakuten").includes(notYet), notYet);
       assert.ok(!Object.hasOwn(RAKUTEN_CERTIFICATION_SPECS, notYet), notYet);
     }
@@ -313,10 +314,11 @@ describe("the offers request is bounded and evidenced", () => {
     // coupons also carries params, but they are its own documented BOUNDS (resultsperpage,
     // pagenumber) rather than a filter narrowing what the supplier returns. Nothing else has any.
     for (const [name, spec] of Object.entries(RAKUTEN_CERTIFICATION_SPECS)) {
-      if (name === "offers" || name === "coupons") continue;
+      if (name === "offers" || name === "coupons" || name === "products") continue;
       assert.equal(spec.params, undefined, name);
     }
     assert.ok(!RAKUTEN_CERTIFICATION_SPECS.offers.ownBounds, "offers keeps the shared bounds");
+    assert.equal(RAKUTEN_CERTIFICATION_SPECS.products.ownBounds, true);
     assert.equal(RAKUTEN_CERTIFICATION_SPECS.coupons.ownBounds, true);
     assert.deepEqual({ ...RAKUTEN_CERTIFICATION_SPECS.coupons.params }, {
       resultsperpage: 1,
@@ -676,7 +678,7 @@ describe("certification stays read-only and changes no sync behaviour", () => {
 
   it("adds no events, payment, coupon, deeplink or product path", () => {
     const code = codeOf(ADAPTER_SRC);
-    for (const absent of ["fetchProducts", "buildDeepLink", "fetchLinks"]) {
+    for (const absent of ["buildDeepLink", "fetchLinks"]) {
       assert.ok(!code.includes(absent), absent);
     }
     for (const present of ["fetchConversions", "fetchPayments", "fetchAdvancedReport", "fetchCoupons"]) {
