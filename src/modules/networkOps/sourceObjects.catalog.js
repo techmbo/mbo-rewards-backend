@@ -120,6 +120,24 @@ const CATALOG = Object.freeze({
         "endpoint is evidenced anywhere in the integration, and no Partnerize invoice endpoint " +
         "exists. Schema is UNKNOWN_NO_ACCESSIBLE_SOURCE — not merely empty.",
     }),
+    // MAPPING_ONLY, and deliberately distinct from payment_information's UNAVAILABLE: there the
+    // adapter builds and calls a path and the supplier refuses it. Here there is no path at all.
+    // A products mapping file is not supplier capability, and this entry exists so the mapping
+    // cannot be mistaken for one.
+    obj({
+      sourceObject: "products",
+      label: "Products",
+      endpoint: "none — no product endpoint exists in this integration",
+      live: false,
+      availability: SOURCE_OBJECT_AVAILABILITY.NO_ENDPOINT,
+      entityType: "product",
+      notes:
+        "Mapping file src/network-mappings/partnerize/products.mapping.json exists, but no fetch " +
+        "endpoint or fetcher is implemented or evidenced. The adapter builds no product, feed, " +
+        "catalog or item path, has no fetchProducts, and no feed URL, campaign-scoped product " +
+        "path or separate API generation is evidenced. Not certifiable without inventing an " +
+        "endpoint: UNKNOWN_NEEDS_LIVE_VERIFICATION.",
+    }),
   ]),
   awin: Object.freeze([
     obj({ sourceObject: "programmes", label: "Programmes", endpoint: "GET programmes", live: true, entityType: "campaign" }),

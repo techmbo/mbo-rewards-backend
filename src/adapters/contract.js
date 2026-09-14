@@ -53,6 +53,27 @@ export const SUPPLIER_CAPABILITIES = Object.freeze({
  * Assert adapter exposes required methods for declared capabilities.
  * @param {NetworkAdapter} adapter
  */
+/**
+ * The capability → adapter method contract, in ONE place.
+ *
+ * A capability listed here is a claim that the named method exists and can be called. Capabilities
+ * absent from this map are descriptive (DEEP_LINK, TRACKING_SUBID, MULTI_CURRENCY, ORDER_ITEMS,
+ * VALIDATION_STATUS, INVOICES, REPORTING) — they describe how an implemented fetcher behaves
+ * rather than naming a fetcher of their own, so they carry no method requirement.
+ *
+ * assertAdapterContract checks an adapter against its OWN getCapabilities(). That never saw the
+ * registry's SUPPLIER_CAPABILITY_CATALOG, which is a second, independent declaration — and the two
+ * silently disagreed. Exported so the registry catalog can be held to the same rule.
+ */
+export const CAPABILITY_METHODS = Object.freeze({
+  [SUPPLIER_CAPABILITIES.CAMPAIGNS]: "fetchCampaigns",
+  [SUPPLIER_CAPABILITIES.COUPONS]: "fetchCoupons",
+  [SUPPLIER_CAPABILITIES.CONVERSIONS]: "fetchConversions",
+  [SUPPLIER_CAPABILITIES.PAYMENTS]: "fetchPayments",
+  [SUPPLIER_CAPABILITIES.PRODUCTS]: "fetchProducts",
+  [SUPPLIER_CAPABILITIES.ADS]: "fetchAds",
+});
+
 export function assertAdapterContract(adapter) {
   if (!adapter || typeof adapter !== "object") {
     throw new Error("Adapter must be an object");
@@ -64,16 +85,8 @@ export function assertAdapterContract(adapter) {
     throw new Error(`${adapter.supplierKey}: getCapabilities() required`);
   }
   const caps = adapter.getCapabilities()?.capabilities ?? [];
-  const required = {
-    [SUPPLIER_CAPABILITIES.CAMPAIGNS]: "fetchCampaigns",
-    [SUPPLIER_CAPABILITIES.COUPONS]: "fetchCoupons",
-    [SUPPLIER_CAPABILITIES.CONVERSIONS]: "fetchConversions",
-    [SUPPLIER_CAPABILITIES.PAYMENTS]: "fetchPayments",
-    [SUPPLIER_CAPABILITIES.PRODUCTS]: "fetchProducts",
-    [SUPPLIER_CAPABILITIES.ADS]: "fetchAds",
-  };
   for (const cap of caps) {
-    const method = required[cap];
+    const method = CAPABILITY_METHODS[cap];
     if (method && typeof adapter[method] !== "function") {
       throw new Error(`${adapter.supplierKey}: capability ${cap} requires ${method}()`);
     }

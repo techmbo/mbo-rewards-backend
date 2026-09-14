@@ -42,9 +42,13 @@ export const SUPPLIER_CAPABILITY_CATALOG = Object.freeze({
   },
   PARTNERIZE: {
     implementationStatus: "IMPLEMENTED",
-    capabilities: [SUPPLIER_CAPABILITIES.CAMPAIGNS, SUPPLIER_CAPABILITIES.COUPONS, SUPPLIER_CAPABILITIES.CONVERSIONS, SUPPLIER_CAPABILITIES.PAYMENTS, SUPPLIER_CAPABILITIES.TRACKING_SUBID, SUPPLIER_CAPABILITIES.PRODUCTS, SUPPLIER_CAPABILITIES.REPORTING],
+    // PRODUCTS is deliberately absent. A products mapping file exists, but the adapter builds no
+    // product, feed, catalog or item path and has no fetchProducts — so declaring the capability
+    // claimed an ingest that cannot run. The adapter's own getCapabilities() always omitted it;
+    // this entry was the one place that disagreed.
+    capabilities: [SUPPLIER_CAPABILITIES.CAMPAIGNS, SUPPLIER_CAPABILITIES.COUPONS, SUPPLIER_CAPABILITIES.CONVERSIONS, SUPPLIER_CAPABILITIES.PAYMENTS, SUPPLIER_CAPABILITIES.TRACKING_SUBID, SUPPLIER_CAPABILITIES.REPORTING],
     pagination: "page",
-    notes: ["v15 12F: adref/pubref/clickref CONFIRMED for injection.", "v15 11B: Partnerize product feed Yes/High — ProductFeed ingest supported.", "Coupons via publisher campaign voucher endpoint.", "Performance Facts derived from conversions (no dedicated clicks report).", "PARTNERIZE_PRODUCTION_ECHO_UNVERIFIED until live conversion sample captured."],
+    notes: ["v15 12F: adref/pubref/clickref CONFIRMED for injection.", "Products are MAPPING_ONLY: products.mapping.json exists, but no product feed endpoint, feed URL, campaign-scoped product path or fetcher is implemented or evidenced anywhere in this integration.", "Coupons via publisher campaign voucher endpoint.", "Performance Facts derived from conversions (no dedicated clicks report).", "PARTNERIZE_PRODUCTION_ECHO_UNVERIFIED until live conversion sample captured."],
   },
   IMPACT: {
     implementationStatus: "IMPLEMENTED",
