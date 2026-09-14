@@ -18,6 +18,7 @@ const {
   parseCsv,
   parseRakutenAdvancedReport,
   rakutenAdvancedReportDateParam,
+  RAKUTEN_ADVANCED_REPORT_NO_RESULT_BODIES,
   RAKUTEN_ADVANCED_REPORTS_PATH,
   RAKUTEN_CERTIFICATION_MAX_ROWS,
   RAKUTEN_CERTIFICATION_SPECS,
@@ -565,10 +566,90 @@ describe("the three CSV outcomes are distinguished", () => {
     }
   });
 
+  it("treats the supplier's no-result sentinel as no data, not as a schema", async () => {
+    // Live evidence: report 1 answered 200 with the single line "No Results Found". A CSV reader
+    // cannot tell that from a one-column report whose header reads that way, and it was certified
+    // as a field named "No Results Found" with schema KNOWN_FROM_HEADERS — a false statement about
+    // the endpoint, because the columns are still unknown.
+    const spy = spyHttp("No Results Found");
+    const row = (await certifyReportOne(adapterWith(spy))).results[0];
+    assert.equal(spy.calls.length, 1, "the sentinel costs no extra request");
+    assert.equal(row.ok, true);
+    assert.equal(row.statusCategory, "OK_NO_ROWS");
+    assert.equal(row.schema, "UNKNOWN_NEEDS_LIVE_DATA");
+    assert.equal(row.sampleCount, 0);
+    assert.equal(row.fieldCount, 0);
+    assert.deepEqual(row.fieldPaths, []);
+    // The sentinel text itself never becomes a reported field.
+    assert.ok(!JSON.stringify(row).includes("No Results Found"));
+  });
+
+  it("accepts the sentinel with a trailing newline or surrounding whitespace", async () => {
+    for (const body of ["No Results Found\n", "No Results Found\r\n", "  No Results Found  \n"]) {
+      const row = (await certifyReportOne(adapterWith(spyHttp(body)))).results[0];
+      assert.equal(row.schema, "UNKNOWN_NEEDS_LIVE_DATA", JSON.stringify(body));
+      assert.equal(row.fieldCount, 0, JSON.stringify(body));
+      assert.deepEqual(row.fieldPaths, [], JSON.stringify(body));
+    }
+  });
+
+  it("normalises only casing and whitespace, and knows exactly one sentinel", () => {
+    assert.deepEqual([...RAKUTEN_ADVANCED_REPORT_NO_RESULT_BODIES], ["no results found"]);
+    assert.ok(Object.isFrozen(RAKUTEN_ADVANCED_REPORT_NO_RESULT_BODIES));
+    for (const casing of ["NO RESULTS FOUND", "no results found", "No Results Found"]) {
+      assert.deepEqual(extractRakutenCsvSample(casing), { headers: [], rows: [] }, casing);
+    }
+    // No other wording is guessed at, because no other wording has been observed.
+    for (const notObserved of ["No Data Found", "No Results", "Empty", "0 results"]) {
+      assert.deepEqual(extractRakutenCsvSample(notObserved).headers, [notObserved], notObserved);
+    }
+    // The match is the WHOLE cell, not a substring of it: a column merely containing this wording
+    // is a column, and swallowing it would discard a real schema.
+    for (const containing of ["No Results Found For This Window", "Reason: No Results Found"]) {
+      assert.deepEqual(extractRakutenCsvSample(containing).headers, [containing], containing);
+    }
+  });
+
+  it("does NOT mistake a real one-column header for the sentinel", async () => {
+    const row = (await certifyReportOne(adapterWith(spyHttp("Payment ID\n")))).results[0];
+    assert.equal(row.statusCategory, "OK_NO_ROWS");
+    assert.equal(row.schema, "KNOWN_FROM_HEADERS");
+    assert.equal(row.fieldCount, 1);
+    assert.deepEqual(row.fieldPaths.map((f) => f.path), ["Payment ID"]);
+  });
+
+  it("only fires when the sentinel is the WHOLE body", () => {
+    // A column that happens to carry this name, alongside others, is still a column — in either
+    // position. Matching on the first cell alone would swallow a whole multi-column header.
+    assert.deepEqual(extractRakutenCsvSample("Payment ID,No Results Found\n").headers, [
+      "Payment ID",
+      "No Results Found",
+    ]);
+    assert.deepEqual(extractRakutenCsvSample("No Results Found,Payment ID\n").headers, [
+      "No Results Found",
+      "Payment ID",
+    ]);
+    // And a single column with a data row under it is a report, not a sentinel.
+    const withRow = extractRakutenCsvSample("No Results Found\nzzrowvaluezz");
+    assert.deepEqual(withRow.headers, ["No Results Found"]);
+    assert.equal(withRow.rows.length, 1);
+  });
+
+  it("leaves the generic CSV parser and the production parser untouched", () => {
+    // parseCsv knows nothing about sentinels; this is Advanced Reports' contract, not a CSV rule.
+    assert.deepEqual(parseCsv("No Results Found"), [["No Results Found"]]);
+    const certification = codeOf(ADAPTER_SRC)
+      .split("export function parseCsv")[1]
+      .split("\n}")[0];
+    assert.ok(!certification.toLowerCase().includes("no results"));
+    // And production's own parser already yielded zero rows for this body.
+    assert.deepEqual(parseRakutenAdvancedReport("No Results Found", 1), []);
+  });
+
   it("invents no account-state blocker from an empty report", async () => {
     // This account has no joined campaigns, so having no payments is the expected state — not a
     // finding about the endpoint.
-    for (const body of [HEADER_ONLY_CSV, ""]) {
+    for (const body of [HEADER_ONLY_CSV, "", "No Results Found"]) {
       const serialised = JSON.stringify(await certifyReportOne(adapterWith(spyHttp(body))));
       for (const invented of [
         "NEEDS_ACTIVE_PARTNERSHIP",

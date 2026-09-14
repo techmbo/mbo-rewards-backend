@@ -386,6 +386,28 @@ export function buildRakutenCertificationPaymentHistoryParams(window = {}) {
 }
 
 /**
+ * Bodies Rakuten returns INSTEAD of a report when the requested window holds nothing.
+ *
+ * Live evidence: report 1 answered 200 with the single line "No Results Found". A CSV reader has
+ * no way to tell that apart from a one-column report whose header happens to read that way, so it
+ * was certified as a schema — one field named "No Results Found", KNOWN_FROM_HEADERS. That is a
+ * false statement about the endpoint: the columns are still unknown.
+ *
+ * Deliberately ONE entry, and recognised only when it is the WHOLE body — a single row of a single
+ * cell. A real one-column report keeps its header, and a report that merely contains a column with
+ * this name keeps every column. Casing and surrounding whitespace are normalised because those are
+ * presentation; no other wording is guessed at, because no other wording has been observed.
+ */
+export const RAKUTEN_ADVANCED_REPORT_NO_RESULT_BODIES = Object.freeze(["no results found"]);
+
+/** Whether a parsed table is a no-result sentinel rather than a report. */
+function isRakutenNoResultBody(table) {
+  if (table.length !== 1 || table[0].length !== 1) return false;
+  const only = String(table[0][0] ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+  return RAKUTEN_ADVANCED_REPORT_NO_RESULT_BODIES.includes(only);
+}
+
+/**
  * The exact supplier header row, and at most one data row keyed by those headers.
  *
  * Headers are used VERBATIM — not trimmed, not lower-cased, not mapped. Production's rowObject
@@ -399,7 +421,10 @@ export function buildRakutenCertificationPaymentHistoryParams(window = {}) {
  */
 export function extractRakutenCsvSample(text, { maxRows = RAKUTEN_CERTIFICATION_MAX_ROWS } = {}) {
   const table = parseCsv(text);
-  if (!table.length) return { headers: [], rows: [] };
+  // Nothing at all, and the supplier's own "nothing" sentinel, are the same outcome: no columns
+  // were reported, so the schema stays unknown. parseCsv itself is untouched — this is Advanced
+  // Reports' contract, not a rule about CSV.
+  if (!table.length || isRakutenNoResultBody(table)) return { headers: [], rows: [] };
   const headers = table[0].map((header) => String(header ?? ""));
   const rows = table.slice(1, 1 + Math.max(0, maxRows)).map((values) => {
     const row = {};
