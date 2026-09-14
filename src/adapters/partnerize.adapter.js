@@ -36,6 +36,23 @@ function extractRows(data) {
   return [];
 }
 
+/**
+ * Whether the envelope carried a collection extractRows recognises — even an EMPTY one.
+ *
+ * The distinction matters for certification. extractRows returns [] both when it recognised a
+ * collection that happens to be empty and when it recognised nothing at all, and sampleOnce
+ * accommodates a non-list endpoint (/user) by reporting the whole object as its single row. Without
+ * this check, `{ "conversions": [] }` — a real supplier answer meaning "no rows in this window" —
+ * would be reported as ONE row whose fields are the envelope's, certifying a schema that does not
+ * exist. An empty recognised collection is zero rows.
+ */
+export function hasRecognisedCollection(data) {
+  if (Array.isArray(data)) return true;
+  if (!data || typeof data !== "object") return false;
+  return ["data", "advertisers", "campaigns", "conversions", "payments", "publishers", "results"]
+    .some((key) => Array.isArray(data[key]));
+}
+
 export function partnerizeCampaignListPaths(publisherId, statuses = ["a", "p"]) {
   const id = encodeURIComponent(String(publisherId));
   return statuses.map((status) => `/user/publisher/${id}/campaign/${status}`);
@@ -269,6 +286,25 @@ const PARTNERIZE_CERTIFICATION_SAMPLES = Object.freeze({
   //
   // Both identifiers come from the adapter's own configuration. Neither is discovered with a
   // request — that would be a second call — and neither can be supplied by a caller.
+  // Evidenced: fetchConversions builds exactly this path and sends start_date/end_date. It is the
+  // PUBLISHER-SCOPED reporting endpoint, and it is the only conversions path certification uses.
+  //
+  // The adapter also has a non-publisher-scoped fallback, /v3/partner/conversions, reached through
+  // fetchPaginated — a PAGINATION LOOP. Certification never touches it: one request means one
+  // request, and a fallback after a failure would make two.
+  //
+  // Parameters are exactly the two dates and nothing else. Production's fetchConversions spreads
+  // the caller's `...params` into the query; certification deliberately does not, so no caller can
+  // add a filter, a page or an identifier. Both dates are computed by the service from a frozen
+  // window preset and arrive as `resolved.window` — never as a caller-supplied date.
+  conversions: {
+    method: "GET",
+    needs: ["publisherId", "window"],
+    path: (resolved) =>
+      `/reporting/report_publisher/publisher/${encodeURIComponent(resolved.publisherId)}/conversion.json`,
+    params: (resolved) => ({ start_date: resolved.window.from, end_date: resolved.window.to }),
+  },
+
   vouchers: {
     method: "GET",
     needs: ["publisherId", "campaignId"],
@@ -429,8 +465,14 @@ export function createPartnerizeAdapter({
     });
 
     const rows = extractRows(response?.data);
-    // A non-list endpoint (/user) returns an object; report it as the single row it is.
-    if (!rows.length && response?.data && typeof response.data === "object") {
+    // A non-list endpoint (/user) returns an object; report it as the single row it is. An empty
+    // but RECOGNISED collection is zero rows, not one envelope row — see hasRecognisedCollection.
+    if (
+      !rows.length &&
+      response?.data &&
+      typeof response.data === "object" &&
+      !hasRecognisedCollection(response.data)
+    ) {
       return [response.data];
     }
     // One row unless a caller asks for a bounded scan. The bound is on ROWS HELD IN MEMORY from
@@ -464,7 +506,10 @@ export function createPartnerizeAdapter({
     async fetchCertificationSample(sourceObject, ctx = {}) {
       // The publisher id is the adapter's own, resolved at construction from credentials or env.
       // It is never taken from ctx, so a caller cannot point the probe at another publisher.
-      return sampleOnce(sourceObject, { publisherId }, ctx);
+      // The window is computed by the certification service from a frozen preset (7d/30d/90d).
+      // It is passed as an adapter-resolved value alongside the publisher id so a dated sample
+      // declares it in `needs` and fails loudly rather than sending undefined dates.
+      return sampleOnce(sourceObject, { publisherId, window: ctx.window }, ctx);
     },
 
     /**

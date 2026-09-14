@@ -131,6 +131,7 @@ describe("partnerize commission structure — no invented endpoint", () => {
       "publishers",
       "campaigns",
       "vouchers",
+      "conversions",
       "commission_structure",
     ]);
     assert.ok(!listProbeSourceObjects("optimise").includes("commission_structure"));

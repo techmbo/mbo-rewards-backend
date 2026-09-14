@@ -57,6 +57,7 @@ describe("Partnerize certification — registry and bounds", () => {
       "publishers",
       "campaigns",
       "vouchers",
+      "conversions",
       "commission_structure",
     ]);
     // The adapter has one SAMPLE per supplier request. commission_structure has none: it is derived
@@ -65,6 +66,7 @@ describe("Partnerize certification — registry and bounds", () => {
       "authenticate",
       "publishers",
       "campaigns",
+      "conversions",
       "vouchers",
     ]);
   });
@@ -80,7 +82,8 @@ describe("Partnerize certification — registry and bounds", () => {
       }),
     });
     // vouchers moved out of this list once fetchCoupons evidenced its contract; the rest stay.
-    for (const unknown of ["conversions", "payments", "products", "offers", "clicks", "invoices"]) {
+    // "conversions" is now a certified source object and dispatches; it belongs in test 1.
+    for (const unknown of ["payments", "products", "offers", "clicks", "invoices"]) {
       await assert.rejects(
         () => service.certify("partnerize", { sourceObjects: [unknown] }),
         /unknown source objects/i,
@@ -92,7 +95,8 @@ describe("Partnerize certification — registry and bounds", () => {
   it("2b — the objects deliberately left out are absent from the executable registry", () => {
     const listed = listProbeSourceObjects("partnerize");
     for (const excluded of [
-      "conversions",
+      // "conversions" is now executable: GET /reporting/report_publisher/publisher/{id}/conversion.json
+      // is evidenced by fetchConversions' first call. Its paginated fallback stays out.
       "payments",
       // "vouchers" is now executable: GET /user/publisher/{id}/campaign/{id}/voucher is evidenced
       // by fetchCoupons. "coupons" stays out — it is not a Partnerize endpoint name.
@@ -118,7 +122,11 @@ describe("Partnerize certification — registry and bounds", () => {
     // rather than declaring a third, which is what keeps it free of a supplier request.
     assert.deepEqual(
       [...new Set(block.match(/chain: "[^"]+"/g) || [])].sort(),
-      ['chain: "partnerizeCampaigns"', 'chain: "partnerizeVouchers"'],
+      [
+        'chain: "partnerizeCampaigns"',
+        'chain: "partnerizeConversions"',
+        'chain: "partnerizeVouchers"',
+      ],
       "an undeclared chain was added",
     );
     assert.equal(
@@ -184,7 +192,12 @@ describe("Partnerize certification — the request the sampler actually makes", 
     assert.match(table, /path: \(resolved\) =>/, "the path argument is resolved values, not caller ctx");
     assert.match(partnerizeSource, /const PARTNERIZE_SINGLE_ROW = \{ limit: 1, offset: 0 \}/);
     // Only GET is ever declared.
-    assert.equal((table.match(/method: "GET"/g) || []).length, 4);
+    assert.equal((table.match(/method: "GET"/g) || []).length, 5);
+    // The conversions entry sends exactly the two service-computed dates and nothing else.
+    assert.match(
+      table,
+      /params: \(resolved\) => \(\{ start_date: resolved\.window\.from, end_date: resolved\.window\.to \}\)/,
+    );
     // The voucher entry sends no query parameters, matching fetchCoupons' get(path, {}).
     assert.match(table, /campaign\/\$\{encodeURIComponent\(resolved\.campaignId\)\}\/voucher`,\n\s*params: \(\) => \(\{\}\),/);
     assert.ok(!table.includes('method: "POST"'));
@@ -387,8 +400,14 @@ describe("Partnerize certification — the request the sampler actually makes", 
 
   it("14b — resolved values never come from ctx", () => {
     // The public entry point hands the closure's id in; the chain hands one it read itself.
-    assert.match(partnerizeSource, /return sampleOnce\(sourceObject, \{ publisherId \}, ctx\)/);
+    // The window is service-computed from a frozen preset, so it may be read from ctx. No
+    // IDENTIFIER may be: the publisher id is the closure's own, and nothing else enters from ctx.
+    assert.match(
+      partnerizeSource,
+      /return sampleOnce\(sourceObject, \{ publisherId, window: ctx\.window \}, ctx\)/,
+    );
     assert.ok(!/ctx\.publisherId/.test(partnerizeSource), "no caller-supplied publisher id anywhere");
+    assert.ok(!/ctx\.campaignId/.test(partnerizeSource), "no caller-supplied campaign id anywhere");
     assert.ok(!/ctx\.path|ctx\.endpoint|ctx\.url/.test(samplerBody), "no caller-supplied target");
     assert.match(samplerBody, /spec\.path\(resolved\)/, "the path is built from resolved values only");
   });

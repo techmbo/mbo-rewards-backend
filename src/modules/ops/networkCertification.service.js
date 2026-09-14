@@ -152,9 +152,19 @@ const PARTNERIZE_PROBES = Object.freeze({
     chain: "partnerizeVouchers",
   },
   // No endpoint of its own. Partnerize exposes no commission or rate endpoint — the adapter builds
-  // six paths in total and none is commission-scoped — so the structure is read out of the campaign
+  // six /user paths and none is commission-scoped — so the structure is read out of the campaign
   // response that is already certified. Same chain as `campaigns`, so selecting both still costs
   // one request; selecting either alone costs one.
+  // Evidenced by fetchConversions, whose FIRST call builds exactly this publisher-scoped reporting
+  // path with start_date/end_date. Its second path, /v3/partner/conversions, is a fetchPaginated
+  // fallback — a pagination loop — and certification never reaches it: one request, no fallback.
+  //
+  // Its own chain, so selecting it costs one request and it cannot borrow another probe's.
+  conversions: {
+    method: "GET",
+    endpointKey: "GET /reporting/report_publisher/publisher/{publisherId}/conversion.json",
+    chain: "partnerizeConversions",
+  },
   commission_structure: {
     method: "GET",
     endpointKey: "GET /user/publisher/{publisherId}/campaign/a (embedded commission subtree)",
@@ -544,6 +554,66 @@ export class NetworkCertificationService {
    * merchant's vouchers. A missing identifier is its own outcome, distinct from a supplier failure,
    * and produces no traffic at all.
    */
+  /**
+   * The Partnerize conversions probe: exactly one request, publisher-scoped, date-bounded.
+   *
+   * Zero rows is reported as OK_NO_ROWS rather than OK. The distinction matters: OK with an empty
+   * field list would read as "certified, no fields", when what actually happened is that the
+   * window held no conversions and the row schema is still unknown. An operator widening the
+   * window needs to see which of the two it was.
+   *
+   * Only structural paths and types leave this method. summarisePayloads reports paths, types and
+   * categories and never a value, so no order id, customer detail, commission or order value can
+   * reach the response — which is why the financial separation this source object exists to
+   * protect is not at risk from certifying it.
+   */
+  async certifyPartnerizeConversions({ adapter, key, probe, window, budgetLeft }) {
+    const base = {
+      network: key,
+      sourceObject: "conversions",
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+    };
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      // One row is all a field dictionary needs, and one row is all that is held.
+      const rows = asRows(
+        await adapter.fetchCertificationSample("conversions", { timeoutMs, window }),
+      ).slice(0, 1);
+
+      if (!rows.length) {
+        return {
+          ...base,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+          windowPreset: window?.preset ?? null,
+        };
+      }
+
+      const fieldPaths = summarisePayloads(rows);
+      return {
+        ...base,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+        windowPreset: window?.preset ?? null,
+      };
+    } catch (error) {
+      if (error?.partnerizeNoPublisherId) {
+        return { ...base, ok: false, statusCategory: "SKIPPED_NO_PUBLISHER_ID" };
+      }
+      return { ...base, ok: false, statusCategory: statusCategory(error) };
+    }
+  }
+
   async certifyPartnerizeVouchers({ adapter, key, probe, budgetLeft }) {
     const base = {
       network: key,
@@ -795,6 +865,9 @@ export class NetworkCertificationService {
 
     const adapter = await this[ADAPTER_BUILDERS[key]]({ region, accountLabel });
     // Dates are computed here, from a preset token. Nothing the caller sends is used as a date.
+    const resolvedWindowPreset = Object.hasOwn(WINDOW_PRESETS, windowPreset)
+      ? windowPreset
+      : DEFAULT_WINDOW_PRESET;
     const windowDays = windowPresetDays(windowPreset);
     const ctx = {
       window: defaultDateWindow(windowDays),
@@ -925,6 +998,20 @@ export class NetworkCertificationService {
           });
         }
         results.push(partnerizeCampaignRows[sourceObject]);
+        continue;
+      }
+
+      if (probe.chain === "partnerizeConversions") {
+        results.push(
+          await this.certifyPartnerizeConversions({
+            adapter,
+            key,
+            probe,
+            // The service's own window, computed from the frozen preset. Never a caller's dates.
+            window: { ...ctx.window, preset: resolvedWindowPreset },
+            budgetLeft,
+          }),
+        );
         continue;
       }
 
