@@ -329,6 +329,25 @@ const PARTNERIZE_CERTIFICATION_SAMPLES = Object.freeze({
       `/user/publisher/${encodeURIComponent(resolved.publisherId)}` +
       `/campaign/${encodeURIComponent(resolved.campaignId)}/voucher`,
     params: () => ({}),
+
+    // The voucher response is an ENVELOPE: { commission_fields, count, execution_time,
+    // voucher_codes }. The rows are inside voucher_codes[]; the envelope is not a row.
+    //
+    // The generic extractRows does not know this key, so the envelope fell through to sampleOnce's
+    // non-list branch and was certified AS a row — a dictionary of commission_fields / count /
+    // execution_time, with the real voucher fields buried one array deep. Teaching extractRows the
+    // key is not the fix: it has nine callers, including the fetchPaginated loop that drives
+    // hasMore/offset for every other Partnerize endpoint, so a new key there would change
+    // production pagination. The knowledge belongs to this one spec instead.
+    //
+    // Unwrapping mirrors fetchCoupons exactly, which is the only evidence of the row shape: each
+    // block is either the voucher itself or a { voucher_code: {...} } wrapper.
+    rows: (data) => {
+      if (!Array.isArray(data?.voucher_codes)) return null;
+      return data.voucher_codes.map((block) =>
+        block?.voucher_code && typeof block.voucher_code === "object" ? block.voucher_code : block,
+      );
+    },
   },
 });
 
@@ -515,6 +534,20 @@ export function createPartnerizeAdapter({
       timeout: remainingMs,
     });
 
+    // One row unless a caller asks for a bounded scan. The bound is on ROWS HELD IN MEMORY from
+    // the one response already received — never on requests, and never on what is asked of the
+    // supplier: spec.params() is untouched, so the query still says limit 1.
+    const maxRows = Math.max(1, Math.min(Number(ctx.maxRows) || 1, CERTIFICATION_MAX_SCAN_ROWS));
+
+    // A spec that NAMES its own collection is answered from that collection and nothing else. No
+    // envelope fallback is reachable from here: if the named collection is absent or empty, that
+    // is ZERO rows, and the caller reports OK_NO_ROWS with the row schema still unknown. Reporting
+    // the envelope instead would certify a schema the rows do not have.
+    if (typeof spec.rows === "function") {
+      const collected = spec.rows(response?.data);
+      return Array.isArray(collected) ? collected.slice(0, maxRows) : [];
+    }
+
     const rows = extractRows(response?.data);
     // A non-list endpoint (/user) returns an object; report it as the single row it is. An empty
     // but RECOGNISED collection is zero rows, not one envelope row — see hasRecognisedCollection.
@@ -526,10 +559,6 @@ export function createPartnerizeAdapter({
     ) {
       return [response.data];
     }
-    // One row unless a caller asks for a bounded scan. The bound is on ROWS HELD IN MEMORY from
-    // the one response already received — never on requests, and never on what is asked of the
-    // supplier: spec.params() is untouched, so the query still says limit 1.
-    const maxRows = Math.max(1, Math.min(Number(ctx.maxRows) || 1, CERTIFICATION_MAX_SCAN_ROWS));
     return rows.slice(0, maxRows);
   }
 

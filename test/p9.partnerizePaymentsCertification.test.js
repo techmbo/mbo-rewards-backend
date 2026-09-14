@@ -288,8 +288,19 @@ test("the other Partnerize probes are unchanged", () => {
 test("conversions and payments share one dated sampler and cannot drift", () => {
   assert.ok(SERVICE_SRC.includes("certifyPartnerizeDatedSample({ ...args, sourceObject: \"conversions\" })"));
   assert.ok(SERVICE_SRC.includes("certifyPartnerizeDatedSample({ ...args, sourceObject: \"payments\" })"));
-  // Exactly one implementation of the control flow.
-  assert.equal((SERVICE_SRC.match(/statusCategory: "OK_NO_ROWS"/g) || []).length, 1);
+  // Exactly one implementation of the DATED control flow. Counting OK_NO_ROWS across the whole
+  // service is not that claim: the voucher chain is a separate probe that reports it too, on its
+  // own empty collection. The claim is scoped to the shared sampler's own body.
+  const start = SERVICE_SRC.indexOf("async certifyPartnerizeDatedSample(");
+  const body = SERVICE_SRC.slice(start, SERVICE_SRC.indexOf("\n  }\n", start));
+  assert.ok(start > -1);
+  assert.equal((body.match(/statusCategory: "OK_NO_ROWS"/g) || []).length, 1);
+  assert.equal((body.match(/windowPreset:/g) || []).length, 2, "both outcomes report the window");
+  // And neither conversions nor payments has a second, private implementation.
+  for (const name of ["certifyPartnerizeConversions", "certifyPartnerizePayments"]) {
+    const own = SERVICE_SRC.slice(SERVICE_SRC.indexOf(`async ${name}(`), SERVICE_SRC.indexOf(`async ${name}(`) + 200);
+    assert.ok(!own.includes("OK_NO_ROWS"), `${name} implements its own control flow`);
+  }
 });
 
 test("production sync fetchPayments keeps its endpoint and non-blocking contract", () => {

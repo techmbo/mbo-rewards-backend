@@ -311,21 +311,16 @@ describe("partnerize vouchers — nothing leaks and nothing is written", () => {
     }
     assert.ok(!serialised.includes(PUBLISHER_ID), "the publisher id leaked");
     assert.ok(!serialised.includes(CAMPAIGN_ID), "the campaign id leaked");
-    // Field PATHS are what it reports. The generic extractRows does not know the `voucher_codes`
-    // envelope — only fetchCoupons does — so the whole body is summarised and the envelope key
-    // shows up in the dictionary. That is left alone deliberately: extractRows has nine callers,
-    // including the fetchPaginated loop that drives hasMore/offset for every other Partnerize
-    // endpoint, so teaching it a new key to tidy one probe's output would change production
-    // pagination. Reporting the envelope is also strictly more information, and still no values.
+    // Field PATHS are what it reports, and they are the VOUCHER ROW's own paths. The sampler
+    // descends into voucher_codes[] through the spec's own extractor, so no envelope key
+    // (commission_fields / count / execution_time / voucher_codes) appears in the dictionary.
     const entry = result.results.find((r) => r.sourceObject === "vouchers");
     assert.deepEqual(entry.fieldPaths.map((f) => f.path).sort(), [
-      "voucher_codes",
-      "voucher_codes[]",
-      "voucher_codes[].active",
-      "voucher_codes[].description",
-      "voucher_codes[].start_date_time",
-      "voucher_codes[].voucher_code",
-      "voucher_codes[].voucher_code_id",
+      "active",
+      "description",
+      "start_date_time",
+      "voucher_code",
+      "voucher_code_id",
     ]);
     for (const field of entry.fieldPaths) {
       assert.deepEqual(Object.keys(field).sort(), [

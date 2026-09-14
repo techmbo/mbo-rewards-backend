@@ -671,7 +671,25 @@ export class NetworkCertificationService {
     const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
 
     try {
+      // One row from voucher_codes[] is all a field dictionary needs, and one row is all that is
+      // held. The sampler descends into the collection itself, so these are voucher rows — never
+      // the { commission_fields, count, execution_time, voucher_codes } envelope around them.
       const rows = asRows(await adapter.fetchCertificationVoucherSample({ timeoutMs })).slice(0, 1);
+
+      // An empty voucher_codes[] is zero rows, reported as OK_NO_ROWS rather than OK. The endpoint
+      // is certified either way — it answered — but OK with an empty field list would read as
+      // "certified, no fields", when what happened is that this campaign had no vouchers and the
+      // ROW schema is still unknown. The envelope is never substituted to fill the gap.
+      if (!rows.length) {
+        return {
+          ...base,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        };
+      }
+
       const fieldPaths = summarisePayloads(rows);
       return {
         ...base,
