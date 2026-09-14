@@ -16,6 +16,12 @@ export const SOURCE_OBJECT_AVAILABILITY = Object.freeze({
   UNAVAILABLE: "NOT_SUPPORTED_OR_UNAVAILABLE_FOR_CURRENT_ACCOUNT",
   /** No endpoint of this kind exists in the integration at all. */
   NO_ENDPOINT: "NO_ENDPOINT_IN_INTEGRATION",
+  /**
+   * No endpoint exists AND an implemented non-API path does. NO_ENDPOINT alone would be true but
+   * misleading here: it reads as "nothing ingests this", when a manual upload already does. The
+   * object is not syncable and not missing — it arrives by another route.
+   */
+  MANUAL: "MANUAL_ONLY_NO_ENDPOINT_IN_INTEGRATION",
 });
 
 function obj({
@@ -275,13 +281,22 @@ const CATALOG = Object.freeze({
     obj({ sourceObject: "api_reports", label: "API / report data", endpoint: "GET performance reports", live: true, entityType: "performance" }),
     obj({ sourceObject: "coupons", label: "Coupons", endpoint: "GET coupons", live: true, entityType: "coupon" }),
     obj({ sourceObject: "link_reports", label: "Link reports", endpoint: "GET link performance", live: true, entityType: "link" }),
+    // MANUAL, not merely not-live. The Boostiny adapter builds four paths — campaigns, coupons,
+    // performance, link-performance — and none is a payment, payout, settlement or invoice path.
+    // Settlement is real and implemented, just not over the API.
     obj({
       sourceObject: "settlement",
       label: "Final settlement",
-      endpoint: "account settlement source",
+      endpoint: "none — Partner Payment CSV upload, no settlement endpoint in this integration",
       live: false,
+      availability: SOURCE_OBJECT_AVAILABILITY.MANUAL,
       entityType: "payment",
-      notes: "Only sync when a settlement source is validated for the account.",
+      notes:
+        "Final settlement arrives as a Partner Payment CSV through " +
+        "BoostinyPartnerPaymentService.uploadCsv(), at PAYMENT_SOURCE_CYCLE granularity — never " +
+        "as individual orders. No payment, payout, settlement or invoice endpoint exists in the " +
+        "adapter, and no fetchPayments exists; the registry PAYMENTS capability that implied one " +
+        "has been removed. Only sync when a settlement source is validated for the account.",
     }),
   ]),
 });

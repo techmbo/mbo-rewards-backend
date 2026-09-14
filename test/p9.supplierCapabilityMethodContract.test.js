@@ -45,10 +45,9 @@ const CONFIG = Object.freeze({
  * name to this list is never the fix for new code.
  */
 const KNOWN_REGISTRY_DRIFT = Object.freeze({
-  // Registry declares PAYMENTS; the adapter has no fetchPayments and its own getCapabilities()
-  // omits PAYMENTS. Its registry note already says "Final settlement = Partner Payment CSV
-  // (MANUAL_UPLOAD)" — i.e. there is no payments API, which is what the declaration contradicts.
-  BOOSTINY: ["PAYMENTS"],
+  // Empty, and meant to stay that way. Both original entries were fixed rather than exempted:
+  // AWIN declared PRODUCTS with no fetchProducts (which broke construction outright), and
+  // BOOSTINY declared PAYMENTS with no fetchPayments against a manual-CSV settlement path.
   // AWIN was here: it declared PRODUCTS with no fetchProducts, so assertAdapterContract threw
   // during construction and createSupplierAdapter("AWIN", …) failed outright. Fixed — the false
   // capability is gone from both the adapter and the registry — so it is removed from this list

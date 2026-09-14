@@ -24,9 +24,15 @@ export const KNOWN_SUPPLIER_KEYS = Object.freeze([
 export const SUPPLIER_CAPABILITY_CATALOG = Object.freeze({
   BOOSTINY: {
     implementationStatus: "IMPLEMENTED",
-    capabilities: [SUPPLIER_CAPABILITIES.CAMPAIGNS, SUPPLIER_CAPABILITIES.COUPONS, SUPPLIER_CAPABILITIES.REPORTING, SUPPLIER_CAPABILITIES.PAYMENTS],
+    // PAYMENTS removed: it is an API capability, and Boostiny exposes no payment, payout,
+    // settlement or invoice endpoint — the adapter builds four paths, all campaigns/coupons/
+    // performance. The note below already said settlement is a manual CSV; the capability
+    // contradicted it, and the adapter's own getCapabilities() never claimed PAYMENTS.
+    // Settlement is not lost, it is MANUAL: BoostinyPartnerPaymentService.uploadCsv() is the
+    // implemented path, and it is untouched by this change.
+    capabilities: [SUPPLIER_CAPABILITIES.CAMPAIGNS, SUPPLIER_CAPABILITIES.COUPONS, SUPPLIER_CAPABILITIES.REPORTING],
     pagination: "page",
-    notes: ["Tracking params UNCONFIRMED — Wave A.", "Performance = provisional/mixed granularity (order_id required for order-level).", "Final settlement = Partner Payment CSV (MANUAL_UPLOAD), aggregate PAYMENT_SOURCE_CYCLE only — never fake individual orders."],
+    notes: ["Tracking params UNCONFIRMED — Wave A.", "Performance = provisional/mixed granularity (order_id required for order-level).", "Final settlement = Partner Payment CSV (MANUAL_UPLOAD), aggregate PAYMENT_SOURCE_CYCLE only — never fake individual orders.", "No payment/payout/settlement/invoice API capability: settlement arrives only via BoostinyPartnerPaymentService.uploadCsv()."],
   },
   OPTIMISE: {
     implementationStatus: "IMPLEMENTED",

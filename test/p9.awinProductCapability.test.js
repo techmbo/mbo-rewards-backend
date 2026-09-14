@@ -133,7 +133,9 @@ describe("awin — no false product capability remains", () => {
   it("11 — unrelated suppliers are untouched", () => {
     assert.ok(SUPPLIER_CAPABILITY_CATALOG.IMPACT.capabilities.includes(SUPPLIER_CAPABILITIES.PRODUCTS));
     assert.ok(SUPPLIER_CAPABILITY_CATALOG.OPTIMISE.capabilities.includes(SUPPLIER_CAPABILITIES.PAYMENTS));
-    // Boostiny's own defect is untouched by this change.
-    assert.ok(SUPPLIER_CAPABILITY_CATALOG.BOOSTINY.capabilities.includes(SUPPLIER_CAPABILITIES.PAYMENTS));
+    // Boostiny was untouched by the AWIN change; its own PAYMENTS drift was fixed in the phase
+    // after this one, so what is pinned here is that it never gained a payments API capability.
+    assert.ok(!SUPPLIER_CAPABILITY_CATALOG.BOOSTINY.capabilities.includes(SUPPLIER_CAPABILITIES.PAYMENTS));
+    assert.ok(SUPPLIER_CAPABILITY_CATALOG.BOOSTINY.capabilities.includes(SUPPLIER_CAPABILITIES.CAMPAIGNS));
   });
 });
