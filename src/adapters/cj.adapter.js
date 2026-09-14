@@ -1,4 +1,7 @@
 import { createHttpClient, requestWithRetry } from "../core/httpClient.js";
+// Lifted out of this file when Rakuten Link Locator became the second XML surface.
+// Same functions, same behaviour; CJ's tests are unchanged and prove it.
+import { decodeXml, tagBlocks, tagText } from "../core/xml.js";
 import { SUPPLIER_CAPABILITIES } from "./contract.js";
 
 const DEFAULT_RECORDS_PER_PAGE = 100;
@@ -30,34 +33,6 @@ export const CJ_ADVERTISER_RELATIONSHIP_SCOPES = Object.freeze({
 });
 const MAX_PAGE_COUNT = 1000;
 
-function decodeXml(value) {
-  return String(value ?? "")
-    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&amp;/g, "&");
-}
-
-function tagText(xml, tag) {
-  const escaped = String(tag).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = String(xml ?? "").match(
-    new RegExp(`<${escaped}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${escaped}>`, "i"),
-  );
-  if (!match) return null;
-  const value = decodeXml(match[1]).trim();
-  return value === "" || value.toLowerCase() === "null" ? null : value;
-}
-
-function tagBlocks(xml, tag) {
-  const escaped = String(tag).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const regex = new RegExp(`<${escaped}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${escaped}>`, "gi");
-  const blocks = [];
-  let match;
-  while ((match = regex.exec(String(xml ?? ""))) !== null) blocks.push(match[1]);
-  return blocks;
-}
 
 function numeric(value) {
   if (value == null || value === "" || String(value).toUpperCase() === "N/A") return null;

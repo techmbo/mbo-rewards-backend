@@ -435,6 +435,10 @@ const ADMITAD_PROBES = Object.freeze({
  * events and the Advanced Reports objects have live fetchers and catalog entries, and stay out of
  * this registry until certified in their own right. A probe registry entry is an executable claim,
  * not a restatement of the catalog.
+ *
+ * links is the exception to that ordering: it had NO fetcher at all until this phase, because
+ * Link Locator was never implemented. Its catalog entry stays live:false — a read path that can
+ * discover an asset is not a link capability, and network support is not implementation support.
  */
 const RAKUTEN_PROBES = Object.freeze({
   advertisers: {
@@ -477,6 +481,18 @@ const RAKUTEN_PROBES = Object.freeze({
   offers: {
     method: "GET",
     endpointKey: "GET /v1/offers (offer_status=available, limit=1, page=1)",
+    chain: "rakutenSample",
+  },
+  // Link Locator, XML, at its documented defaults. The only Rakuten object whose bounds are all in
+  // the path, and the only one that is not JSON.
+  //
+  // A DISCOVERED LINK ASSET IS NOT A USABLE TRACKING LINK. Rakuten exposes link assets before a
+  // partnership is active and blocks their use until it is, so a returned row proves the asset
+  // exists and nothing more. Certification reports the row's SHAPE; it never returns a clickURL,
+  // landURL or showURL value, never promotes one to a tracking link, and persists nothing.
+  links: {
+    method: "GET",
+    endpointKey: "GET /linklocator/1.0/getTextLinks/-1/-1///-1/1",
     chain: "rakutenSample",
   },
 });
@@ -1343,13 +1359,17 @@ export class NetworkCertificationService {
   }
 
   /**
-   * One bounded Rakuten sample, shared by advertisers, partnerships, commissioning_lists and
-   * offers.
+   * One bounded Rakuten sample, shared by advertisers, partnerships, commissioning_lists, offers
+   * and links.
    *
-   * All four are bounded to limit=1, page=1 and to exactly ONE supplier request, all four must
-   * distinguish "this account has none" from "certified", and writing the control flow once means
-   * they cannot drift apart. The path, container keys and any extra parameters each uses live in
-   * the adapter's own frozen spec table, which is the only place that builds a request.
+   * All five are bounded to exactly ONE supplier request, all five must distinguish "this account
+   * has none" from "certified", and writing the control flow once means they cannot drift apart.
+   * The path, container keys, row extractor and any extra parameters each uses live in the
+   * adapter's own frozen spec table, which is the only place that builds a request.
+   *
+   * Four are JSON bounded by limit=1, page=1. links is XML and bounded entirely by its path, since
+   * Rakuten publishes no results-per-page parameter for Link Locator — so the probe takes one
+   * request and keeps one row rather than sending a limit the supplier never documented.
    *
    * offers is the one object where production itself makes more than one call — fetchOffers walks
    * three offer_status values and deduplicates. The probe pins a single evidenced status instead,
@@ -1362,11 +1382,18 @@ export class NetworkCertificationService {
    * repo proves whether the endpoint returns the network catalogue or only the publisher's own
    * advertisers. Reporting an approval state would assert a scope never established.
    *
-   * For partnerships, commissioning_lists and offers: this account has no joined campaigns, so an
-   * empty result is the expected shape of an account with no relationships — not an unsupported
-   * object and not a broken endpoint. Either claim would be inventing a finding from an absence.
-   * offers is queried at offer_status=available precisely because that half of the catalogue does
-   * not depend on a relationship, but an empty result there still proves nothing about support.
+   * For partnerships, commissioning_lists, offers and links: this account has no joined campaigns,
+   * so an empty result is the expected shape of an account with no relationships — not an
+   * unsupported object and not a broken endpoint. Either claim would be inventing a finding from
+   * an absence. offers is queried at offer_status=available precisely because that half of the
+   * catalogue does not depend on a relationship, but an empty result there still proves nothing
+   * about support.
+   *
+   * NO PARTNERSHIP BLOCKER IS INVENTED FROM AN EMPTY RESULT. Rakuten does block link USE until a
+   * partnership is active, but which response proves that is not established by anything in this
+   * repo — no status code, element or message has been observed. Emptiness is not that proof, so
+   * links reports OK_NO_ROWS like everything else, and NEEDS_ACTIVE_PARTNERSHIP is not reported by
+   * guesswork. When a live response shows the real signal, that is the evidence to build it on.
    *
    * In both cases the row schema is still unknown, which is exactly what OK_NO_ROWS and
    * UNKNOWN_NEEDS_LIVE_DATA say.
@@ -1375,9 +1402,10 @@ export class NetworkCertificationService {
    * handler — a rejected Bearer and an empty account are different findings.
    *
    * Only structural paths, types and counts leave this method. summarisePayloads never reports a
-   * value, so no advertiser or rule id, name, URL, category, contact, country, date, currency,
-   * percentage rate, fixed amount or commission term can reach the response. A commission rule is
-   * certified as SHAPE — including how many outcomes a row can hold — and never as a number.
+   * value, so no advertiser, rule or LINK id, name, URL, category, contact, country, date,
+   * currency, percentage rate, fixed amount, commission term or creative text can reach the
+   * response. A commission rule is certified as SHAPE — including how many outcomes a row can
+   * hold — and never as a number; a link asset is certified as SHAPE and never as a URL.
    */
   async certifyRakutenSample({ adapter, key, probe, budgetLeft, sourceObject }) {
     const base = {

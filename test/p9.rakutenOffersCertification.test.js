@@ -167,6 +167,7 @@ describe("offers is registered as a Rakuten source object", () => {
     assert.deepEqual(listProbeSourceObjects("rakuten").sort(), [
       "advertisers",
       "commissioning_lists",
+      "links",
       "offers",
       "partnerships",
     ]);
@@ -204,7 +205,7 @@ describe("offers is registered as a Rakuten source object", () => {
   });
 
   it("adds no probe for the objects this phase still defers", () => {
-    for (const notYet of ["events", "advanced_reports", "payments", "coupons", "links", "products"]) {
+    for (const notYet of ["events", "advanced_reports", "payments", "coupons", "products"]) {
       assert.ok(!listProbeSourceObjects("rakuten").includes(notYet), notYet);
       assert.ok(!Object.hasOwn(RAKUTEN_CERTIFICATION_SPECS, notYet), notYet);
     }

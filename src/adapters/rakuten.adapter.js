@@ -1,4 +1,5 @@
 import { createHttpClient, requestWithRetry } from "../core/httpClient.js";
+import { tagBlocks, tagText } from "../core/xml.js";
 import { SUPPLIER_CAPABILITIES } from "./contract.js";
 
 const DEFAULT_PAGE_LIMIT = 100;
@@ -26,6 +27,59 @@ export const RAKUTEN_CERTIFICATION_TIMEOUT_MS = Number(
 
 /** A field dictionary needs one row. The service bounds this again, independently. */
 export const RAKUTEN_CERTIFICATION_MAX_ROWS = 1;
+
+/**
+ * Link Locator's documented text-links operation, at its documented defaults.
+ *
+ * GET /linklocator/1.0/getTextLinks/{advertiser-id}/{category-id}/{link-start-date}/{link-end-date}/{DEPRECATED-campaign-id}/{page}
+ *
+ * with advertiser-id -1, category-id -1, both dates BLANK, the deprecated campaign id -1 and
+ * page 1 — which is how the two empty date slots become the adjacent separators in the middle.
+ * Those empty segments are part of the contract, not a formatting accident; collapsing them would
+ * shift every later segment and change the request.
+ *
+ * Rakuten documents NO results-per-page parameter for Link Locator, so none is sent. The probe is
+ * bounded by making one request and keeping one row, never by inventing a limit the supplier has
+ * not published.
+ */
+export const RAKUTEN_TEXT_LINKS_PATH = "/linklocator/1.0/getTextLinks/-1/-1///-1/1";
+
+/** The documented fields of one <return> element in a getTextLinksResponse. */
+const RAKUTEN_TEXT_LINK_FIELDS = Object.freeze([
+  "campaignID",
+  "categoryID",
+  "categoryName",
+  "linkID",
+  "linkName",
+  "mid",
+  "nid",
+  "clickURL",
+  "endDate",
+  "landURL",
+  "showURL",
+  "startDate",
+  "textDisplay",
+]);
+
+/**
+ * Rows out of a getTextLinksResponse.
+ *
+ * <return> is the ROW element; <getTextLinksResponse> is the envelope around it. Reading the
+ * envelope as a row would certify a single object carrying every row's fields flattened together,
+ * so this only ever walks <return> blocks — and a response with none yields no rows rather than
+ * one empty one.
+ *
+ * A row here is a DISCOVERED LINK ASSET. It is not evidence that the link is usable: Rakuten
+ * exposes assets before a partnership is active and blocks their use until it is. Nothing in this
+ * adapter promotes a clickURL to a tracking link, and certification never returns one.
+ */
+export function extractRakutenTextLinks(xml) {
+  return tagBlocks(xml, "return").map((block) => {
+    const row = {};
+    for (const field of RAKUTEN_TEXT_LINK_FIELDS) row[field] = tagText(block, field);
+    return row;
+  });
+}
 
 /**
  * Every Rakuten source object certification can sample, and the one path each uses.
@@ -89,6 +143,18 @@ export const RAKUTEN_CERTIFICATION_SPECS = Object.freeze({
     path: "/v1/offers",
     collectionKeys: Object.freeze(["offers", "offer"]),
     params: Object.freeze({ offer_status: "available" }),
+  }),
+  // The one XML object, and the one whose bounds live entirely in the path.
+  //
+  // pathBounded suppresses the limit/page pair every JSON object sends. Rakuten publishes no
+  // results-per-page parameter for Link Locator, so sending one would be inventing a parameter —
+  // and sending a bound an endpoint never documented is exactly what the Awin coupons 500 punished.
+  links: Object.freeze({
+    method: "GET",
+    path: RAKUTEN_TEXT_LINKS_PATH,
+    pathBounded: true,
+    xml: true,
+    extract: extractRakutenTextLinks,
   }),
 });
 
@@ -454,16 +520,22 @@ export function createRakutenAdapter({
 
       const response = await httpClient.get(spec.path, {
         // Page bounds first, then the spec's own parameters. Only offers declares any, and a
-        // spec cannot widen the bounds: it names a filter, never a limit or a page.
-        params: { ...RAKUTEN_CERTIFICATION_PAGE_PARAMS, ...(spec.params ?? {}) },
-        headers: { Accept: "application/json" },
+        // spec cannot widen the bounds: it names a filter, never a limit or a page. Where the
+        // bounds live in the path instead, NO query parameter is sent at all.
+        params: spec.pathBounded
+          ? {}
+          : { ...RAKUTEN_CERTIFICATION_PAGE_PARAMS, ...(spec.params ?? {}) },
+        headers: { Accept: spec.xml ? "application/xml,text/xml" : "application/json" },
+        ...(spec.xml ? { responseType: "text" } : {}),
         timeout: Number(timeoutMs || RAKUTEN_CERTIFICATION_TIMEOUT_MS),
       });
 
-      return extractRakutenCollection(response?.data, [...spec.collectionKeys]).slice(
-        0,
-        RAKUTEN_CERTIFICATION_MAX_ROWS,
-      );
+      // An XML object brings its own row extractor; JSON objects share the collection reader.
+      const rows = spec.extract
+        ? spec.extract(String(response?.data ?? ""))
+        : extractRakutenCollection(response?.data, [...spec.collectionKeys]);
+
+      return rows.slice(0, RAKUTEN_CERTIFICATION_MAX_ROWS);
     },
 
     async fetchAdvertisers(params = {}, stats = null) {

@@ -178,6 +178,7 @@ describe("commissioning_lists is registered as a Rakuten source object", () => {
     assert.deepEqual(listProbeSourceObjects("rakuten").sort(), [
       "advertisers",
       "commissioning_lists",
+      "links",
       "offers",
       "partnerships",
     ]);
@@ -222,7 +223,6 @@ describe("commissioning_lists is registered as a Rakuten source object", () => {
       "advanced_reports",
       "payments",
       "coupons",
-      "links",
       "products",
     ]) {
       assert.ok(!listProbeSourceObjects("rakuten").includes(notYet), notYet);

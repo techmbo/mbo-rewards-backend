@@ -158,6 +158,7 @@ describe("Rakuten is registered in the certification framework", () => {
     assert.deepEqual(listProbeSourceObjects("rakuten").sort(), [
       "advertisers",
       "commissioning_lists",
+      "links",
       "offers",
       "partnerships",
     ]);
@@ -169,7 +170,6 @@ describe("Rakuten is registered in the certification framework", () => {
       "advanced_reports",
       "payments",
       "coupons",
-      "links",
       "products",
     ]) {
       assert.ok(!listProbeSourceObjects("rakuten").includes(notYet), notYet);
