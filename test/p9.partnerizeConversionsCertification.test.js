@@ -282,6 +282,7 @@ test("existing Partnerize source objects are unchanged", () => {
     "authenticate",
     "campaigns",
     "conversions",
+    "payments",
     "publishers",
     "vouchers",
   ]);

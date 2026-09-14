@@ -120,6 +120,7 @@ describe("partnerize vouchers — the endpoint is pinned", () => {
       "campaigns",
       "vouchers",
       "conversions",
+      "payments",
       "commission_structure",
     ]);
     // commission_structure is derived from the campaign response, so it has no adapter sample.
@@ -128,6 +129,7 @@ describe("partnerize vouchers — the endpoint is pinned", () => {
       "publishers",
       "campaigns",
       "conversions",
+      "payments",
       "vouchers",
     ]);
     assert.ok(!listProbeSourceObjects("optimise").includes("vouchers"), "leaked onto Optimise");

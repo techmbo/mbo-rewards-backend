@@ -58,6 +58,7 @@ describe("Partnerize certification — registry and bounds", () => {
       "campaigns",
       "vouchers",
       "conversions",
+      "payments",
       "commission_structure",
     ]);
     // The adapter has one SAMPLE per supplier request. commission_structure has none: it is derived
@@ -67,6 +68,7 @@ describe("Partnerize certification — registry and bounds", () => {
       "publishers",
       "campaigns",
       "conversions",
+      "payments",
       "vouchers",
     ]);
   });
@@ -83,7 +85,8 @@ describe("Partnerize certification — registry and bounds", () => {
     });
     // vouchers moved out of this list once fetchCoupons evidenced its contract; the rest stay.
     // "conversions" is now a certified source object and dispatches; it belongs in test 1.
-    for (const unknown of ["payments", "products", "offers", "clicks", "invoices"]) {
+    // "payments" now dispatches; it belongs in test 1. Invoices have no adapter path at all.
+    for (const unknown of ["products", "offers", "clicks", "invoices"]) {
       await assert.rejects(
         () => service.certify("partnerize", { sourceObjects: [unknown] }),
         /unknown source objects/i,
@@ -97,7 +100,8 @@ describe("Partnerize certification — registry and bounds", () => {
     for (const excluded of [
       // "conversions" is now executable: GET /reporting/report_publisher/publisher/{id}/conversion.json
       // is evidenced by fetchConversions' first call. Its paginated fallback stays out.
-      "payments",
+      // "payments" is now executable: GET /reporting/report_publisher/publisher/{id}/payment.json
+      // is evidenced by fetchPayments, called with start_date/end_date by waveESupplierSync.
       // "vouchers" is now executable: GET /user/publisher/{id}/campaign/{id}/voucher is evidenced
       // by fetchCoupons. "coupons" stays out — it is not a Partnerize endpoint name.
       "coupons",
@@ -125,6 +129,7 @@ describe("Partnerize certification — registry and bounds", () => {
       [
         'chain: "partnerizeCampaigns"',
         'chain: "partnerizeConversions"',
+        'chain: "partnerizePayments"',
         'chain: "partnerizeVouchers"',
       ],
       "an undeclared chain was added",
@@ -192,7 +197,7 @@ describe("Partnerize certification — the request the sampler actually makes", 
     assert.match(table, /path: \(resolved\) =>/, "the path argument is resolved values, not caller ctx");
     assert.match(partnerizeSource, /const PARTNERIZE_SINGLE_ROW = \{ limit: 1, offset: 0 \}/);
     // Only GET is ever declared.
-    assert.equal((table.match(/method: "GET"/g) || []).length, 5);
+    assert.equal((table.match(/method: "GET"/g) || []).length, 6);
     // The conversions entry sends exactly the two service-computed dates and nothing else.
     assert.match(
       table,

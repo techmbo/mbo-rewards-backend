@@ -165,6 +165,16 @@ const PARTNERIZE_PROBES = Object.freeze({
     endpointKey: "GET /reporting/report_publisher/publisher/{publisherId}/conversion.json",
     chain: "partnerizeConversions",
   },
+  // Evidenced by fetchPayments, which builds exactly this path; waveESupplierSync calls it with
+  // start_date/end_date. There is no second payments path and no fetchPaginated in fetchPayments,
+  // and the adapter has no invoice endpoint at all — invoices stay out of the registry.
+  //
+  // Its own chain: one request, never borrowed from another probe.
+  payments: {
+    method: "GET",
+    endpointKey: "GET /reporting/report_publisher/publisher/{publisherId}/payment.json",
+    chain: "partnerizePayments",
+  },
   commission_structure: {
     method: "GET",
     endpointKey: "GET /user/publisher/{publisherId}/campaign/a (embedded commission subtree)",
@@ -567,10 +577,26 @@ export class NetworkCertificationService {
    * reach the response — which is why the financial separation this source object exists to
    * protect is not at risk from certifying it.
    */
-  async certifyPartnerizeConversions({ adapter, key, probe, window, budgetLeft }) {
+  /**
+   * One bounded, date-windowed Partnerize sample, shared by conversions and payments.
+   *
+   * Both are publisher-scoped reporting endpoints taking the same two date parameters, both are
+   * one request, and both must distinguish "no rows in this window" from "certified". Writing the
+   * control flow once means the two cannot drift apart.
+   *
+   * Zero rows is reported as OK_NO_ROWS rather than OK. The distinction matters: OK with an empty
+   * field list reads as "certified, no fields", when what happened is that the window held nothing
+   * and the row schema is still unknown. An operator widening the window needs to see which.
+   *
+   * Only structural paths, types and counts leave this method. summarisePayloads never reports a
+   * value, so no identifier, monetary amount, currency, account or customer detail can reach the
+   * response — which is what keeps the payment/invoice/conversion/payable separation safe from
+   * schema certification.
+   */
+  async certifyPartnerizeDatedSample({ adapter, key, probe, window, budgetLeft, sourceObject }) {
     const base = {
       network: key,
-      sourceObject: "conversions",
+      sourceObject,
       endpointKey: probe.endpointKey,
       httpMethod: probe.method,
       sampleCount: 0,
@@ -582,7 +608,7 @@ export class NetworkCertificationService {
     try {
       // One row is all a field dictionary needs, and one row is all that is held.
       const rows = asRows(
-        await adapter.fetchCertificationSample("conversions", { timeoutMs, window }),
+        await adapter.fetchCertificationSample(sourceObject, { timeoutMs, window }),
       ).slice(0, 1);
 
       if (!rows.length) {
@@ -612,6 +638,14 @@ export class NetworkCertificationService {
       }
       return { ...base, ok: false, statusCategory: statusCategory(error) };
     }
+  }
+
+  async certifyPartnerizeConversions(args) {
+    return this.certifyPartnerizeDatedSample({ ...args, sourceObject: "conversions" });
+  }
+
+  async certifyPartnerizePayments(args) {
+    return this.certifyPartnerizeDatedSample({ ...args, sourceObject: "payments" });
   }
 
   async certifyPartnerizeVouchers({ adapter, key, probe, budgetLeft }) {
@@ -1008,6 +1042,19 @@ export class NetworkCertificationService {
             key,
             probe,
             // The service's own window, computed from the frozen preset. Never a caller's dates.
+            window: { ...ctx.window, preset: resolvedWindowPreset },
+            budgetLeft,
+          }),
+        );
+        continue;
+      }
+
+      if (probe.chain === "partnerizePayments") {
+        results.push(
+          await this.certifyPartnerizePayments({
+            adapter,
+            key,
+            probe,
             window: { ...ctx.window, preset: resolvedWindowPreset },
             budgetLeft,
           }),

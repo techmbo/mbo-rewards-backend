@@ -305,6 +305,23 @@ const PARTNERIZE_CERTIFICATION_SAMPLES = Object.freeze({
     params: (resolved) => ({ start_date: resolved.window.from, end_date: resolved.window.to }),
   },
 
+  // Evidenced: fetchPayments builds exactly this path, and waveESupplierSync calls it with
+  // { start_date, end_date } — the same two parameter names conversions uses, on the same
+  // reporting host. Neither the path nor the parameter names are invented here.
+  //
+  // Unlike conversions there is no second path and no fetchPaginated anywhere in fetchPayments:
+  // one request is the endpoint's own shape, not a bound certification imposes.
+  //
+  // Production passes its params object straight through to get(). Certification sends exactly the
+  // two dates, so no caller can add a filter, a page or an account identifier.
+  payments: {
+    method: "GET",
+    needs: ["publisherId", "window"],
+    path: (resolved) =>
+      `/reporting/report_publisher/publisher/${encodeURIComponent(resolved.publisherId)}/payment.json`,
+    params: (resolved) => ({ start_date: resolved.window.from, end_date: resolved.window.to }),
+  },
+
   vouchers: {
     method: "GET",
     needs: ["publisherId", "campaignId"],
