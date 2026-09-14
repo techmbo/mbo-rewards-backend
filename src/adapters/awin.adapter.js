@@ -17,6 +17,37 @@ import { SUPPLIER_CAPABILITIES } from "./contract.js";
 const AWIN_MIN_INTERVAL_MS = Number(process.env.AWIN_MIN_INTERVAL_MS || 3000); // ~20/min
 const awinRateLimiter = createRateLimiter(AWIN_MIN_INTERVAL_MS);
 
+export const AWIN_CERTIFICATION_TIMEOUT_MS = Number(
+  process.env.AWIN_CERTIFICATION_TIMEOUT_MS || 15000,
+);
+
+/** Certification holds ONE row. The cap is on rows kept in memory, never on rows requested. */
+export const AWIN_CERTIFICATION_MAX_ROWS = 1;
+
+/**
+ * The certification request contract, one entry per source object.
+ *
+ * Every entry's shape is evidenced by production code that already runs. `campaigns` is
+ * fetchCampaigns: the same path, and the same single `relationship` parameter with the same
+ * default. Nothing is added — no limit, page, offset or cursor is evidenced on this endpoint, and
+ * inventing one is the mistake that got an earlier Optimise probe rejected.
+ *
+ * `path` receives the adapter's RESOLVED values, never a caller's ctx, so the one place an
+ * identifier enters a URL is visibly fed from configuration alone.
+ */
+const AWIN_CERTIFICATION_SAMPLES = Object.freeze({
+  campaigns: {
+    method: "GET",
+    collectionKeys: ["programmes", "data"],
+    path: (resolved) => `/publishers/${resolved.publisherId}/programmes`,
+    params: () => ({ relationship: "joined" }),
+  },
+});
+
+export function listAwinCertificationSamples() {
+  return Object.keys(AWIN_CERTIFICATION_SAMPLES);
+}
+
 function extractCollection(data, keys = []) {
   if (Array.isArray(data)) return data;
   for (const key of keys) {
@@ -42,6 +73,10 @@ export function createAwinAdapter({
   accessToken,
   publisherId,
   baseURL = process.env.AWIN_BASE_URL || "https://api.awin.com",
+  // Same seam the Partnerize adapter exposes. Default unchanged, so no production call site is
+  // affected; it exists so the certification probe can be exercised as itself rather than as a
+  // reimplementation of itself in a test.
+  httpClient: injectedHttpClient = null,
 } = {}) {
   if (!accessToken) throw new Error("Awin adapter requires accessToken");
   if (publisherId == null || String(publisherId).trim() === "") {
@@ -50,11 +85,13 @@ export function createAwinAdapter({
 
   const pubId = encodeURIComponent(String(publisherId));
   const root = String(baseURL).replace(/\/$/, "");
-  const httpClient = createHttpClient({
-    baseURL: root,
-    apiKey: `Bearer ${accessToken}`,
-    headers: { Accept: "application/json" },
-  });
+  const httpClient =
+    injectedHttpClient ??
+    createHttpClient({
+      baseURL: root,
+      apiKey: `Bearer ${accessToken}`,
+      headers: { Accept: "application/json" },
+    });
 
   async function get(path, params = {}, stats = null) {
     await awinRateLimiter.acquireSlot();
@@ -247,6 +284,38 @@ export function createAwinAdapter({
           report_type: "awin_transaction_derived",
         };
       });
+    },
+
+    /**
+     * Exactly one bounded certification request. Never a sync fetcher.
+     *
+     * What is deliberately skipped is the get() helper, not the pacing. get() applies
+     * requestWithRetry with three retries, and a probe that retries turns one supplier rejection
+     * into three against a 20-calls-per-minute account — so the request goes to httpClient
+     * directly, which is what keeps the retry count at zero. The shared rate limiter is still
+     * acquired, so certification cannot jump the queue ahead of a running sync.
+     *
+     * `pubId` is the adapter's own, fixed at construction from configuration. There is no code
+     * path by which a caller reaches the path or the query.
+     */
+    async fetchCertificationSample(sourceObject, ctx = {}) {
+      const spec = AWIN_CERTIFICATION_SAMPLES[sourceObject];
+      if (!spec) {
+        throw new Error(`No Awin certification sample is defined for "${sourceObject}"`);
+      }
+
+      await awinRateLimiter.acquireSlot();
+      const response = await httpClient.get(spec.path({ publisherId: pubId }), {
+        params: spec.params(),
+        timeout: Number(ctx.timeoutMs || AWIN_CERTIFICATION_TIMEOUT_MS),
+      });
+
+      // The same collection reader production uses, so the probe cannot certify a different shape
+      // than sync ingests. One row is kept; the rest of the page is discarded unread.
+      return extractCollection(response?.data, spec.collectionKeys).slice(
+        0,
+        AWIN_CERTIFICATION_MAX_ROWS,
+      );
     },
 
     async fetchAll(options = {}) {

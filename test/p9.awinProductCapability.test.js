@@ -103,8 +103,17 @@ describe("awin — no false product capability remains", () => {
       [],
       "a product path appeared",
     );
-    // The five evidenced paths, unchanged.
-    assert.equal(new Set(paths).size, 5);
+    // The evidenced paths, pinned by name rather than by count: the campaigns certification probe
+    // later added a sixth, which is the SAME programmes path built from resolved values. A bare
+    // count would have flagged that and would miss a product path added alongside it.
+    assert.deepEqual([...new Set(paths)].sort(), [
+      "/publisher/${pubId}/promotions",
+      "/publishers/${pubId}/accounts",
+      "/publishers/${pubId}/commissiongroups",
+      "/publishers/${pubId}/programmes",
+      "/publishers/${pubId}/transactions/",
+      "/publishers/${resolved.publisherId}/programmes",
+    ]);
   });
 
   it("8 — the catalog records product feeds as having no endpoint at all", () => {

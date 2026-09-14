@@ -2,8 +2,10 @@ import { prisma } from "../../database/prisma.js";
 import { fail } from "../../core/apiResponse.js";
 import { createOptimiseAdapter } from "../../adapters/optimise.adapter.js";
 import { createPartnerizeAdapter } from "../../adapters/partnerize.adapter.js";
+import { createAwinAdapter } from "../../adapters/awin.adapter.js";
 import { resolveOptimiseCredentials } from "../integrations/optimiseCredentials.js";
 import { resolvePartnerizeCertificationCredentials } from "../integrations/partnerizeCredentials.js";
+import { resolveAwinCertificationCredentials } from "../integrations/awinCredentials.js";
 import { comparePathSets, summarisePayloads } from "./payloadShape.js";
 
 /**
@@ -294,7 +296,28 @@ export function summariseCommissionStructure(row = {}) {
   };
 }
 
-const PROBE_REGISTRY = Object.freeze({ optimise: OPTIMISE_PROBES, partnerize: PARTNERIZE_PROBES });
+/**
+ * Awin probe registry — campaigns only, and only because its request contract is already evidenced
+ * by fetchCampaigns running in production. Everything else Awin exposes stays out of the
+ * executable registry until its contract is confirmed, rather than being guessed at.
+ *
+ * One entry, one request. It declares its own chain so the generic branch is untouched: that
+ * branch reports zero rows as plain OK, and campaigns must distinguish "no joined programmes" from
+ * "certified". Changing the generic branch would change Optimise's results too.
+ */
+const AWIN_PROBES = Object.freeze({
+  campaigns: {
+    method: "GET",
+    endpointKey: "GET /publishers/{publisherId}/programmes",
+    chain: "awinCampaigns",
+  },
+});
+
+const PROBE_REGISTRY = Object.freeze({
+  optimise: OPTIMISE_PROBES,
+  partnerize: PARTNERIZE_PROBES,
+  awin: AWIN_PROBES,
+});
 
 /**
  * How a network's certification adapter is built. Adding a network means adding a builder here,
@@ -303,7 +326,14 @@ const PROBE_REGISTRY = Object.freeze({ optimise: OPTIMISE_PROBES, partnerize: PA
 const ADAPTER_BUILDERS = Object.freeze({
   optimise: "buildOptimiseAdapter",
   partnerize: "buildPartnerizeAdapter",
+  awin: "buildAwinAdapter",
 });
+
+/** The networks with an executable probe registry. One source of truth, so a caller-facing
+ *  catalog cannot list a different set than certify() will accept. */
+export function listProbeNetworks() {
+  return Object.keys(PROBE_REGISTRY);
+}
 
 export function listProbeSourceObjects(network) {
   const probes = PROBE_REGISTRY[String(network || "").toLowerCase()];
@@ -422,6 +452,7 @@ export class NetworkCertificationService {
     this.adapterFactory = deps.adapterFactory ?? null;
     this.credentialResolver = deps.credentialResolver ?? resolveOptimiseCredentials;
     this.partnerizeCredentialResolver = deps.partnerizeCredentialResolver ?? resolvePartnerizeCertificationCredentials;
+    this.awinCredentialResolver = deps.awinCredentialResolver ?? resolveAwinCertificationCredentials;
   }
 
   /**
@@ -475,6 +506,83 @@ export class NetworkCertificationService {
       publisherId: credentials.publisherId ?? null,
       certificationCampaignId: credentials.certificationCampaignId ?? null,
     });
+  }
+
+  /**
+   * Awin certification adapter.
+   *
+   * The publisher id is resolved here, from configuration, and handed to the adapter at
+   * construction. Certification never discovers it with a request — that would be a second
+   * supplier call — and never accepts it from a caller. The Awin token is user-level and may span
+   * several publisher accounts, which is exactly why the id cannot be caller-supplied: it would
+   * point the probe at another one.
+   */
+  async buildAwinAdapter({ accountLabel }) {
+    const credentials = await this.awinCredentialResolver(accountLabel);
+    if (!credentials?.accessToken || !credentials?.publisherId) {
+      // Only whether the credential resolved is reported; nothing about it.
+      throw fail("Awin credentials are not configured for this account label.", 424);
+    }
+    const factory = this.adapterFactory ?? createAwinAdapter;
+    return factory({
+      accessToken: credentials.accessToken,
+      publisherId: credentials.publisherId,
+    });
+  }
+
+  /**
+   * The Awin campaigns chain: exactly one request, publisher-scoped, no date window.
+   *
+   * Zero rows is reported as OK_NO_ROWS rather than OK. The distinction matters: OK with an empty
+   * field list reads as "certified, no fields", when what happened is that this publisher has no
+   * joined programmes and the row schema is still unknown. An operator seeing OK_NO_ROWS knows to
+   * check the account's programme relationships, not the integration.
+   *
+   * Only structural paths, types and counts leave this method. summarisePayloads never reports a
+   * value, so no advertiser or programme id, name, description, URL, commission range or currency
+   * can reach the response.
+   */
+  async certifyAwinCampaigns({ adapter, key, probe, budgetLeft }) {
+    const base = {
+      network: key,
+      sourceObject: "campaigns",
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+    };
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      // One row is all a field dictionary needs, and one row is all that is held. The adapter
+      // already slices; this is the second, independent bound.
+      const rows = asRows(
+        await adapter.fetchCertificationSample("campaigns", { timeoutMs }),
+      ).slice(0, 1);
+
+      if (!rows.length) {
+        return {
+          ...base,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        };
+      }
+
+      const fieldPaths = summarisePayloads(rows);
+      return {
+        ...base,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+      };
+    } catch (error) {
+      return { ...base, ok: false, statusCategory: statusCategory(error) };
+    }
   }
 
   /**
@@ -1045,6 +1153,11 @@ export class NetworkCertificationService {
           sampleCount: 0,
           fieldPaths: [],
         });
+        continue;
+      }
+
+      if (probe.chain === "awinCampaigns") {
+        results.push(await this.certifyAwinCampaigns({ adapter, key, probe, budgetLeft }));
         continue;
       }
 

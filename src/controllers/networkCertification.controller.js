@@ -4,6 +4,7 @@ import {
   NetworkCertificationService,
   WINDOW_PRESETS,
   listProbeSourceObjects,
+  listProbeNetworks,
 } from "../modules/ops/networkCertification.service.js";
 
 const service = new NetworkCertificationService();
@@ -25,7 +26,12 @@ export async function networkCertificationCatalogHandler(_req, res, next) {
     noStore(res);
     res.json(
       ok({
-        networks: ["optimise", "partnerize"].map((network) => ({ network, sourceObjects: listProbeSourceObjects(network) })),
+        // Derived from the probe registry, never a second hand-maintained list: a hard-coded one
+        // silently omitted Awin the moment it was registered.
+        networks: listProbeNetworks().map((network) => ({
+          network,
+          sourceObjects: listProbeSourceObjects(network),
+        })),
         execution: {
           method: "POST",
           path: "/ops/admin/network-certification/:network/run",
