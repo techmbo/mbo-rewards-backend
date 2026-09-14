@@ -369,15 +369,24 @@ const CJ_PROBES = Object.freeze({
  * joined nothing", which every campaign-scoped Admitad probe added later will need to have
  * already been settled.
  *
- * programs, coupons and actions have live fetchers and are catalogued live, but they stay out of
- * this registry until they are certified in their own right. A probe registry entry is an
- * executable claim, not a restatement of the catalog.
+ * programs joins it now that websites has proved the credential path live. It uses the UNSCOPED
+ * /advcampaigns/, which is exactly what the sync job runs: the job passes no websiteId, so
+ * production never takes the /advcampaigns/website/{w_id}/ branch either.
+ *
+ * coupons and actions have live fetchers and are catalogued live, but they stay out of this
+ * registry until they are certified in their own right. A probe registry entry is an executable
+ * claim, not a restatement of the catalog.
  */
 const ADMITAD_PROBES = Object.freeze({
   websites: {
     method: "GET",
     endpointKey: "GET /websites/v2/ (limit=1, offset=0)",
-    chain: "admitadWebsites",
+    chain: "admitadSample",
+  },
+  programs: {
+    method: "GET",
+    endpointKey: "GET /advcampaigns/ (limit=1, offset=0)",
+    chain: "admitadSample",
   },
 });
 
@@ -1074,27 +1083,32 @@ export class NetworkCertificationService {
   }
 
   /**
-   * The Admitad websites chain: exactly one request, publisher-scoped, no date window, no paging.
+   * One bounded Admitad sample, shared by websites and programs.
    *
-   * Zero rows IS OK_NO_ROWS here, and that is not the same judgement made for CJ advertisers.
-   * CJ's query is explicitly scoped to advertiser-ids=joined, so emptiness there reports an
-   * account-approval blocker. /websites/v2/ carries no such scope: it lists the publisher's own
-   * registered sites, which exist independently of any programme relationship. An empty result
-   * means this publisher has registered no websites — a real, ordinary account state that names
-   * no blocker and implies nothing about joined campaigns. Reporting a blocker here would be
-   * inventing one.
+   * Both are single-request list endpoints bounded to limit=1, offset=0, both must distinguish
+   * "this account has none" from "certified", and writing the control flow once means the two
+   * cannot drift apart. The path each uses lives in the adapter's own frozen spec table, which is
+   * the only place that builds a request.
+   *
+   * ZERO ROWS IS OK_NO_ROWS FOR BOTH, and that is not the judgement made for CJ advertisers. CJ's
+   * query is explicitly scoped to advertiser-ids=joined, so emptiness there reports an
+   * account-approval blocker. Neither Admitad query carries such a scope: /websites/v2/ lists the
+   * publisher's own registered sites, and the UNSCOPED /advcampaigns/ may return catalogue-wide
+   * programmes rather than only joined ones. Reading "no joined campaigns" out of an empty result
+   * from either would be inventing a finding the query cannot support — so no accountStateBlocker
+   * is reported, for either object.
    *
    * The row schema is still unknown in that case, so schema stays UNKNOWN_NEEDS_LIVE_DATA: a
    * certified-looking OK with an empty field list would read as "this object has no fields".
    *
    * Only structural paths, types and counts leave this method. summarisePayloads never reports a
-   * value, so no website id, name, site URL, status, verification state or category can reach the
-   * response.
+   * value, so no website or programme id, name, site or tracking URL, status, category, currency,
+   * commission rate or rate range can reach the response.
    */
-  async certifyAdmitadWebsites({ adapter, key, probe, budgetLeft }) {
+  async certifyAdmitadSample({ adapter, key, probe, budgetLeft, sourceObject }) {
     const base = {
       network: key,
-      sourceObject: "websites",
+      sourceObject,
       endpointKey: probe.endpointKey,
       httpMethod: probe.method,
       sampleCount: 0,
@@ -1107,7 +1121,7 @@ export class NetworkCertificationService {
       // One row is all a field dictionary needs. The adapter already slices; this is the second,
       // independent bound.
       const rows = asRows(
-        await adapter.fetchCertificationWebsiteSample({ timeoutMs }),
+        await adapter.fetchCertificationSample(sourceObject, { timeoutMs }),
       ).slice(0, 1);
 
       if (!rows.length) {
@@ -1832,8 +1846,10 @@ export class NetworkCertificationService {
         continue;
       }
 
-      if (probe.chain === "admitadWebsites") {
-        results.push(await this.certifyAdmitadWebsites({ adapter, key, probe, budgetLeft }));
+      if (probe.chain === "admitadSample") {
+        results.push(
+          await this.certifyAdmitadSample({ adapter, key, probe, budgetLeft, sourceObject }),
+        );
         continue;
       }
 

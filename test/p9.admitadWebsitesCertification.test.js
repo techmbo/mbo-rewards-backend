@@ -13,7 +13,7 @@ const {
   createAdmitadAdapter,
   extractAdmitadCollection,
   ADMITAD_CERTIFICATION_MAX_ROWS,
-  ADMITAD_CERTIFICATION_WEBSITE_PARAMS,
+  ADMITAD_CERTIFICATION_PAGE_PARAMS,
 } = await import("../src/adapters/admitad.adapter.js");
 const { NetworkCertificationService, listProbeNetworks, listProbeSourceObjects } = await import(
   "../src/modules/ops/networkCertification.service.js"
@@ -103,12 +103,12 @@ describe("Admitad is registered in the certification framework", () => {
     assert.ok(listProbeNetworks().includes("admitad"));
   });
 
-  it("exposes websites and nothing else yet", () => {
-    assert.deepEqual(listProbeSourceObjects("admitad"), ["websites"]);
+  it("exposes websites and programs", () => {
+    assert.deepEqual(listProbeSourceObjects("admitad").sort(), ["programs", "websites"]);
   });
 
-  it("does not add campaign, coupon or action probes", () => {
-    for (const notYet of ["programs", "coupons", "actions", "campaigns", "product_feeds"]) {
+  it("does not add coupon, action or product probes yet", () => {
+    for (const notYet of ["coupons", "actions", "campaigns", "product_feeds"]) {
       assert.ok(!listProbeSourceObjects("admitad").includes(notYet), notYet);
     }
   });
@@ -145,48 +145,48 @@ describe("Admitad is registered in the certification framework", () => {
 describe("the Admitad websites request is exactly one bounded GET", () => {
   it("issues exactly one supplier request", async () => {
     const spy = spyHttp();
-    await adapterWith(spy).fetchCertificationWebsiteSample({ timeoutMs: 5000 });
+    await adapterWith(spy).fetchCertificationSample("websites", { timeoutMs: 5000 });
     assert.equal(spy.calls.length, 1);
   });
 
   it("uses the production path verbatim", async () => {
     const spy = spyHttp();
-    await adapterWith(spy).fetchCertificationWebsiteSample({});
+    await adapterWith(spy).fetchCertificationSample("websites", {});
     assert.equal(spy.calls[0].path, "/websites/v2/");
   });
 
   it("sends limit=1 and offset=0", async () => {
     const spy = spyHttp();
-    await adapterWith(spy).fetchCertificationWebsiteSample({});
+    await adapterWith(spy).fetchCertificationSample("websites", {});
     assert.deepEqual(spy.calls[0].config.params, { limit: 1, offset: 0 });
   });
 
   it("pins the bounds as a frozen constant the caller cannot mutate", () => {
-    assert.deepEqual({ ...ADMITAD_CERTIFICATION_WEBSITE_PARAMS }, { limit: 1, offset: 0 });
-    assert.ok(Object.isFrozen(ADMITAD_CERTIFICATION_WEBSITE_PARAMS));
+    assert.deepEqual({ ...ADMITAD_CERTIFICATION_PAGE_PARAMS }, { limit: 1, offset: 0 });
+    assert.ok(Object.isFrozen(ADMITAD_CERTIFICATION_PAGE_PARAMS));
   });
 
   it("copies the frozen bounds rather than handing them to axios by reference", async () => {
     const spy = spyHttp();
-    await adapterWith(spy).fetchCertificationWebsiteSample({});
-    assert.notEqual(spy.calls[0].config.params, ADMITAD_CERTIFICATION_WEBSITE_PARAMS);
+    await adapterWith(spy).fetchCertificationSample("websites", {});
+    assert.notEqual(spy.calls[0].config.params, ADMITAD_CERTIFICATION_PAGE_PARAMS);
   });
 
   it("sends no other request parameter at all", async () => {
     const spy = spyHttp();
-    await adapterWith(spy).fetchCertificationWebsiteSample({});
+    await adapterWith(spy).fetchCertificationSample("websites", {});
     assert.deepEqual(Object.keys(spy.calls[0].config.params).sort(), ["limit", "offset"]);
   });
 
   it("applies the certification timeout to the request", async () => {
     const spy = spyHttp();
-    await adapterWith(spy).fetchCertificationWebsiteSample({ timeoutMs: 4321 });
+    await adapterWith(spy).fetchCertificationSample("websites", { timeoutMs: 4321 });
     assert.equal(spy.calls[0].config.timeout, 4321);
   });
 
   it("falls back to its own timeout ceiling when none is supplied", async () => {
     const spy = spyHttp();
-    await adapterWith(spy).fetchCertificationWebsiteSample({});
+    await adapterWith(spy).fetchCertificationSample("websites", {});
     assert.ok(Number.isFinite(spy.calls[0].config.timeout));
     assert.ok(spy.calls[0].config.timeout > 0);
   });
@@ -196,20 +196,20 @@ describe("the Admitad websites request is exactly one bounded GET", () => {
       results: WEBSITE_PAYLOAD.results,
       _meta: { count: 5000, limit: 1, offset: 0 },
     });
-    await adapterWith(spy).fetchCertificationWebsiteSample({});
+    await adapterWith(spy).fetchCertificationSample("websites", {});
     assert.equal(spy.calls.length, 1);
   });
 
   it("does not retry a supplier rejection", async () => {
     const boom = Object.assign(new Error("upstream"), { response: { status: 500 } });
     const spy = spyHttp(boom);
-    await assert.rejects(() => adapterWith(spy).fetchCertificationWebsiteSample({}));
+    await assert.rejects(() => adapterWith(spy).fetchCertificationSample("websites", {}));
     assert.equal(spy.calls.length, 1);
   });
 
   it("does not route through the paginating or retrying helpers", () => {
     const sampler = codeOf(ADAPTER_SRC)
-      .split("async fetchCertificationWebsiteSample")[1]
+      .split("async fetchCertificationSample")[1]
       .split("async fetchCampaigns")[0];
     assert.ok(!sampler.includes("fetchOffsetPaginated"));
     assert.ok(!sampler.includes("requestWithRetry"));
@@ -226,13 +226,13 @@ describe("the sample is bounded to one row, twice and independently", () => {
   it("slices in the adapter even when the supplier ignores limit=1", async () => {
     const many = { results: [...Array(25)].map((_, i) => ({ id: i, name: `zz${i}zz` })) };
     const spy = spyHttp(many);
-    const rows = await adapterWith(spy).fetchCertificationWebsiteSample({});
+    const rows = await adapterWith(spy).fetchCertificationSample("websites", {});
     assert.equal(rows.length, 1);
   });
 
   it("slices again in the service when an adapter hands back more than one row", async () => {
     const result = await certifyWebsites({
-      fetchCertificationWebsiteSample: async () => [
+      fetchCertificationSample: async () => [
         { id: 1, name: "zzonezz" },
         { id: 2, name: "zztwozz" },
       ],
@@ -242,7 +242,7 @@ describe("the sample is bounded to one row, twice and independently", () => {
 
   it("parses rows with production's own collection extractor", async () => {
     const spy = spyHttp();
-    const rows = await adapterWith(spy).fetchCertificationWebsiteSample({});
+    const rows = await adapterWith(spy).fetchCertificationSample("websites", {});
     assert.deepEqual(rows, extractAdmitadCollection(WEBSITE_PAYLOAD).slice(0, 1));
   });
 
@@ -401,7 +401,7 @@ describe("credentials come from configuration and never from a caller", () => {
 
   it("accepts no token, path or account identifier from a caller", () => {
     const chain = codeOf(SERVICE_SRC)
-      .split("async certifyAdmitadWebsites")[1]
+      .split("async certifyAdmitadSample")[1]
       .split("async certifyAwinCommissionGroups")[0];
     for (const leak of ["req.body", "req.query", "ctx.accessToken", "options.path", "params.path"]) {
       assert.ok(!chain.includes(leak), leak);
@@ -412,7 +412,7 @@ describe("credentials come from configuration and never from a caller", () => {
   it("builds the adapter with the resolved token and nothing else", () => {
     const builder = codeOf(SERVICE_SRC)
       .split("async buildAdmitadAdapter")[1]
-      .split("async certifyAdmitadWebsites")[0];
+      .split("async certifyAdmitadSample")[0];
     assert.match(builder, /factory\(\{ accessToken: credentials\.accessToken \}\)/);
     assert.ok(!builder.includes("baseURL"));
   });
@@ -420,7 +420,7 @@ describe("credentials come from configuration and never from a caller", () => {
   it("registers the token for redaction", () => {
     const builder = codeOf(SERVICE_SRC)
       .split("async buildAdmitadAdapter")[1]
-      .split("async certifyAdmitadWebsites")[0];
+      .split("async certifyAdmitadSample")[0];
     assert.match(builder, /recordRedactionValues\(/);
     assert.match(builder, /\[credentials\.accessToken\]/);
   });
@@ -480,7 +480,7 @@ describe("certification stays read-only", () => {
 
   it("triggers no sync and writes no raw entity", () => {
     const chain = codeOf(SERVICE_SRC)
-      .split("async certifyAdmitadWebsites")[1]
+      .split("async certifyAdmitadSample")[1]
       .split("async certifyAwinCommissionGroups")[0];
     for (const write of ["upsert", "create", "update", "delete", "upsertManyRawEntities"]) {
       assert.ok(!chain.includes(write), write);
@@ -490,7 +490,7 @@ describe("certification stays read-only", () => {
   it("leaves the production websites fetcher paginating as before", () => {
     const production = codeOf(ADAPTER_SRC)
       .split("async fetchWebsites")[1]
-      .split("async fetchCertificationWebsiteSample")[0];
+      .split("async fetchCertificationSample")[0];
     assert.ok(production.includes("fetchOffsetPaginated"));
   });
 

@@ -12,9 +12,27 @@ export const ADMITAD_CERTIFICATION_TIMEOUT_MS = Number(
 /** A field dictionary needs one row. The service bounds this again, independently. */
 export const ADMITAD_CERTIFICATION_MAX_ROWS = 1;
 
-/** The websites page the certification probe asks for. Not a guess and not smaller than anything
- *  production sends: authenticate() already issues this exact path with these exact bounds. */
-export const ADMITAD_CERTIFICATION_WEBSITE_PARAMS = Object.freeze({ limit: 1, offset: 0 });
+/** The page every Admitad certification probe asks for. Not a guess and not smaller than anything
+ *  production sends: authenticate() already issues limit=1, offset=0 against /websites/v2/, and
+ *  fetchOffsetPaginated sends the same two parameters on every path it walks. */
+export const ADMITAD_CERTIFICATION_PAGE_PARAMS = Object.freeze({ limit: 1, offset: 0 });
+
+/**
+ * Every Admitad source object certification can sample, and the one path each uses.
+ *
+ * A frozen registry rather than a path argument: there is no call shape here through which a
+ * caller could reach an endpoint this table does not name. Each path is production's own —
+ * /websites/v2/ is what authenticate() calls, /advcampaigns/ is what fetchCampaigns calls when no
+ * websiteId is supplied, which is how the sync job calls it.
+ *
+ * The programmes path is deliberately the UNSCOPED one. /advcampaigns/website/{w_id}/ would need a
+ * website id, and discovering one to then scope a probe by it is a second request and a second
+ * decision; the unscoped path is what production actually runs.
+ */
+export const ADMITAD_CERTIFICATION_SPECS = Object.freeze({
+  websites: Object.freeze({ method: "GET", path: "/websites/v2/" }),
+  programs: Object.freeze({ method: "GET", path: "/advcampaigns/" }),
+});
 
 function asObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -207,7 +225,7 @@ export function createAdmitadAdapter({
     },
 
     /**
-     * One bounded websites certification request.
+     * One bounded certification request for any source object in ADMITAD_CERTIFICATION_SPECS.
      *
      * GET /websites/v2/ with limit=1, offset=0 — the exact request authenticate() already makes in
      * production, so certification asks the supplier for nothing new and nothing smaller. That is
@@ -219,17 +237,27 @@ export function createAdmitadAdapter({
      * wraps requestWithRetry with three retries, which would turn one supplier rejection into
      * three.
      *
-     * websites is PUBLISHER-scoped, not campaign-scoped: it lists this publisher's own registered
-     * sites, so it returns rows whether or not any programme has been joined. That is why it is
-     * the first Admitad object certified, and why an empty result here is OK_NO_ROWS rather than
-     * an account-state blocker.
+     * Neither object certified here is scoped to joined programmes. websites lists this
+     * publisher's own registered sites; the unscoped /advcampaigns/ may return catalogue-wide
+     * programmes rather than only joined ones. So an empty result from either is OK_NO_ROWS and
+     * never an account-state blocker — reading "no joined campaigns" out of a query that does not
+     * ask about joins would be inventing a finding.
      *
      * The collection is read with extractAdmitadCollection, production's own extractor, so what is
      * sampled is a ROW and never the {results, _meta} envelope around it.
      */
-    async fetchCertificationWebsiteSample({ timeoutMs } = {}) {
-      const response = await httpClient.get("/websites/v2/", {
-        params: { ...ADMITAD_CERTIFICATION_WEBSITE_PARAMS },
+    async fetchCertificationSample(sourceObject, { timeoutMs } = {}) {
+      // Object.hasOwn, not a bare lookup: a plain property read would follow the prototype chain
+      // and let a name like "constructor" resolve to something that is not a spec.
+      const spec = Object.hasOwn(ADMITAD_CERTIFICATION_SPECS, String(sourceObject))
+        ? ADMITAD_CERTIFICATION_SPECS[String(sourceObject)]
+        : null;
+      if (!spec) {
+        throw new Error(`No Admitad certification sample is defined for "${sourceObject}"`);
+      }
+
+      const response = await httpClient.get(spec.path, {
+        params: { ...ADMITAD_CERTIFICATION_PAGE_PARAMS },
         timeout: Number(timeoutMs || ADMITAD_CERTIFICATION_TIMEOUT_MS),
       });
 
