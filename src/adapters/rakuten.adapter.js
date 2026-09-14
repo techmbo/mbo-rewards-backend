@@ -18,6 +18,40 @@ function finitePositive(value, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+/** Certification-only ceiling. Shorter than the shared 30s client default so a probe reports its
+ *  own timeout inside the source budget instead of being killed by the runtime. */
+export const RAKUTEN_CERTIFICATION_TIMEOUT_MS = Number(
+  process.env.RAKUTEN_CERTIFICATION_TIMEOUT_MS || 15000,
+);
+
+/** A field dictionary needs one row. The service bounds this again, independently. */
+export const RAKUTEN_CERTIFICATION_MAX_ROWS = 1;
+
+/**
+ * Every Rakuten source object certification can sample, and the one path each uses.
+ *
+ * A frozen registry rather than a path argument: there is no call shape through which a caller
+ * could reach an endpoint this table does not name.
+ *
+ * advertisers is production's own: authenticate() already issues GET /v2/advertisers with exactly
+ * limit=1 and page=1, so the certified request is not a smaller variant of what production sends,
+ * it IS what production sends. collectionKeys are fetchAdvertisers' own, so the same extractor
+ * reads the same container.
+ *
+ * Bearer only. Advanced Reports and the web security token are deliberately absent: this probe
+ * must separate "the Bearer works" from a credential it does not need.
+ */
+export const RAKUTEN_CERTIFICATION_SPECS = Object.freeze({
+  advertisers: Object.freeze({
+    method: "GET",
+    path: "/v2/advertisers",
+    collectionKeys: Object.freeze(["advertisers", "advertiser"]),
+  }),
+});
+
+/** The page every Rakuten certification probe asks for — authenticate()'s own bounds. */
+export const RAKUTEN_CERTIFICATION_PAGE_PARAMS = Object.freeze({ limit: 1, page: 1 });
+
 export function extractRakutenCollection(payload, keys = []) {
   if (Array.isArray(payload)) return payload;
   const body = asObject(payload);
@@ -236,15 +270,20 @@ export function createRakutenAdapter({
   securityToken = null,
   baseURL = process.env.RAKUTEN_BASE_URL || "https://api.linksynergy.com",
   advancedReportCallBudget = Number(process.env.RAKUTEN_ADVANCED_REPORT_MAX_CALLS_PER_RUN) || DEFAULT_ADVANCED_REPORT_CALL_BUDGET,
+  // Same seam the Awin, CJ and Admitad adapters expose. Default unchanged, so no production call
+  // site is affected; it exists so the certification probe can be exercised as itself.
+  httpClient: injectedHttpClient = null,
 } = {}) {
   if (!accessToken) throw new Error("Rakuten adapter requires accessToken");
 
   const root = String(baseURL).replace(/\/$/, "");
-  const httpClient = createHttpClient({
-    baseURL: root,
-    apiKey: `Bearer ${accessToken}`,
-    headers: { Accept: "application/json" },
-  });
+  const httpClient =
+    injectedHttpClient ??
+    createHttpClient({
+      baseURL: root,
+      apiKey: `Bearer ${accessToken}`,
+      headers: { Accept: "application/json" },
+    });
 
   let advancedReportCalls = 0;
 
@@ -339,6 +378,43 @@ export function createRakutenAdapter({
 
     async healthCheck(stats = null) {
       return this.authenticate(stats);
+    },
+
+    /**
+     * One bounded certification request for any source object in RAKUTEN_CERTIFICATION_SPECS.
+     *
+     * GET /v2/advertisers with limit=1, page=1 — the exact request authenticate() already makes in
+     * production, so certification asks the supplier for nothing new and nothing smaller. That is
+     * the point the Awin coupons 500 made: asking for LESS than production ever asks for is still
+     * asking for something unevidenced. Here the bounded form IS the evidenced form.
+     *
+     * fetchPagedJson is deliberately NOT used — it loops until a page comes back short. getJson is
+     * also skipped, because it wraps requestWithRetry with three retries, and a probe that retries
+     * turns one supplier rejection into three.
+     *
+     * The collection is read with extractRakutenCollection, production's own extractor, using
+     * fetchAdvertisers' own container keys, so what is sampled is a ROW and never the envelope.
+     */
+    async fetchCertificationSample(sourceObject, { timeoutMs } = {}) {
+      // Object.hasOwn, not a bare lookup: a plain property read would follow the prototype chain
+      // and let a name like "constructor" resolve to something that is not a spec.
+      const spec = Object.hasOwn(RAKUTEN_CERTIFICATION_SPECS, String(sourceObject))
+        ? RAKUTEN_CERTIFICATION_SPECS[String(sourceObject)]
+        : null;
+      if (!spec) {
+        throw new Error(`No Rakuten certification sample is defined for "${sourceObject}"`);
+      }
+
+      const response = await httpClient.get(spec.path, {
+        params: { ...RAKUTEN_CERTIFICATION_PAGE_PARAMS },
+        headers: { Accept: "application/json" },
+        timeout: Number(timeoutMs || RAKUTEN_CERTIFICATION_TIMEOUT_MS),
+      });
+
+      return extractRakutenCollection(response?.data, [...spec.collectionKeys]).slice(
+        0,
+        RAKUTEN_CERTIFICATION_MAX_ROWS,
+      );
     },
 
     async fetchAdvertisers(params = {}, stats = null) {

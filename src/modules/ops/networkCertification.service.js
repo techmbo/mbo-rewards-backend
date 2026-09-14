@@ -5,11 +5,13 @@ import { createPartnerizeAdapter } from "../../adapters/partnerize.adapter.js";
 import { createAwinAdapter } from "../../adapters/awin.adapter.js";
 import { createCjAdapter } from "../../adapters/cj.adapter.js";
 import { createAdmitadAdapter } from "../../adapters/admitad.adapter.js";
+import { createRakutenAdapter } from "../../adapters/rakuten.adapter.js";
 import { resolveOptimiseCredentials } from "../integrations/optimiseCredentials.js";
 import { resolvePartnerizeCertificationCredentials } from "../integrations/partnerizeCredentials.js";
 import { resolveAwinCertificationCredentials } from "../integrations/awinCredentials.js";
 import { resolveCjCertificationCredentials } from "../integrations/cjCredentials.js";
 import { resolveAdmitadCertificationCredentials } from "../integrations/admitadCredentials.js";
+import { resolveRakutenCertificationCredentials } from "../integrations/rakutenCredentials.js";
 import { comparePathSets, summarisePayloads } from "./payloadShape.js";
 
 /**
@@ -417,12 +419,38 @@ const ADMITAD_PROBES = Object.freeze({
   },
 });
 
+/**
+ * Rakuten probe registry — advertisers only.
+ *
+ * Chosen first because its bounded request is ALREADY production's: authenticate() issues
+ * GET /v2/advertisers with limit=1 and page=1, so nothing is invented. It needs the Bearer alone,
+ * which separates "the access token works" from the separate web security token Advanced Reports
+ * requires.
+ *
+ * Whether /v2/advertisers is catalogue-wide or relationship-scoped is NOT established by this
+ * repo — the sync job calls it completely unscoped. That is why an empty result here reports
+ * OK_NO_ROWS and names no blocker: claiming "no joined campaigns" would assert a scope the
+ * integration has never proved.
+ *
+ * partnerships, offers, commissioning_lists, events and the Advanced Reports objects all have live
+ * fetchers and catalog entries, and all stay out of this registry until certified in their own
+ * right. A probe registry entry is an executable claim, not a restatement of the catalog.
+ */
+const RAKUTEN_PROBES = Object.freeze({
+  advertisers: {
+    method: "GET",
+    endpointKey: "GET /v2/advertisers (limit=1, page=1)",
+    chain: "rakutenSample",
+  },
+});
+
 const PROBE_REGISTRY = Object.freeze({
   optimise: OPTIMISE_PROBES,
   partnerize: PARTNERIZE_PROBES,
   awin: AWIN_PROBES,
   cj: CJ_PROBES,
   admitad: ADMITAD_PROBES,
+  rakuten: RAKUTEN_PROBES,
 });
 
 /**
@@ -435,6 +463,7 @@ const ADAPTER_BUILDERS = Object.freeze({
   awin: "buildAwinAdapter",
   cj: "buildCjAdapter",
   admitad: "buildAdmitadAdapter",
+  rakuten: "buildRakutenAdapter",
 });
 
 /** The networks with an executable probe registry. One source of truth, so a caller-facing
@@ -749,6 +778,8 @@ export class NetworkCertificationService {
     this.cjCredentialResolver = deps.cjCredentialResolver ?? resolveCjCertificationCredentials;
     this.admitadCredentialResolver =
       deps.admitadCredentialResolver ?? resolveAdmitadCertificationCredentials;
+    this.rakutenCredentialResolver =
+      deps.rakutenCredentialResolver ?? resolveRakutenCertificationCredentials;
   }
 
   /**
@@ -1110,6 +1141,35 @@ export class NetworkCertificationService {
   }
 
   /**
+   * Rakuten certification adapter.
+   *
+   * The Bearer is resolved here, from configuration, and handed to the adapter at construction.
+   * Certification never discovers it and never accepts one from a caller.
+   *
+   * The web security token is resolved alongside it so the credential shape matches production
+   * exactly, and is passed through — but the advertisers probe never reaches a path that uses it.
+   * It is a query parameter on /advancedreports/1.0 alone, never Bearer auth, and a null one is
+   * production's own normal state.
+   *
+   * The base URL is the adapter's own default (or RAKUTEN_BASE_URL), never a caller's.
+   */
+  async buildRakutenAdapter({ accountLabel }) {
+    const credentials = await this.rakutenCredentialResolver(accountLabel);
+    if (!credentials?.accessToken) {
+      // Only whether the credential resolved is reported; nothing about it.
+      throw fail("Rakuten credentials are not configured for this account label.", 424);
+    }
+    const factory = this.adapterFactory ?? createRakutenAdapter;
+    return recordRedactionValues(
+      factory({
+        accessToken: credentials.accessToken,
+        securityToken: credentials.securityToken ?? null,
+      }),
+      [credentials.accessToken, credentials.securityToken].filter(Boolean),
+    );
+  }
+
+  /**
    * One bounded Admitad sample, shared by websites, programs, coupons and actions.
    *
    * All four are single-request list endpoints bounded to limit=1, offset=0, all four must
@@ -1219,6 +1279,68 @@ export class NetworkCertificationService {
       // independent bound.
       const rows = asRows(
         await adapter.fetchCertificationAvailableAdvertiserSample({ timeoutMs }),
+      ).slice(0, 1);
+
+      if (!rows.length) {
+        return {
+          ...base,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        };
+      }
+
+      const fieldPaths = summarisePayloads(rows);
+      return {
+        ...base,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+      };
+    } catch (error) {
+      return certificationFailure(base, error, {}, redactionValuesFor(adapter));
+    }
+  }
+
+  /**
+   * One bounded Rakuten sample. Today that is advertisers; the shape is written once so the
+   * objects added later cannot drift from it.
+   *
+   * ZERO ROWS IS OK_NO_ROWS, AND DELIBERATELY NAMES NO BLOCKER. It would be easy to report "no
+   * joined campaigns" here — this account has none — but that would assert something the
+   * integration has never established: the sync job calls /v2/advertisers completely unscoped, and
+   * nothing in this repo proves whether the endpoint returns the network catalogue or only the
+   * publisher's own advertisers. Until a live row settles that, an empty result means the endpoint
+   * returned nothing and the row schema is still unknown, which is exactly what OK_NO_ROWS and
+   * UNKNOWN_NEEDS_LIVE_DATA say.
+   *
+   * An auth failure keeps its own category and its supplier status, through the shared failure
+   * handler — a rejected Bearer and an empty account are different findings.
+   *
+   * Only structural paths, types and counts leave this method. summarisePayloads never reports a
+   * value, so no advertiser id, name, URL, category, contact, currency or commission term can
+   * reach the response.
+   */
+  async certifyRakutenSample({ adapter, key, probe, budgetLeft, sourceObject }) {
+    const base = {
+      network: key,
+      sourceObject,
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+    };
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      // One row is all a field dictionary needs. The adapter already slices; this is the second,
+      // independent bound.
+      const rows = asRows(
+        await adapter.fetchCertificationSample(sourceObject, { timeoutMs }),
       ).slice(0, 1);
 
       if (!rows.length) {
@@ -1945,6 +2067,13 @@ export class NetworkCertificationService {
 
       if (probe.chain === "cjAvailableAdvertisers") {
         results.push(await this.certifyCjAvailableAdvertisers({ adapter, key, probe, budgetLeft }));
+        continue;
+      }
+
+      if (probe.chain === "rakutenSample") {
+        results.push(
+          await this.certifyRakutenSample({ adapter, key, probe, budgetLeft, sourceObject }),
+        );
         continue;
       }
 
