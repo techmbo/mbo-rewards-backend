@@ -49,10 +49,10 @@ const KNOWN_REGISTRY_DRIFT = Object.freeze({
   // omits PAYMENTS. Its registry note already says "Final settlement = Partner Payment CSV
   // (MANUAL_UPLOAD)" — i.e. there is no payments API, which is what the declaration contradicts.
   BOOSTINY: ["PAYMENTS"],
-  // Declared in the ADAPTER's own getCapabilities() with no fetchProducts, so assertAdapterContract
-  // throws during construction: createSupplierAdapter("AWIN", …) fails today. Reported, not fixed
-  // here — it is a live sync defect in a supplier outside this change.
-  AWIN: ["PRODUCTS"],
+  // AWIN was here: it declared PRODUCTS with no fetchProducts, so assertAdapterContract threw
+  // during construction and createSupplierAdapter("AWIN", …) failed outright. Fixed — the false
+  // capability is gone from both the adapter and the registry — so it is removed from this list
+  // rather than left as a standing exemption.
 });
 
 function build(key) {

@@ -143,12 +143,22 @@ const CATALOG = Object.freeze({
     obj({ sourceObject: "programmes", label: "Programmes", endpoint: "GET programmes", live: true, entityType: "campaign" }),
     obj({ sourceObject: "offers", label: "Offers", endpoint: "GET offers / coupons", live: true, entityType: "coupon" }),
     obj({ sourceObject: "transactions", label: "Transactions", endpoint: "GET transactions", live: true, entityType: "conversion" }),
+    // live:false was already correct, but silent about WHY. There is no feed endpoint, no fetcher
+    // and not even a src/network-mappings/awin directory — so this is weaker than Partnerize
+    // products, which at least has a mapping file. Nothing to certify without inventing a path.
     obj({
       sourceObject: "product_feeds",
       label: "Product Feeds",
-      endpoint: "GET product feeds",
+      endpoint: "none — no product feed endpoint exists in this integration",
       live: false,
+      availability: SOURCE_OBJECT_AVAILABILITY.NO_ENDPOINT,
       entityType: "product",
+      notes:
+        "No product, feed, catalog or datafeed path is built in the Awin adapter, no fetchProducts " +
+        "exists, and no Awin mapping files exist. The PRODUCTS capability that claimed otherwise " +
+        "has been removed from both the adapter and the registry. Basket lines returned by " +
+        "showBasketProducts on the transactions request are ORDER_ITEMS inside a conversion, not " +
+        "a product feed.",
     }),
   ]),
   admitad: Object.freeze([

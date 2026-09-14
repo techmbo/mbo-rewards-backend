@@ -58,9 +58,11 @@ export const SUPPLIER_CAPABILITY_CATALOG = Object.freeze({
   },
   AWIN: {
     implementationStatus: "IMPLEMENTED",
-    capabilities: [SUPPLIER_CAPABILITIES.CAMPAIGNS, SUPPLIER_CAPABILITIES.COUPONS, SUPPLIER_CAPABILITIES.CONVERSIONS, SUPPLIER_CAPABILITIES.PRODUCTS, SUPPLIER_CAPABILITIES.DEEP_LINK, SUPPLIER_CAPABILITIES.ORDER_ITEMS, SUPPLIER_CAPABILITIES.TRACKING_SUBID, SUPPLIER_CAPABILITIES.REPORTING],
+    // PRODUCTS removed here and in the adapter: no product feed endpoint or fetcher exists.
+    // ORDER_ITEMS stays — basket lines inside a transaction are not a product feed.
+    capabilities: [SUPPLIER_CAPABILITIES.CAMPAIGNS, SUPPLIER_CAPABILITIES.COUPONS, SUPPLIER_CAPABILITIES.CONVERSIONS, SUPPLIER_CAPABILITIES.DEEP_LINK, SUPPLIER_CAPABILITIES.ORDER_ITEMS, SUPPLIER_CAPABILITIES.TRACKING_SUBID, SUPPLIER_CAPABILITIES.REPORTING],
     pagination: "page",
-    notes: ["OAuth2 Bearer; explicit publisherId → MarketplaceAccount required.", "Throttle 20 req/min/user.", "Transactions: <=31-day windows; poll transaction + validation + amendment dateTypes.", "ClickRef1–6 used for attribution injection."],
+    notes: ["OAuth2 Bearer; explicit publisherId → MarketplaceAccount required.", "Throttle 20 req/min/user.", "Transactions: <=31-day windows; poll transaction + validation + amendment dateTypes.", "ClickRef1–6 used for attribution injection.", "Product feeds are DECLARED_ONLY and now undeclared: no feed endpoint, fetcher or mapping exists in this integration."],
   },
   ADMITAD: {
     implementationStatus: "IMPLEMENTED",

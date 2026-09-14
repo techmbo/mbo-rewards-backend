@@ -86,7 +86,15 @@ export function createAwinAdapter({
           SUPPLIER_CAPABILITIES.CAMPAIGNS,
           SUPPLIER_CAPABILITIES.COUPONS,
           SUPPLIER_CAPABILITIES.CONVERSIONS,
-          SUPPLIER_CAPABILITIES.PRODUCTS,
+          // PRODUCTS is deliberately absent. Declaring it required fetchProducts(), which this
+          // adapter does not have and never had — so assertAdapterContract threw during
+          // construction and createSupplierAdapter("AWIN", …) failed outright, taking Awin sync
+          // with it. Awin's product feed is not implemented here: no product, feed, catalog or
+          // datafeed path is built anywhere in this adapter.
+          //
+          // ORDER_ITEMS below is a different claim and stays: showBasketProducts on the
+          // transactions request returns basket lines INSIDE a conversion. Basket items are not a
+          // product feed, and one must never be read as evidence of the other.
           SUPPLIER_CAPABILITIES.DEEP_LINK,
           SUPPLIER_CAPABILITIES.ORDER_ITEMS,
           SUPPLIER_CAPABILITIES.TRACKING_SUBID,
@@ -97,6 +105,7 @@ export function createAwinAdapter({
           "OAuth2 Bearer; publisherId must be mapped explicitly (token may span accounts).",
           "Throttle 20 req/min/user — shared rate limiter.",
           "Transactions max 31-day window; poll transaction + validation + amendment dateTypes.",
+          "Product feeds are NOT implemented: no feed endpoint or fetcher exists in this adapter.",
         ],
       };
     },
