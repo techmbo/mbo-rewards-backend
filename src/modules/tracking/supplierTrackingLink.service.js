@@ -77,7 +77,9 @@ export class SupplierTrackingLinkService {
    */
   async listWorkQueue({
     supplier = "PARTNERIZE",
-    state = SUPPLIER_TRACKING_LINK_STATE.NOT_GENERATED,
+    // null/undefined means "every state". The `if (state)` guard below is unchanged; only this
+    // default moved, so an omitted filter no longer silently becomes NOT_GENERATED.
+    state = null,
     joinedOnly = true,
     page = 1,
     pageSize = DEFAULT_WORK_QUEUE_PAGE_SIZE,

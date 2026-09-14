@@ -2,7 +2,6 @@ import { z } from "zod";
 import { ok } from "../core/apiResponse.js";
 import {
   SUPPLIER_TRACKING_LINK_STATES,
-  SUPPLIER_TRACKING_LINK_STATE,
   SupplierTrackingLinkValidationError,
   SUPPLIER_TRACKING_HOST_ALLOWLIST,
 } from "../modules/tracking/supplierTrackingLink.contract.js";
@@ -29,7 +28,11 @@ const booleanFlag = z
 
 const workQueueQuerySchema = z.object({
   supplier: z.enum(SUPPORTED_SUPPLIERS).default("PARTNERIZE"),
-  state: z.enum(SUPPLIER_TRACKING_LINK_STATES).default(SUPPLIER_TRACKING_LINK_STATE.NOT_GENERATED),
+  // Optional, with no default: an omitted `state` means "all states", which is the only honest way
+  // to express All without inventing an ALL enum value the database does not have. A supplied
+  // value is still validated against the real enum, so an unknown state is a 400, not a silent
+  // unfiltered query.
+  state: z.enum(SUPPLIER_TRACKING_LINK_STATES).optional(),
   joinedOnly: booleanFlag.default(true),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(MAX_WORK_QUEUE_PAGE_SIZE).default(DEFAULT_WORK_QUEUE_PAGE_SIZE),

@@ -65,7 +65,7 @@ function makeHarness({ record = makeRecord(), rows = null } = {}) {
 
 test("REQUIRED 3: the queue lists joined/approved Partnerize campaigns in NOT_GENERATED", async () => {
   const { service, calls } = makeHarness();
-  const result = await service.listWorkQueue();
+  const result = await service.listWorkQueue({ state: SUPPLIER_TRACKING_LINK_STATE.NOT_GENERATED });
   const where = calls.findMany[0].where;
   assert.equal(where.supplier, "PARTNERIZE");
   assert.equal(where.supplierTrackingLinkState, SUPPLIER_TRACKING_LINK_STATE.NOT_GENERATED);
@@ -73,6 +73,36 @@ test("REQUIRED 3: the queue lists joined/approved Partnerize campaigns in NOT_GE
   assert.deepEqual(where.OR, [{ isJoined: true }, { participationStatus: "JOINED" }]);
   assert.equal(result.rows.length, 1);
   assert.equal(result.pagination.total, 1);
+});
+
+test("ALL: an omitted state applies no state filter at all", async () => {
+  const { service, calls } = makeHarness();
+  await service.listWorkQueue();
+  const where = calls.findMany[0].where;
+  assert.equal(
+    "supplierTrackingLinkState" in where,
+    false,
+    "omitting state must not silently become NOT_GENERATED",
+  );
+  // Every other constraint still applies — All widens the state, nothing else.
+  assert.equal(where.supplier, "PARTNERIZE");
+  assert.equal(where.archivedAt, null);
+  assert.deepEqual(where.OR, [{ isJoined: true }, { participationStatus: "JOINED" }]);
+
+  for (const state of [null, undefined, ""]) {
+    calls.findMany.length = 0;
+    await service.listWorkQueue({ state });
+    assert.equal("supplierTrackingLinkState" in calls.findMany[0].where, false, JSON.stringify(state));
+  }
+});
+
+test("ALL: every individual state still filters to exactly that state", async () => {
+  const { service, calls } = makeHarness();
+  for (const state of Object.values(SUPPLIER_TRACKING_LINK_STATE)) {
+    calls.findMany.length = 0;
+    await service.listWorkQueue({ state });
+    assert.equal(calls.findMany[0].where.supplierTrackingLinkState, state, state);
+  }
 });
 
 test("unjoined campaigns are not presented as manual-link work by default", async () => {

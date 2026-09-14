@@ -16,6 +16,11 @@ const CONTROLLER = readFileSync(
   "utf8",
 );
 
+const SERVICE_SRC_FOR_ALL = readFileSync(
+  new URL("../src/modules/tracking/supplierTrackingLink.service.js", import.meta.url),
+  "utf8",
+);
+
 const QUEUE = '"/supplier-campaigns/tracking-links/queue"';
 const SET = '"/supplier-campaigns/:id/tracking-link"';
 const STATE = '"/supplier-campaigns/:id/tracking-link/state"';
@@ -116,4 +121,64 @@ test("the app boots with the new routes mounted", async () => {
   const { createApp } = await import("../src/app.js");
   const app = createApp();
   assert.ok(app, "createApp() must succeed with the tracking-link routes mounted");
+});
+
+/* ------------------------------------------------- ALL filter query contract */
+
+test("ALL: state is optional with no default, so omitting it means every state", async () => {
+  const { z } = await import("zod");
+  const { SUPPLIER_TRACKING_LINK_STATES } = await import(
+    "../src/modules/tracking/supplierTrackingLink.contract.js"
+  );
+  const schema = z.object({
+    supplier: z.enum(["PARTNERIZE"]).default("PARTNERIZE"),
+    state: z.enum(SUPPLIER_TRACKING_LINK_STATES).optional(),
+  });
+
+  // Omitted -> undefined, which the service reads as "no state filter".
+  const omitted = schema.parse({});
+  assert.equal(omitted.state, undefined);
+  assert.equal("state" in omitted && omitted.state !== undefined, false);
+
+  // The controller must carry no default for state, or All can never be expressed.
+  assert.ok(!/state:\s*z\.enum\([^)]*\)\.default\(/.test(CONTROLLER), "state must not have a default");
+  assert.ok(CONTROLLER.includes("state: z.enum(SUPPLIER_TRACKING_LINK_STATES).optional()"));
+});
+
+test("ALL: a supplied state is still validated against the real enum", async () => {
+  const { z } = await import("zod");
+  const { SUPPLIER_TRACKING_LINK_STATES } = await import(
+    "../src/modules/tracking/supplierTrackingLink.contract.js"
+  );
+  const schema = z.object({ state: z.enum(SUPPLIER_TRACKING_LINK_STATES).optional() });
+
+  for (const state of SUPPLIER_TRACKING_LINK_STATES) {
+    assert.equal(schema.parse({ state }).state, state);
+  }
+  // An unknown value is a 400, never a silent unfiltered query.
+  for (const state of ["ALL", "all", "", "ANY", "TRACKING_LINK_UNKNOWN", "null"]) {
+    assert.equal(schema.safeParse({ state }).success, false, JSON.stringify(state));
+  }
+});
+
+test("ALL: no ALL sentinel was introduced into the state enum", async () => {
+  const { SUPPLIER_TRACKING_LINK_STATES } = await import(
+    "../src/modules/tracking/supplierTrackingLink.contract.js"
+  );
+  assert.deepEqual([...SUPPLIER_TRACKING_LINK_STATES], [
+    "TRACKING_LINK_NOT_GENERATED",
+    "TRACKING_LINK_AVAILABLE",
+    "TRACKING_LINK_NEEDS_REVIEW",
+    "TRACKING_LINK_REVOKED",
+  ]);
+  for (const source of [CONTROLLER, SERVICE_SRC_FOR_ALL]) {
+    assert.ok(!/"ALL"/.test(source), "no ALL sentinel value");
+  }
+});
+
+test("ALL: the service filter guard itself is unchanged", () => {
+  // Only the default moved. The conditional that applies the filter is the original.
+  assert.ok(SERVICE_SRC_FOR_ALL.includes("if (state) where.supplierTrackingLinkState = state;"));
+  assert.ok(SERVICE_SRC_FOR_ALL.includes("state = null"), "the default is now null, not a state");
+  assert.ok(!/state = SUPPLIER_TRACKING_LINK_STATE\.NOT_GENERATED/.test(SERVICE_SRC_FOR_ALL));
 });
