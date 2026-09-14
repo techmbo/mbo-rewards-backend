@@ -3,9 +3,11 @@ import { fail } from "../../core/apiResponse.js";
 import { createOptimiseAdapter } from "../../adapters/optimise.adapter.js";
 import { createPartnerizeAdapter } from "../../adapters/partnerize.adapter.js";
 import { createAwinAdapter } from "../../adapters/awin.adapter.js";
+import { createCjAdapter } from "../../adapters/cj.adapter.js";
 import { resolveOptimiseCredentials } from "../integrations/optimiseCredentials.js";
 import { resolvePartnerizeCertificationCredentials } from "../integrations/partnerizeCredentials.js";
 import { resolveAwinCertificationCredentials } from "../integrations/awinCredentials.js";
+import { resolveCjCertificationCredentials } from "../integrations/cjCredentials.js";
 import { comparePathSets, summarisePayloads } from "./payloadShape.js";
 
 /**
@@ -340,10 +342,27 @@ const AWIN_PROBES = Object.freeze({
   },
 });
 
+/**
+ * CJ probe registry — advertisers only, and only because its request contract is already evidenced
+ * by fetchCampaigns running in production. Everything else CJ exposes (program terms, commission
+ * detail, products) is GraphQL-gated with no fetcher, and stays out of the executable registry.
+ *
+ * REST/XML, unlike every other certified network. The response is parsed with the same extractor
+ * production uses, so a row is certified and never the XML envelope.
+ */
+const CJ_PROBES = Object.freeze({
+  advertisers: {
+    method: "GET",
+    endpointKey: "GET /v2/advertiser-lookup (advertiser-ids=joined)",
+    chain: "cjAdvertisers",
+  },
+});
+
 const PROBE_REGISTRY = Object.freeze({
   optimise: OPTIMISE_PROBES,
   partnerize: PARTNERIZE_PROBES,
   awin: AWIN_PROBES,
+  cj: CJ_PROBES,
 });
 
 /**
@@ -354,6 +373,7 @@ const ADAPTER_BUILDERS = Object.freeze({
   optimise: "buildOptimiseAdapter",
   partnerize: "buildPartnerizeAdapter",
   awin: "buildAwinAdapter",
+  cj: "buildCjAdapter",
 });
 
 /** The networks with an executable probe registry. One source of truth, so a caller-facing
@@ -665,6 +685,7 @@ export class NetworkCertificationService {
     this.credentialResolver = deps.credentialResolver ?? resolveOptimiseCredentials;
     this.partnerizeCredentialResolver = deps.partnerizeCredentialResolver ?? resolvePartnerizeCertificationCredentials;
     this.awinCredentialResolver = deps.awinCredentialResolver ?? resolveAwinCertificationCredentials;
+    this.cjCredentialResolver = deps.cjCredentialResolver ?? resolveCjCertificationCredentials;
   }
 
   /**
@@ -912,6 +933,93 @@ export class NetworkCertificationService {
         };
       }
       return certificationFailure(base, error, { windowPreset: window?.preset ?? null }, redactionValuesFor(adapter));
+    }
+  }
+
+  /**
+   * CJ certification adapter.
+   *
+   * The publisher CID and website id are resolved here, from configuration, and handed to the
+   * adapter at construction. Certification never discovers them and never accepts them from a
+   * caller: a caller-supplied CID would point the probe at another publisher's advertiser
+   * relationships.
+   */
+  async buildCjAdapter({ accountLabel }) {
+    const credentials = await this.cjCredentialResolver(accountLabel);
+    if (!credentials?.accessToken || !credentials?.requestorCid || !credentials?.websiteId) {
+      // Only whether the credential resolved is reported; nothing about it.
+      throw fail("CJ credentials are not configured for this account label.", 424);
+    }
+    const factory = this.adapterFactory ?? createCjAdapter;
+    return recordRedactionValues(
+      factory({
+        accessToken: credentials.accessToken,
+        requestorCid: credentials.requestorCid,
+        websiteId: credentials.websiteId,
+      }),
+      [credentials.accessToken, credentials.requestorCid, credentials.websiteId],
+    );
+  }
+
+  /**
+   * The CJ advertisers chain: exactly one request, publisher-scoped, no date window.
+   *
+   * Zero rows here is NOT reported as OK_NO_ROWS, and that distinction is the point. The
+   * production query is explicitly scoped to advertiser-ids=joined, so an empty collection says
+   * the account has no approved advertiser relationships — not that the endpoint returned nothing
+   * of interest, and certainly not that it is unsupported. UNKNOWN_NEEDS_JOINED_CAMPAIGN with an
+   * accountStateBlocker names the real blocker, which is an account approval rather than an
+   * integration defect.
+   *
+   * Only structural paths, types and counts leave this method. summarisePayloads never reports a
+   * value, so no advertiser or programme id, name, program URL, category, EPC or Program Term
+   * commission can reach the response — which matters here because the catalog already records
+   * that CJ's default Program Term commissions are discovery evidence and not payable truth.
+   */
+  async certifyCjAdvertisers({ adapter, key, probe, budgetLeft }) {
+    const base = {
+      network: key,
+      sourceObject: "advertisers",
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+    };
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      // One row is all a field dictionary needs. The adapter already slices; this is the second,
+      // independent bound.
+      const rows = asRows(
+        await adapter.fetchCertificationAdvertiserSample({ timeoutMs }),
+      ).slice(0, 1);
+
+      if (!rows.length) {
+        return {
+          ...base,
+          ok: false,
+          statusCategory: "UNKNOWN_NEEDS_JOINED_CAMPAIGN",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+          accountStateBlocker: "NO_JOINED_CAMPAIGNS",
+          note:
+            "The query is scoped to advertiser-ids=joined, so an empty result means this account " +
+            "has no approved advertiser relationships. Not a supplier or integration failure.",
+        };
+      }
+
+      const fieldPaths = summarisePayloads(rows);
+      return {
+        ...base,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+      };
+    } catch (error) {
+      return certificationFailure(base, error, {}, redactionValuesFor(adapter));
     }
   }
 
@@ -1605,6 +1713,11 @@ export class NetworkCertificationService {
             budgetLeft,
           }),
         );
+        continue;
+      }
+
+      if (probe.chain === "cjAdvertisers") {
+        results.push(await this.certifyCjAdvertisers({ adapter, key, probe, budgetLeft }));
         continue;
       }
 

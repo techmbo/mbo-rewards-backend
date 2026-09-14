@@ -2,6 +2,11 @@ import { createHttpClient, requestWithRetry } from "../core/httpClient.js";
 import { SUPPLIER_CAPABILITIES } from "./contract.js";
 
 const DEFAULT_RECORDS_PER_PAGE = 100;
+
+export const CJ_CERTIFICATION_TIMEOUT_MS = Number(process.env.CJ_CERTIFICATION_TIMEOUT_MS || 15000);
+
+/** Certification holds ONE parsed row. The cap is on rows kept, never on rows requested. */
+export const CJ_CERTIFICATION_MAX_ROWS = 1;
 const MAX_PAGE_COUNT = 1000;
 
 function decodeXml(value) {
@@ -160,19 +165,26 @@ export function createCjAdapter({
   websiteId,
   advertiserLookupBaseURL = process.env.CJ_ADVERTISER_LOOKUP_BASE_URL || "https://advertiser-lookup.api.cj.com",
   linkSearchBaseURL = process.env.CJ_LINK_SEARCH_BASE_URL || "https://link-search.api.cj.com",
+  // Same seam the Awin and Partnerize adapters expose. Default unchanged, so no production call
+  // site is affected; it exists so the certification probe can be exercised as itself.
+  httpClient: injectedHttpClient = null,
 } = {}) {
   if (!accessToken) throw new Error("CJ adapter requires accessToken");
   const authorization = `Bearer ${accessToken}`;
-  const advertiserClient = createHttpClient({
-    baseURL: String(advertiserLookupBaseURL).replace(/\/$/, ""),
-    apiKey: authorization,
-    headers: { Accept: "application/xml,text/xml" },
-  });
-  const linkClient = createHttpClient({
-    baseURL: String(linkSearchBaseURL).replace(/\/$/, ""),
-    apiKey: authorization,
-    headers: { Accept: "application/xml,text/xml" },
-  });
+  const advertiserClient =
+    injectedHttpClient ??
+    createHttpClient({
+      baseURL: String(advertiserLookupBaseURL).replace(/\/$/, ""),
+      apiKey: authorization,
+      headers: { Accept: "application/xml,text/xml" },
+    });
+  const linkClient =
+    injectedHttpClient ??
+    createHttpClient({
+      baseURL: String(linkSearchBaseURL).replace(/\/$/, ""),
+      apiKey: authorization,
+      headers: { Accept: "application/xml,text/xml" },
+    });
 
   async function getXml(client, path, params, stats = null) {
     if (stats) stats.requestCount = (stats.requestCount || 0) + 1;
@@ -292,6 +304,40 @@ export function createCjAdapter({
 
     async fetchCoupons(params = {}, stats = null) {
       return this.fetchLinks({ ...params, "promotion-type": params["promotion-type"] ?? "coupon" }, stats);
+    },
+
+    /**
+     * One bounded advertiser-lookup certification request.
+     *
+     * Exactly production's contract: the same path, the same requestor-cid from configuration, and
+     * advertiser-ids=joined — the value fetchCampaigns defaults to. records-per-page is
+     * production's own DEFAULT_RECORDS_PER_PAGE rather than 1: asking for LESS than production is
+     * still asking for something production never asks for, which is the lesson the Awin coupons
+     * 500 taught. What is REQUESTED is a page; what is KEPT is one row.
+     *
+     * fetchPaged is deliberately NOT used — it loops up to MAX_PAGE_COUNT times. This is one call
+     * to the client, so there is no loop to bound. getXml is also skipped, because it applies
+     * requestWithRetry with three retries and a probe that retries turns one supplier rejection
+     * into three.
+     *
+     * The XML is parsed with extractCjAdvertisers, the same extractor production uses: it reads
+     * <advertiser> blocks, so what is certified is a ROW and never the XML envelope around it.
+     */
+    async fetchCertificationAdvertiserSample({ timeoutMs } = {}) {
+      if (!requestorCid) throw new Error("CJ Advertiser Lookup requires requestor-cid");
+
+      const response = await advertiserClient.get("/v2/advertiser-lookup", {
+        params: {
+          "requestor-cid": requestorCid,
+          "advertiser-ids": "joined",
+          "records-per-page": DEFAULT_RECORDS_PER_PAGE,
+          "page-number": 1,
+        },
+        responseType: "text",
+        timeout: Number(timeoutMs || CJ_CERTIFICATION_TIMEOUT_MS),
+      });
+
+      return extractCjAdvertisers(String(response?.data ?? "")).slice(0, CJ_CERTIFICATION_MAX_ROWS);
     },
 
     async fetchAll(options = {}) {
