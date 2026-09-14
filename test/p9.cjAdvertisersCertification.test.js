@@ -110,7 +110,9 @@ const certify = async (xmlOrError, runOptions = {}) => {
 describe("cj is registered in the certification framework", () => {
   it("1 - cj is a probeable network with advertisers", () => {
     assert.ok(listProbeNetworks().includes("cj"));
-    assert.deepEqual(listProbeSourceObjects("cj"), ["advertisers"]);
+    // available_advertisers joined the registry later. It is a SEPARATE source object on the same
+    // endpoint, and this file remains the joined-only probe's own tests throughout.
+    assert.deepEqual(listProbeSourceObjects("cj").sort(), ["advertisers", "available_advertisers"]);
   });
 
   it("2 - only advertisers is registered: the GraphQL-gated objects stay out", () => {
@@ -209,8 +211,19 @@ describe("nothing is caller-controlled", () => {
     for (const forbidden of ["params[", "params.", "ctx.", "options."]) {
       assert.ok(!body.includes(forbidden), forbidden);
     }
-    // The CID it uses is the adapter's own closure value.
-    assert.match(body, /"requestor-cid": requestorCid,/);
+
+    // The request itself is built by the shared helper both advertiser probes call, so the CID
+    // evidence lives there. Same claim, one level down: it is the adapter's own closure value and
+    // nothing reaches it from a caller.
+    const helperStart = ADAPTER_SRC.indexOf("async function advertiserLookupSample(");
+    assert.ok(helperStart > -1, "the shared Advertiser Lookup helper must exist");
+    const helper = ADAPTER_SRC.slice(helperStart, ADAPTER_SRC.indexOf("\n  }", helperStart));
+    assert.match(helper, /"requestor-cid": requestorCid,/);
+    for (const forbidden of ["params[", "params.", "ctx.", "options.", "website-id"]) {
+      assert.ok(!helper.includes(forbidden), `helper: ${forbidden}`);
+    }
+    // Only the relationship scope varies, and it is passed positionally by the two methods.
+    assert.match(helper, /async function advertiserLookupSample\(relationship, timeoutMs\)/);
   });
 
   it("12 - the chain takes no caller input either", () => {

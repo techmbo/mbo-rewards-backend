@@ -7,6 +7,27 @@ export const CJ_CERTIFICATION_TIMEOUT_MS = Number(process.env.CJ_CERTIFICATION_T
 
 /** Certification holds ONE parsed row. The cap is on rows kept, never on rows requested. */
 export const CJ_CERTIFICATION_MAX_ROWS = 1;
+
+/**
+ * The advertiser-ids value each certified source object scopes its lookup by.
+ *
+ * CJ's Advertiser Lookup accepts joined, notjoined, or explicit advertiser CIDs. MBO models the
+ * first two as SEPARATE source objects on purpose:
+ *
+ *   advertisers           → joined     → the publisher's approved relationships
+ *   available_advertisers → notjoined  → the network catalogue this publisher has NOT joined
+ *
+ * They must never be combined. A catalogue row is not a campaign, and the whole point of keeping
+ * them apart is that MBO can later model network catalogue → relationship status → joined campaign
+ * → commission/coupon/link assets as distinct stages rather than one undifferentiated list.
+ *
+ * Frozen, and the only place a relationship scope is named: there is no call shape through which a
+ * caller could ask for a third value.
+ */
+export const CJ_ADVERTISER_RELATIONSHIP_SCOPES = Object.freeze({
+  advertisers: "joined",
+  available_advertisers: "notjoined",
+});
 const MAX_PAGE_COUNT = 1000;
 
 function decodeXml(value) {
@@ -195,6 +216,43 @@ export function createCjAdapter({
     return String(response?.data ?? "");
   }
 
+  /**
+   * The one bounded Advertiser Lookup request both certification probes make.
+   *
+   * fetchPaged is deliberately NOT used — it loops up to MAX_PAGE_COUNT times. This is one call to
+   * the client, so there is no loop to bound. getXml is also skipped, because it applies
+   * requestWithRetry with three retries and a probe that retries turns one supplier rejection into
+   * three.
+   *
+   * records-per-page is production's own DEFAULT_RECORDS_PER_PAGE rather than 1: asking for LESS
+   * than production is still asking for something production never asks for, which is the lesson
+   * the Awin coupons 500 taught. CJ documents 100 as the maximum and 25 as the default, so this
+   * sits at the documented ceiling and inside it. What is REQUESTED is a page; what is KEPT is one
+   * row.
+   *
+   * No website-id: that parameter belongs to Link Search. Advertiser Lookup is scoped by
+   * requestor-cid alone.
+   *
+   * The XML is parsed with extractCjAdvertisers, the same extractor production uses: it reads
+   * <advertiser> blocks, so what is certified is a ROW and never the XML envelope around it.
+   */
+  async function advertiserLookupSample(relationship, timeoutMs) {
+    if (!requestorCid) throw new Error("CJ Advertiser Lookup requires requestor-cid");
+
+    const response = await advertiserClient.get("/v2/advertiser-lookup", {
+      params: {
+        "requestor-cid": requestorCid,
+        "advertiser-ids": relationship,
+        "records-per-page": DEFAULT_RECORDS_PER_PAGE,
+        "page-number": 1,
+      },
+      responseType: "text",
+      timeout: Number(timeoutMs || CJ_CERTIFICATION_TIMEOUT_MS),
+    });
+
+    return extractCjAdvertisers(String(response?.data ?? "")).slice(0, CJ_CERTIFICATION_MAX_ROWS);
+  }
+
   async function fetchPaged({ client, path, params, extractor, containerTag, stats }) {
     const base = { ...params };
     let page = positiveInteger(base["page-number"], 1);
@@ -324,20 +382,26 @@ export function createCjAdapter({
      * <advertiser> blocks, so what is certified is a ROW and never the XML envelope around it.
      */
     async fetchCertificationAdvertiserSample({ timeoutMs } = {}) {
-      if (!requestorCid) throw new Error("CJ Advertiser Lookup requires requestor-cid");
+      return advertiserLookupSample(CJ_ADVERTISER_RELATIONSHIP_SCOPES.advertisers, timeoutMs);
+    },
 
-      const response = await advertiserClient.get("/v2/advertiser-lookup", {
-        params: {
-          "requestor-cid": requestorCid,
-          "advertiser-ids": "joined",
-          "records-per-page": DEFAULT_RECORDS_PER_PAGE,
-          "page-number": 1,
-        },
-        responseType: "text",
-        timeout: Number(timeoutMs || CJ_CERTIFICATION_TIMEOUT_MS),
-      });
-
-      return extractCjAdvertisers(String(response?.data ?? "")).slice(0, CJ_CERTIFICATION_MAX_ROWS);
+    /**
+     * One bounded NOT-JOINED advertiser certification request.
+     *
+     * The same endpoint, the same requestor-cid, the same bounds — one parameter differs, and it
+     * is the one that decides which side of the relationship boundary is being sampled. Sharing
+     * advertiserLookupSample with the joined probe is what guarantees nothing else can drift
+     * between them.
+     *
+     * Zero rows here means this publisher has joined everything CJ offers it, or the catalogue is
+     * empty for this account. Either way it is OK_NO_ROWS: unlike the joined query, an empty
+     * notjoined result says nothing about approvals and names no blocker.
+     */
+    async fetchCertificationAvailableAdvertiserSample({ timeoutMs } = {}) {
+      return advertiserLookupSample(
+        CJ_ADVERTISER_RELATIONSHIP_SCOPES.available_advertisers,
+        timeoutMs,
+      );
     },
 
     async fetchAll(options = {}) {

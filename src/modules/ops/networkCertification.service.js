@@ -358,6 +358,15 @@ const CJ_PROBES = Object.freeze({
     endpointKey: "GET /v2/advertiser-lookup (advertiser-ids=joined)",
     chain: "cjAdvertisers",
   },
+  // The SAME endpoint, one parameter apart, and deliberately a separate source object.
+  // advertisers is the publisher's approved relationships; available_advertisers is the network
+  // catalogue it has not joined. Combining them would collapse the very distinction MBO needs to
+  // model catalogue → relationship status → joined campaign → commission/coupon/link assets.
+  available_advertisers: {
+    method: "GET",
+    endpointKey: "GET /v2/advertiser-lookup (advertiser-ids=notjoined)",
+    chain: "cjAvailableAdvertisers",
+  },
 });
 
 /**
@@ -1174,6 +1183,69 @@ export class NetworkCertificationService {
   }
 
   /**
+   * The CJ available-advertisers chain: exactly one request, publisher-scoped, no date window.
+   *
+   * ZERO ROWS IS OK_NO_ROWS HERE, AND THAT IS THE OPPOSITE JUDGEMENT FROM THE JOINED PROBE — on
+   * the same endpoint, one parameter apart. advertiser-ids=joined asks about approvals, so
+   * emptiness there reports NO_JOINED_CAMPAIGNS. advertiser-ids=notjoined asks what this publisher
+   * has NOT joined, so emptiness says the catalogue offered nothing outstanding; it implies no
+   * approval state at all and names no blocker.
+   *
+   * A CID AUTHORIZATION REJECTION IS NOT AN ACCOUNT STATE. CJ answers an unauthorized requestor-cid
+   * with 400, which statusCategory already classifies as REQUEST_REJECTED and certificationFailure
+   * already carries as a supplierStatusCode with a redacted supplierMessage. Nothing here rewrites
+   * that into "no campaigns": a configuration failure and an empty catalogue are different
+   * findings, and translating one into the other would hide a broken credential behind a plausible
+   * business explanation.
+   *
+   * Only structural paths, types and counts leave this method. summarisePayloads never reports a
+   * value, so no advertiser id, name, program URL, category, EPC, network rank or Program Term
+   * commission can reach the response.
+   */
+  async certifyCjAvailableAdvertisers({ adapter, key, probe, budgetLeft }) {
+    const base = {
+      network: key,
+      sourceObject: "available_advertisers",
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+    };
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      // One row is all a field dictionary needs. The adapter already slices; this is the second,
+      // independent bound.
+      const rows = asRows(
+        await adapter.fetchCertificationAvailableAdvertiserSample({ timeoutMs }),
+      ).slice(0, 1);
+
+      if (!rows.length) {
+        return {
+          ...base,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        };
+      }
+
+      const fieldPaths = summarisePayloads(rows);
+      return {
+        ...base,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+      };
+    } catch (error) {
+      return certificationFailure(base, error, {}, redactionValuesFor(adapter));
+    }
+  }
+
+  /**
    * The Awin commission-group chain: at most TWO requests, and often one.
    *
    * The endpoint is advertiser-scoped, so it needs an id. That id is DISCOVERED — one bounded
@@ -1868,6 +1940,11 @@ export class NetworkCertificationService {
 
       if (probe.chain === "cjAdvertisers") {
         results.push(await this.certifyCjAdvertisers({ adapter, key, probe, budgetLeft }));
+        continue;
+      }
+
+      if (probe.chain === "cjAvailableAdvertisers") {
+        results.push(await this.certifyCjAvailableAdvertisers({ adapter, key, probe, budgetLeft }));
         continue;
       }
 
