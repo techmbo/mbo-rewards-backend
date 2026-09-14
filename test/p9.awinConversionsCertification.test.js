@@ -184,8 +184,10 @@ describe("awin conversions — the window is the service's, never a caller's", (
     const days =
       (Date.parse(spy.calls[0].params.endDate) - Date.parse(spy.calls[0].params.startDate)) / 86400000;
     assert.equal(Math.round(days), 7);
-    assert.match(spy.calls[0].params.startDate, /^\d{4}-\d{2}-\d{2}$/);
-    assert.match(spy.calls[0].params.endDate, /^\d{4}-\d{2}-\d{2}$/);
+    // Datetimes, not bare dates: Awin rejects bare dates on this endpoint with "Wrong data type",
+    // proven live across three probes. Both dates carry the same midnight suffix.
+    assert.match(spy.calls[0].params.startDate, /^\d{4}-\d{2}-\d{2}T00:00:00$/);
+    assert.match(spy.calls[0].params.endDate, /^\d{4}-\d{2}-\d{2}T00:00:00$/);
   });
 
   it("8 — 30d widens the span; the preset token is echoed back", async () => {
@@ -508,8 +510,8 @@ describe("the adapter sampler itself", () => {
         status: "approved",
       },
     });
-    assert.equal(spy.calls[0].params.startDate, "2026-02-01");
-    assert.equal(spy.calls[0].params.endDate, "2026-02-10");
+    assert.equal(spy.calls[0].params.startDate, "2026-02-01T00:00:00");
+    assert.equal(spy.calls[0].params.endDate, "2026-02-10T00:00:00");
     assert.equal(spy.calls[0].params.dateType, "transaction");
     assert.equal(spy.calls[0].params.status, undefined);
     assert.ok(!JSON.stringify(spy.calls).includes("1999-01-01"));

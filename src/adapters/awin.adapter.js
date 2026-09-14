@@ -32,6 +32,25 @@ export const AWIN_CERTIFICATION_MAX_ROWS = 1;
  */
 export const AWIN_MAX_TRANSACTION_WINDOW_DAYS = 31;
 
+/**
+ * The transaction date format Awin actually accepts: YYYY-MM-DDTHH:mm:ss.
+ *
+ * Established live, not guessed. Sent as bare dates the endpoint answered 400 "Wrong data type for
+ * parameter 'endDate'"; with endDate alone as a datetime it answered 400 naming 'startDate'; with
+ * both as datetimes it answered 200. Three requests, each moving one thing.
+ *
+ * ONE function, used by production fetchConversions and by the certification spec, so the two
+ * cannot serialise a date differently — the drift that made this take three probes to find.
+ *
+ * A value that is already a datetime passes through untouched: appending twice would produce
+ * exactly the malformed parameter this fixes. Midnight, because that is the instant the date-only
+ * value denoted; the window is unchanged in width or position.
+ */
+export function awinTransactionDateParam(value) {
+  const text = String(value ?? "");
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? `${text}T00:00:00` : text;
+}
+
 /** Raised when a preset resolves to a window this endpoint cannot accept. Not a supplier error. */
 export class AwinWindowTooWideError extends Error {
   constructor(days, maxDays) {
@@ -65,8 +84,8 @@ const AWIN_CONVERSIONS_SPEC = Object.freeze({
   maxWindowDays: AWIN_MAX_TRANSACTION_WINDOW_DAYS,
   path: (resolved) => `/publishers/${resolved.publisherId}/transactions/`,
   params: (resolved) => ({
-    startDate: resolved.window.from,
-    endDate: resolved.window.to,
+    startDate: awinTransactionDateParam(resolved.window.from),
+    endDate: awinTransactionDateParam(resolved.window.to),
     dateType: "transaction",
     showBasketProducts: true,
   }),
@@ -127,50 +146,6 @@ const AWIN_CERTIFICATION_SAMPLES = Object.freeze({
   // here too rather than left to the supplier to reject.
   conversions: AWIN_CONVERSIONS_SPEC,
 
-  // ISOLATION PROBE, certification only. Production is untouched.
-  //
-  // The live 400 said, exactly: "Wrong data type for parameter 'endDate'". It named endDate and
-  // not startDate, even though both are sent in the same YYYY-MM-DD form — so this variant changes
-  // ONE THING and asks the supplier again.
-  //
-  // It is DERIVED from the conversions spec rather than written out beside it: everything but the
-  // endDate key is literally the same object and the same params call, so the two cannot drift and
-  // "only endDate differs" is structural rather than a claim a test has to take on trust.
-  //
-  // T00:00:00, not T23:59:59. The point is to learn which TYPE the endpoint accepts, and midnight
-  // denotes the same instant the date-only value already denoted — a pure change of
-  // representation. An end-of-day value would also move the window, leaving two variables. That
-  // may mean this probe sees fewer rows than a date-only one would; row yield is not what it is
-  // asking.
-  conversions_enddate_iso: Object.freeze({
-    ...AWIN_CONVERSIONS_SPEC,
-    params: (resolved) => {
-      const base = AWIN_CONVERSIONS_SPEC.params(resolved);
-      return { ...base, endDate: `${base.endDate}T00:00:00` };
-    },
-  }),
-
-  // ISOLATION PROBE 2, certification only. Production is still untouched.
-  //
-  // The supplier answered the endDate-only variant with the SAME complaint moved one parameter
-  // along: "Wrong data type for parameter 'startDate'". Two live answers, each naming exactly the
-  // parameter still sent as a bare date, is strong evidence that this endpoint wants a datetime
-  // for both — so this variant sends both and asks a third time.
-  //
-  // Still derived from the one spec, and still T00:00:00 for the same reason: midnight denotes the
-  // instants the date-only values already denoted, so representation is the only thing that moves.
-  // The window stays exactly 7 days wide.
-  conversions_both_dates_iso: Object.freeze({
-    ...AWIN_CONVERSIONS_SPEC,
-    params: (resolved) => {
-      const base = AWIN_CONVERSIONS_SPEC.params(resolved);
-      return {
-        ...base,
-        startDate: `${base.startDate}T00:00:00`,
-        endDate: `${base.endDate}T00:00:00`,
-      };
-    },
-  }),
 });
 
 export function listAwinCertificationSamples() {
@@ -349,8 +324,10 @@ export function createAwinAdapter({
       const data = await get(
         `/publishers/${pubId}/transactions/`,
         {
-          startDate,
-          endDate,
+          // Serialised by the SAME function certification uses. Awin rejects bare dates on this
+          // endpoint with "Wrong data type"; this is the format it accepts, proven live.
+          startDate: awinTransactionDateParam(startDate),
+          endDate: awinTransactionDateParam(endDate),
           dateType: params.dateType ?? "transaction",
           ...(params.status ? { status: params.status } : {}),
           ...(params.timezone ? { timezone: params.timezone } : {}),

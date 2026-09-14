@@ -322,20 +322,6 @@ const AWIN_PROBES = Object.freeze({
     endpointKey: "GET /publishers/{publisherId}/transactions/",
     chain: "awinConversions",
   },
-  // ISOLATION PROBE, certification only — see the adapter spec for why. Identical to `conversions`
-  // in every respect except the serialization of endDate, and production is untouched by it.
-  conversions_enddate_iso: {
-    method: "GET",
-    endpointKey: "GET /publishers/{publisherId}/transactions/ (endDate as ISO datetime)",
-    chain: "awinConversions",
-  },
-  // ISOLATION PROBE 2 — see the adapter spec. Identical to `conversions` except that BOTH dates
-  // are sent as ISO datetimes. Production is untouched by it.
-  conversions_both_dates_iso: {
-    method: "GET",
-    endpointKey: "GET /publishers/{publisherId}/transactions/ (both dates as ISO datetime)",
-    chain: "awinConversions",
-  },
   coupons: {
     // POST_READONLY, not POST: READ_ONLY_METHODS admits only GET and POST_READONLY, and that guard
     // stays exactly as it is. The endpointKey still shows the real HTTP verb an operator would
