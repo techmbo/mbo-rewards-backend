@@ -346,9 +346,14 @@ describe("Partnerize certification — the request the sampler actually makes", 
     const out = await service.certify("partnerize", { sourceObjects: ["authenticate"] });
     assert.equal(out.results[0].statusCategory, "AUTH_FAILED");
     const text = JSON.stringify(out);
-    for (const leak of [APP_KEY, USER_KEY, "forbidden", "not permitted", PUBLISHER_ID]) {
+    // Both credentials, the publisher id, and the internal error text stay out: `secret` is not an
+    // allowlisted message key, and error.message is not a message source at all. What surfaces is
+    // the supplier's own one-word explanation.
+    for (const leak of [APP_KEY, USER_KEY, "not permitted", PUBLISHER_ID]) {
       assert.ok(!text.includes(leak), `leaked: ${leak}`);
     }
+    assert.equal(out.results[0].supplierMessage, "forbidden");
+    assert.equal(out.results[0].supplierStatusCode, 403);
   });
 
   it("13 — credentials never appear in a successful result either", async () => {

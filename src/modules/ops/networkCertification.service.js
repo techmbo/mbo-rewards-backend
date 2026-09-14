@@ -393,19 +393,154 @@ export function supplierStatusCode(error) {
 }
 
 /**
+ * Where a supplier's own explanation is looked for, in order.
+ *
+ * An ALLOWLIST of keys read individually as strings. The body itself is never stringified, so a
+ * field that is not on this list cannot reach the output however the supplier nests it, and an
+ * object-valued `error` or `message` is skipped rather than serialised.
+ */
+const SUPPLIER_MESSAGE_KEYS = Object.freeze([
+  "message",
+  "error_description",
+  "errorDescription",
+  "description",
+  "detail",
+  "title",
+  "reason",
+  "error",
+]);
+
+/** Longest message returned, after redaction. A supplier's explanation, not its essay. */
+export const SUPPLIER_MESSAGE_MAX_LENGTH = 200;
+
+/**
+ * Scrub anything that could identify an account, a person or a credential.
+ *
+ * Order matters. Exact configured values go first — a publisher id or token may be short enough or
+ * oddly-shaped enough to slip past every pattern — then URLs (which swallow their own query
+ * strings), then emails, then bearer/key-shaped runs, then long digit runs.
+ *
+ * The rules are deliberately over-eager. A message stripped down to "[REDACTED]" is a message the
+ * caller omits entirely; a message that leaks a token is unrecoverable.
+ */
+function redactSupplierMessage(text, redactValues = []) {
+  let out = String(text);
+
+  for (const value of redactValues) {
+    const literal = String(value ?? "").trim();
+    // Two characters is not an identifier; substituting it would shred ordinary words.
+    if (literal.length < 3) continue;
+    out = out.split(literal).join("[REDACTED]");
+  }
+
+  // Control characters, including the newlines that would let a body span "one message".
+  out = out.replace(/[\u0000-\u001F\u007F-\u009F]+/g, " ");
+
+  out = out.replace(/\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"']+/g, "[REDACTED_URL]");
+  out = out.replace(/\b(?:www\.)[^\s"']+/gi, "[REDACTED_URL]");
+  // Any path-like run, with or without a query string. An earlier version required a "?" and so
+  // let "/user/publisher/<id>/campaign/<id>/voucher" through intact — the identifiers were the
+  // path, not the query. Two or more segments is a path; a lone "/" is punctuation.
+  out = out.replace(/\/[A-Za-z0-9_.~%+-]*(?:\/[A-Za-z0-9_.~%+-]*){1,}(?:\?[^\s"']*)?/g, "[REDACTED_URL]");
+  out = out.replace(/\/[^\s"']*\?[^\s"']*/g, "[REDACTED_URL]");
+  out = out.replace(/[^\s"'<>@]+@[^\s"'<>@]+\.[A-Za-z]{2,}/g, "[REDACTED_EMAIL]");
+  out = out.replace(/\b(?:bearer|basic|token|apikey|api_key|key)\s+\S+/gi, "[REDACTED_CREDENTIAL]");
+  // Long opaque runs: the shape of a token or an encoded id.
+  out = out.replace(/\b[A-Za-z0-9_-]{16,}\b/g, "[REDACTED_CREDENTIAL]");
+  // Long numeric identifiers. Four digits stay, so a year or a day count survives.
+  out = out.replace(/\b\d{5,}\b/g, "[REDACTED_ID]");
+
+  return out.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * A short, redacted explanation from the supplier, when one can be had safely.
+ *
+ * Returns null rather than a placeholder when nothing useful survives: a message consisting only
+ * of redaction markers tells an operator less than no message at all, and pretending otherwise
+ * would invite someone to trust it.
+ */
+export function supplierMessage(error, { redactValues = [] } = {}) {
+  const body = error?.response?.data;
+  const candidates = [];
+
+  if (typeof body === "string") candidates.push(body);
+  if (body && typeof body === "object") {
+    for (const key of SUPPLIER_MESSAGE_KEYS) {
+      // Strings only. An object under `error` is a body, and bodies are never returned.
+      if (typeof body[key] === "string") candidates.push(body[key]);
+    }
+  }
+  if (typeof error?.response?.statusText === "string") candidates.push(error.response.statusText);
+
+  // error.message is deliberately NOT a source. It carries our own internal text — axios' generic
+  // "Request failed with status code N", throttle and timeout notices, and paths quoted without a
+  // query string — none of which is the supplier's explanation, and all of which risk echoing
+  // internals. A failure with no response body simply reports no message.
+
+  for (const candidate of candidates) {
+    const redacted = redactSupplierMessage(candidate, redactValues);
+    // Placeholders alone are not information. Require something a human can read.
+    const withoutPlaceholders = redacted.replace(/\[REDACTED[A-Z_]*\]/g, " ").trim();
+    if (!/[A-Za-z]{3,}/.test(withoutPlaceholders)) continue;
+
+    return redacted.length > SUPPLIER_MESSAGE_MAX_LENGTH
+      ? `${redacted.slice(0, SUPPLIER_MESSAGE_MAX_LENGTH - 1)}\u2026`
+      : redacted;
+  }
+
+  return null;
+}
+
+/**
+ * Record the exact secrets this run was built with, so a supplier message quoting one can be
+ * scrubbed. A token may be short, or oddly shaped, and slip past every pattern — the literal value
+ * is the only reliable defence.
+ *
+ * NON-ENUMERABLE on purpose: the list must be reachable by redactionValuesFor and unreachable by
+ * JSON.stringify, so attaching it can never itself become the leak.
+ */
+export function recordRedactionValues(adapter, values = []) {
+  const cleaned = values
+    .filter((v) => v !== undefined && v !== null && String(v).trim() !== "")
+    .map(String);
+  if (adapter && typeof adapter === "object") {
+    Object.defineProperty(adapter, REDACTION_VALUES, {
+      value: Object.freeze(cleaned),
+      enumerable: false,
+      configurable: true,
+      writable: false,
+    });
+  }
+  return adapter;
+}
+
+const REDACTION_VALUES = Symbol("certificationRedactionValues");
+
+/** Values that must never survive into a message: this run's identifiers AND its credentials. */
+export function redactionValuesFor(adapter) {
+  return [...(adapter?.[REDACTION_VALUES] ?? []), adapter?.publisherId]
+    .filter((v) => v !== undefined && v !== null && String(v).trim() !== "")
+    .map(String);
+}
+
+/**
  * A failed certification result, built the same way everywhere.
  *
  * statusCategory is computed exactly as before — this adds a field, it changes none. The status is
  * omitted entirely when absent rather than set to null, so a NETWORK_ERROR result carries no
  * status key at all.
  */
-export function certificationFailure(base, error, extra = {}) {
+export function certificationFailure(base, error, extra = {}, redactValues = []) {
   const status = supplierStatusCode(error);
+  const message = supplierMessage(error, { redactValues });
   return {
     ...base,
     ok: false,
     statusCategory: statusCategory(error),
     ...(status === null ? {} : { supplierStatusCode: status }),
+    // Omitted, not nulled, when nothing safe survives redaction.
+    ...(message === null ? {} : { supplierMessage: message }),
     ...extra,
   };
 }
@@ -532,12 +667,15 @@ export class NetworkCertificationService {
       throw fail("Optimise credentials are not configured for this region and account label.", 424);
     }
     const factory = this.adapterFactory ?? createOptimiseAdapter;
-    return factory({
-      apiKey: credentials.apiKey,
-      baseURL: credentials.baseURL,
-      agencyId: credentials.agencyId,
-      contactId: credentials.contactId,
-    });
+    return recordRedactionValues(
+      factory({
+        apiKey: credentials.apiKey,
+        baseURL: credentials.baseURL,
+        agencyId: credentials.agencyId,
+        contactId: credentials.contactId,
+      }),
+      [credentials.apiKey, credentials.agencyId, credentials.contactId],
+    );
   }
 
   /**
@@ -554,12 +692,20 @@ export class NetworkCertificationService {
       throw fail("Partnerize credentials are not configured for this account label.", 424);
     }
     const factory = this.adapterFactory ?? createPartnerizeAdapter;
-    return factory({
-      applicationKey: credentials.applicationKey,
-      userApiKey: credentials.userApiKey,
-      publisherId: credentials.publisherId ?? null,
-      certificationCampaignId: credentials.certificationCampaignId ?? null,
-    });
+    return recordRedactionValues(
+      factory({
+        applicationKey: credentials.applicationKey,
+        userApiKey: credentials.userApiKey,
+        publisherId: credentials.publisherId ?? null,
+        certificationCampaignId: credentials.certificationCampaignId ?? null,
+      }),
+      [
+        credentials.applicationKey,
+        credentials.userApiKey,
+        credentials.publisherId,
+        credentials.certificationCampaignId,
+      ],
+    );
   }
 
   /**
@@ -578,10 +724,13 @@ export class NetworkCertificationService {
       throw fail("Awin credentials are not configured for this account label.", 424);
     }
     const factory = this.adapterFactory ?? createAwinAdapter;
-    return factory({
-      accessToken: credentials.accessToken,
-      publisherId: credentials.publisherId,
-    });
+    return recordRedactionValues(
+      factory({
+        accessToken: credentials.accessToken,
+        publisherId: credentials.publisherId,
+      }),
+      [credentials.accessToken, credentials.publisherId],
+    );
   }
 
   /**
@@ -640,7 +789,7 @@ export class NetworkCertificationService {
         fieldPaths,
       };
     } catch (error) {
-      return certificationFailure(base, error);
+      return certificationFailure(base, error, {}, redactionValuesFor(adapter));
     }
   }
 
@@ -739,7 +888,7 @@ export class NetworkCertificationService {
           note: "Awin refuses a transaction window wider than its own limit; choose a narrower preset. No supplier request was made.",
         };
       }
-      return certificationFailure(base, error, { windowPreset: window?.preset ?? null });
+      return certificationFailure(base, error, { windowPreset: window?.preset ?? null }, redactionValuesFor(adapter));
     }
   }
 
@@ -787,7 +936,7 @@ export class NetworkCertificationService {
         return both({ ok: false, statusCategory: "SKIPPED_NO_PUBLISHER_ID" });
       }
       // Anything else — discovery or campaign — is reported as its category and stops there.
-      return both(certificationFailure({}, error));
+      return both(certificationFailure({}, error, {}, redactionValuesFor(adapter)));
     }
 
     // The campaigns dictionary is unchanged: one row, exactly as before.
@@ -912,7 +1061,7 @@ export class NetworkCertificationService {
       if (error?.partnerizeNoPublisherId) {
         return { ...base, ok: false, statusCategory: "SKIPPED_NO_PUBLISHER_ID" };
       }
-      return certificationFailure(base, error);
+      return certificationFailure(base, error, {}, redactionValuesFor(adapter));
     }
   }
 
@@ -974,7 +1123,7 @@ export class NetworkCertificationService {
       if (error?.partnerizeNoCampaignId) {
         return { ...base, ok: false, statusCategory: "SKIPPED_NO_CERTIFICATION_CAMPAIGN_ID" };
       }
-      return certificationFailure(base, error);
+      return certificationFailure(base, error, {}, redactionValuesFor(adapter));
     }
   }
 
@@ -1017,7 +1166,7 @@ export class NetworkCertificationService {
       ).slice(0, COMMISSION_GROUP_CANDIDATE_LIMIT);
       candidates = rows.map((row) => commissionGroupCampaignIdOf(row)).filter(Boolean);
     } catch (error) {
-      return certificationFailure(base, error);
+      return certificationFailure(base, error, {}, redactionValuesFor(adapter));
     }
 
     if (!candidates.length) {
@@ -1038,7 +1187,7 @@ export class NetworkCertificationService {
         });
       } catch (error) {
         // Fail closed. A supplier failure is never a reason to try the next campaign.
-        return certificationFailure(base, error, { campaignsChecked: checked });
+        return certificationFailure(base, error, { campaignsChecked: checked }, redactionValuesFor(adapter));
       }
 
       checked += 1;
@@ -1115,6 +1264,7 @@ export class NetworkCertificationService {
           { ...base, sourceObject: "product_feeds", endpointKey: probe.endpointKey },
           error,
           { sampleCount: 0, fieldPaths: [] },
+          redactionValuesFor(adapter),
         ),
       );
     }
@@ -1164,7 +1314,7 @@ export class NetworkCertificationService {
               reason,
               note: NOT_BOUNDED_NOTES[reason] ?? NOT_BOUNDED_NOTES.UNKNOWN,
             }
-          : certificationFailure(itemBase, error),
+          : certificationFailure(itemBase, error, {}, redactionValuesFor(adapter)),
       );
     }
 
@@ -1431,6 +1581,7 @@ export class NetworkCertificationService {
             { network: key, sourceObject, endpointKey: probe.endpointKey, httpMethod: probe.method },
             error,
             { sampleCount: 0, fieldPaths: [] },
+            redactionValuesFor(adapter),
           ),
         );
       }

@@ -144,8 +144,11 @@ describe("certificationFailure — adds a field, changes none", () => {
 
   it("10 — nothing but the number leaves: no body, headers, URL or credential", () => {
     const serialised = JSON.stringify(certificationFailure({ network: "awin" }, supplierError(503)));
+    // zzbodyerrorzz sits under the allowlisted `error` key, so it IS the supplier's message and is
+    // surfaced by design since supplierMessage shipped. Everything else stays out: the trace, the
+    // request id, the status text, the credentials, the URL, the request payload, and the internal
+    // error.message — which is not a message source at all.
     for (const banned of [
-      "zzbodyerrorzz",
       "zztracezz",
       "zzrequestidzz",
       "zzstatustextzz",
@@ -162,6 +165,7 @@ describe("certificationFailure — adds a field, changes none", () => {
       "network",
       "ok",
       "statusCategory",
+      "supplierMessage",
       "supplierStatusCode",
     ]);
   });
@@ -205,9 +209,12 @@ describe("a real certification run reports the status", () => {
   it("15 — the whole run response leaks nothing of the supplier error", async () => {
     const { result } = await certifyAwinWith(supplierError(502));
     const serialised = JSON.stringify(result);
-    for (const banned of ["zzbodyerrorzz", "zztracezz", "zzrequestidzz", "zzstatustextzz", TOKEN, PUBLISHER_ID]) {
+    // zzbodyerrorzz is the supplier's own message under the allowlisted `error` key and surfaces
+    // by design; nothing else in the body, headers or config does.
+    for (const banned of ["zztracezz", "zzrequestidzz", "zzstatustextzz", TOKEN, PUBLISHER_ID]) {
       assert.ok(!serialised.includes(banned), `${banned} leaked`);
     }
+    assert.equal(result.results[0].supplierMessage, "zzbodyerrorzz");
   });
 
   it("16 — retry behaviour is untouched: still one attempt", async () => {

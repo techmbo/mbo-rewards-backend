@@ -1782,9 +1782,14 @@ describe("campaign identifier namespaces stay separate", () => {
     const out = await service.certify("optimise", { sourceObjects: ["campaign_detail"], compareRaw: false });
     assert.equal(out.results[0].statusCategory, "AUTH_FAILED");
     const text = serialise(out);
-    for (const leak of ["sk_live_LEAKME", "not your advertiser", "forbidden", "57316", "7340528"]) {
+    // The supplier's own explanation is now surfaced, redacted — but nothing else is. The API key
+    // and the internal error text live in error.message, which is NOT a message source, and the
+    // campaign id is a long numeric identifier, which redaction removes.
+    for (const leak of ["sk_live_LEAKME", "not your advertiser", "57316", "7340528"]) {
       assert.ok(!text.includes(leak), `leaked: ${leak}`);
     }
+    assert.equal(out.results[0].supplierMessage, "forbidden: campaign [REDACTED_ID]");
+    assert.equal(out.results[0].supplierStatusCode, 403);
   });
 });
 
