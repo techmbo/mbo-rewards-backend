@@ -153,13 +153,13 @@ describe("Rakuten is registered in the certification framework", () => {
     assert.ok(listProbeNetworks().includes("rakuten"));
   });
 
-  it("exposes advertisers and nothing else yet", () => {
-    assert.deepEqual(listProbeSourceObjects("rakuten"), ["advertisers"]);
+  it("exposes advertisers and partnerships", () => {
+    // partnerships joined the registry later. This file remains the advertisers probe's own tests.
+    assert.deepEqual(listProbeSourceObjects("rakuten").sort(), ["advertisers", "partnerships"]);
   });
 
   it("adds no probe for the objects this phase defers", () => {
     for (const notYet of [
-      "partnerships",
       "offers",
       "commissioning_lists",
       "events",
@@ -307,8 +307,8 @@ describe("the request table is the only thing that chooses a path", () => {
   it("refuses a source object it does not name, saying so", async () => {
     const spy = spyHttp();
     await assert.rejects(
-      () => adapterWith(spy).fetchCertificationSample("partnerships", {}),
-      (error) => /No Rakuten certification sample is defined for "partnerships"/.test(error.message),
+      () => adapterWith(spy).fetchCertificationSample("offers", {}),
+      (error) => /No Rakuten certification sample is defined for "offers"/.test(error.message),
     );
     assert.equal(spy.calls.length, 0);
   });

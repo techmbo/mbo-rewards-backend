@@ -47,6 +47,20 @@ export const RAKUTEN_CERTIFICATION_SPECS = Object.freeze({
     path: "/v2/advertisers",
     collectionKeys: Object.freeze(["advertisers", "advertiser"]),
   }),
+  // Relationship state. The live advertiser row exposed no join/approval field, so partnerships is
+  // where that state must live if Rakuten exposes it at all — which is exactly what a field
+  // dictionary from this endpoint is for.
+  //
+  // One honest difference from advertisers: there, limit=1 page=1 is production's own request,
+  // because authenticate() already issues it. Here only the PARAMETER VOCABULARY is evidenced —
+  // fetchPagedJson sends limit and page on this path, bounded by maxLimit 200 — while production
+  // itself asks for the default 100. So the bounds are inside what production's own pager would
+  // send, but the exact pair is not a request production has been observed making.
+  partnerships: Object.freeze({
+    method: "GET",
+    path: "/v1/partnerships",
+    collectionKeys: Object.freeze(["partnerships", "partnership"]),
+  }),
 });
 
 /** The page every Rakuten certification probe asks for — authenticate()'s own bounds. */

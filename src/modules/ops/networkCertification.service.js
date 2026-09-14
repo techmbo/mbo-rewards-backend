@@ -432,14 +432,25 @@ const ADMITAD_PROBES = Object.freeze({
  * OK_NO_ROWS and names no blocker: claiming "no joined campaigns" would assert a scope the
  * integration has never proved.
  *
- * partnerships, offers, commissioning_lists, events and the Advanced Reports objects all have live
- * fetchers and catalog entries, and all stay out of this registry until certified in their own
- * right. A probe registry entry is an executable claim, not a restatement of the catalog.
+ * offers, commissioning_lists, events and the Advanced Reports objects all have live fetchers and
+ * catalog entries, and all stay out of this registry until certified in their own right. A probe
+ * registry entry is an executable claim, not a restatement of the catalog.
  */
 const RAKUTEN_PROBES = Object.freeze({
   advertisers: {
     method: "GET",
     endpointKey: "GET /v2/advertisers (limit=1, page=1)",
+    chain: "rakutenSample",
+  },
+  // Added after the live advertisers probe returned a real row whose 25 fields carried no obvious
+  // relationship or join-status field. If Rakuten exposes approval state to a publisher, this is
+  // the endpoint that would carry it, and a field dictionary is the way to find out.
+  //
+  // With no joined campaigns on this account, an empty result is entirely expected and says
+  // nothing about support: OK_NO_ROWS, no blocker, no defect claimed.
+  partnerships: {
+    method: "GET",
+    endpointKey: "GET /v1/partnerships (limit=1, page=1)",
     chain: "rakutenSample",
   },
 });
@@ -1306,15 +1317,25 @@ export class NetworkCertificationService {
   }
 
   /**
-   * One bounded Rakuten sample. Today that is advertisers; the shape is written once so the
-   * objects added later cannot drift from it.
+   * One bounded Rakuten sample, shared by advertisers and partnerships.
    *
-   * ZERO ROWS IS OK_NO_ROWS, AND DELIBERATELY NAMES NO BLOCKER. It would be easy to report "no
-   * joined campaigns" here — this account has none — but that would assert something the
-   * integration has never established: the sync job calls /v2/advertisers completely unscoped, and
-   * nothing in this repo proves whether the endpoint returns the network catalogue or only the
-   * publisher's own advertisers. Until a live row settles that, an empty result means the endpoint
-   * returned nothing and the row schema is still unknown, which is exactly what OK_NO_ROWS and
+   * Both are single-request list endpoints bounded to limit=1, page=1, both must distinguish "this
+   * account has none" from "certified", and writing the control flow once means they cannot drift
+   * apart. The path and container keys each uses live in the adapter's own frozen spec table,
+   * which is the only place that builds a request.
+   *
+   * ZERO ROWS IS OK_NO_ROWS, AND DELIBERATELY NAMES NO BLOCKER — for both objects, for different
+   * reasons, and in neither case is an API defect claimed.
+   *
+   * For advertisers: the sync job calls /v2/advertisers completely unscoped, and nothing in this
+   * repo proves whether the endpoint returns the network catalogue or only the publisher's own
+   * advertisers. Reporting an approval state would assert a scope never established.
+   *
+   * For partnerships: this account has no joined campaigns, so an empty result is the expected
+   * shape of an account with no relationships — not an unsupported object and not a broken
+   * endpoint. Either claim would be inventing a finding from an absence.
+   *
+   * In both cases the row schema is still unknown, which is exactly what OK_NO_ROWS and
    * UNKNOWN_NEEDS_LIVE_DATA say.
    *
    * An auth failure keeps its own category and its supplier status, through the shared failure
