@@ -368,6 +368,41 @@ export function statusCategory(error) {
 }
 
 /**
+ * The supplier's numeric HTTP status, when there was one.
+ *
+ * statusCategory collapses a range of statuses into one token — every 5xx becomes UPSTREAM_ERROR —
+ * which is the right thing to act on but loses what an operator needs to diagnose: a 500 and a 503
+ * call for different next steps, and neither was distinguishable from the other in a result.
+ *
+ * A NUMBER and nothing else. Never the response body, headers, URL, request payload or any
+ * credential that may appear in them. A transport failure with no response (DNS, refused
+ * connection, abort) has no status and yields null, which callers omit rather than report as 0 —
+ * "no HTTP status" and "status zero" are different facts.
+ */
+export function supplierStatusCode(error) {
+  const status = Number(error?.response?.status ?? error?.status ?? 0);
+  return Number.isInteger(status) && status > 0 ? status : null;
+}
+
+/**
+ * A failed certification result, built the same way everywhere.
+ *
+ * statusCategory is computed exactly as before — this adds a field, it changes none. The status is
+ * omitted entirely when absent rather than set to null, so a NETWORK_ERROR result carries no
+ * status key at all.
+ */
+export function certificationFailure(base, error, extra = {}) {
+  const status = supplierStatusCode(error);
+  return {
+    ...base,
+    ok: false,
+    statusCategory: statusCategory(error),
+    ...(status === null ? {} : { supplierStatusCode: status }),
+    ...extra,
+  };
+}
+
+/**
  * Lookback presets the caller may choose between.
  *
  * A preset, not a number of days and not a date pair. The caller picks a token; the service alone
@@ -597,7 +632,7 @@ export class NetworkCertificationService {
         fieldPaths,
       };
     } catch (error) {
-      return { ...base, ok: false, statusCategory: statusCategory(error) };
+      return certificationFailure(base, error);
     }
   }
 
@@ -653,7 +688,7 @@ export class NetworkCertificationService {
         return both({ ok: false, statusCategory: "SKIPPED_NO_PUBLISHER_ID" });
       }
       // Anything else — discovery or campaign — is reported as its category and stops there.
-      return both({ ok: false, statusCategory: statusCategory(error) });
+      return both(certificationFailure({}, error));
     }
 
     // The campaigns dictionary is unchanged: one row, exactly as before.
@@ -778,7 +813,7 @@ export class NetworkCertificationService {
       if (error?.partnerizeNoPublisherId) {
         return { ...base, ok: false, statusCategory: "SKIPPED_NO_PUBLISHER_ID" };
       }
-      return { ...base, ok: false, statusCategory: statusCategory(error) };
+      return certificationFailure(base, error);
     }
   }
 
@@ -840,7 +875,7 @@ export class NetworkCertificationService {
       if (error?.partnerizeNoCampaignId) {
         return { ...base, ok: false, statusCategory: "SKIPPED_NO_CERTIFICATION_CAMPAIGN_ID" };
       }
-      return { ...base, ok: false, statusCategory: statusCategory(error) };
+      return certificationFailure(base, error);
     }
   }
 
@@ -883,7 +918,7 @@ export class NetworkCertificationService {
       ).slice(0, COMMISSION_GROUP_CANDIDATE_LIMIT);
       candidates = rows.map((row) => commissionGroupCampaignIdOf(row)).filter(Boolean);
     } catch (error) {
-      return { ...base, ok: false, statusCategory: statusCategory(error) };
+      return certificationFailure(base, error);
     }
 
     if (!candidates.length) {
@@ -904,7 +939,7 @@ export class NetworkCertificationService {
         });
       } catch (error) {
         // Fail closed. A supplier failure is never a reason to try the next campaign.
-        return { ...base, ok: false, statusCategory: statusCategory(error), campaignsChecked: checked };
+        return certificationFailure(base, error, { campaignsChecked: checked });
       }
 
       checked += 1;
@@ -976,15 +1011,13 @@ export class NetworkCertificationService {
       }
       rows.push(entry);
     } catch (error) {
-      rows.push({
-        ...base,
-        sourceObject: "product_feeds",
-        endpointKey: probe.endpointKey,
-        ok: false,
-        statusCategory: statusCategory(error),
-        sampleCount: 0,
-        fieldPaths: [],
-      });
+      rows.push(
+        certificationFailure(
+          { ...base, sourceObject: "product_feeds", endpointKey: probe.endpointKey },
+          error,
+          { sampleCount: 0, fieldPaths: [] },
+        ),
+      );
     }
 
     const itemBase = {
@@ -1023,11 +1056,17 @@ export class NetworkCertificationService {
       });
     } catch (error) {
       const reason = notBoundedReason(error);
-      rows.push({
-        ...itemBase,
-        statusCategory: reason ? "PRODUCT_ITEM_SAMPLE_NOT_BOUNDED" : statusCategory(error),
-        ...(reason ? { reason, note: NOT_BOUNDED_NOTES[reason] ?? NOT_BOUNDED_NOTES.UNKNOWN } : {}),
-      });
+      // A not-bounded outcome keeps its own category; only the supplier-status field is shared.
+      rows.push(
+        reason
+          ? {
+              ...itemBase,
+              statusCategory: "PRODUCT_ITEM_SAMPLE_NOT_BOUNDED",
+              reason,
+              note: NOT_BOUNDED_NOTES[reason] ?? NOT_BOUNDED_NOTES.UNKNOWN,
+            }
+          : certificationFailure(itemBase, error),
+      );
     }
 
     return rows;
@@ -1274,16 +1313,13 @@ export class NetworkCertificationService {
         }
         results.push(entry);
       } catch (error) {
-        results.push({
-          network: key,
-          sourceObject,
-          endpointKey: probe.endpointKey,
-          httpMethod: probe.method,
-          ok: false,
-          statusCategory: statusCategory(error),
-          sampleCount: 0,
-          fieldPaths: [],
-        });
+        results.push(
+          certificationFailure(
+            { network: key, sourceObject, endpointKey: probe.endpointKey, httpMethod: probe.method },
+            error,
+            { sampleCount: 0, fieldPaths: [] },
+          ),
+        );
       }
     }
 
