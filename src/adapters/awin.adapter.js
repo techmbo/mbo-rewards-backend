@@ -52,9 +52,17 @@ const AWIN_CERTIFICATION_SAMPLES = Object.freeze({
   // repeating it changes no supplier state. The verb belongs to the endpoint, not to the intent.
   //
   // pagination IS part of this endpoint's evidenced contract — unlike programmes, where no page
-  // parameter exists and sending one would be inventing. So the SHAPE is production's and only the
-  // VALUE differs: pageSize 1 instead of 200, which asks the supplier for less, never more. One
-  // request, one page, no loop; `page` is fixed at 1 and nothing increments it.
+  // parameter exists and sending one would be inventing.
+  //
+  // pageSize is 200, production's exact value, and that is the whole point: an earlier probe sent
+  // pageSize 1 — smaller, and seemingly safer — and the supplier answered HTTP 500. Asking for
+  // LESS than production is still asking for something production never asks for, so the body is
+  // now byte-identical to what fetchCoupons sends and the pageSize variable is eliminated. If 200
+  // also fails, the failure belongs to the endpoint or the account, not to the probe.
+  //
+  // 200 is what is REQUESTED; it is not what is kept. One row is sliced out of the response for
+  // the field dictionary, and the rest of the page is discarded unread. One request, one page, no
+  // loop; `page` is fixed at 1 and nothing increments it.
   coupons: {
     // POST_READONLY, the marker the certification service already uses for a POST that reads: its
     // READ_ONLY_METHODS guard admits GET and POST_READONLY and fails everything else closed. A
@@ -62,7 +70,7 @@ const AWIN_CERTIFICATION_SAMPLES = Object.freeze({
     method: "POST_READONLY",
     collectionKeys: ["data", "promotions", "offers"],
     path: (resolved) => `/publisher/${resolved.publisherId}/promotions`,
-    body: () => ({ filters: {}, pagination: { page: 1, pageSize: 1 } }),
+    body: () => ({ filters: {}, pagination: { page: 1, pageSize: 200 } }),
   },
 });
 

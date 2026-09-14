@@ -279,7 +279,7 @@ describe("the failure path is shared, so every network gets it", () => {
   it("22 — the AWIN endpoint and body are unchanged by this task", () => {
     const adapter = readFileSync("src/adapters/awin.adapter.js", "utf8");
     assert.match(adapter, /path: \(resolved\) => `\/publisher\/\$\{resolved\.publisherId\}\/promotions`/);
-    assert.match(adapter, /body: \(\) => \(\{ filters: \{\}, pagination: \{ page: 1, pageSize: 1 \} \}\)/);
+    assert.match(adapter, /body: \(\) => \(\{ filters: \{\}, pagination: \{ page: 1, pageSize: 200 \} \}\)/);
     assert.match(adapter, /pagination: params\.pagination \?\? \{ page: 1, pageSize: 200 \}/);
   });
 });

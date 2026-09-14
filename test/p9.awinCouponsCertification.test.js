@@ -134,12 +134,32 @@ describe("awin coupons — the endpoint is pinned to production's", () => {
     assert.match(ADAPTER_SRC, /path: \(resolved\) => `\/publisher\/\$\{resolved\.publisherId\}\/promotions`/);
   });
 
-  it("2c — the body is production's evidenced shape, asking for ONE row", async () => {
+  it("2c — the body is BYTE-IDENTICAL to what production sends", async () => {
     const { spy } = await certify({ response: envelope([PROMOTION_ROW]) });
-    assert.deepEqual(spy.calls[0].body, { filters: {}, pagination: { page: 1, pageSize: 1 } });
-    // Production sends the same two keys; only pageSize differs, and only downward.
-    assert.match(ADAPTER_SRC, /pagination: params\.pagination \?\? \{ page: 1, pageSize: 200 \}/);
-    assert.match(ADAPTER_SRC, /filters: params\.filters \?\? \{\}/);
+    assert.deepEqual(spy.calls[0].body, { filters: {}, pagination: { page: 1, pageSize: 200 } });
+
+    // Not asserted by eye: the production defaults are read out of fetchCoupons' own source and
+    // compared to what the probe actually sent, so the two cannot drift apart silently. An earlier
+    // probe sent pageSize 1 — smaller, not safer — and the supplier answered HTTP 500.
+    const prodDefaults = ADAPTER_SRC.slice(
+      ADAPTER_SRC.indexOf("async fetchCoupons("),
+      ADAPTER_SRC.indexOf("async fetchConversions("),
+    );
+    const filters = prodDefaults.match(/filters: params\.filters \?\? (\{\})/);
+    const pagination = prodDefaults.match(/pagination: params\.pagination \?\? (\{ page: \d+, pageSize: \d+ \})/);
+    assert.ok(filters && pagination, "production's defaults could not be read");
+    // syncAwinAccount calls fetchCoupons({}, stats), so the defaults ARE the production body.
+    // eslint-disable-next-line no-new-func
+    const productionBody = new Function(`return { filters: ${filters[1]}, pagination: ${pagination[1]} };`)();
+    assert.deepEqual(spy.calls[0].body, productionBody, "the probe body diverged from production's");
+  });
+
+  it("2c2 — pageSize 200 is REQUESTED, but only one row is kept", async () => {
+    const many = Array.from({ length: 200 }, (_, i) => ({ ...PROMOTION_ROW, promotionId: 800000 + i }));
+    const { entry, spy } = await certify({ response: envelope(many) });
+    assert.equal(spy.calls[0].body.pagination.pageSize, 200, "a smaller page was requested");
+    assert.equal(entry.sampleCount, 1, "more than one row was kept");
+    assert.equal(entry.fieldPaths[0].sampleCount, 1, "the dictionary was built from more than one row");
   });
 
   it("2d — the endpointKey reports the real verb", async () => {
@@ -177,10 +197,31 @@ describe("awin coupons — one request, one row, no pagination loop", () => {
     assert.equal(spy.calls.length, 1, "a second page was fetched");
   });
 
+  it("3b2 — the SERVICE bounds the row too, independently of the adapter", async () => {
+    // Defence in depth: if the adapter's slice were removed or bypassed, the chain must still hold
+    // one row. Driven by an adapter whose sampler deliberately returns a full page.
+    const many = Array.from({ length: 200 }, (_, i) => ({ ...PROMOTION_ROW, promotionId: 810000 + i }));
+    const service = new NetworkCertificationService({
+      prisma: {},
+      adapterFactory: () => ({
+        supplierKey: "AWIN",
+        fetchCertificationSample: async () => many,
+      }),
+      awinCredentialResolver: async () => ({ accessToken: TOKEN, publisherId: PUBLISHER_ID }),
+    });
+    const result = await service.certify("awin", { sourceObjects: ["coupons"] });
+    const entry = result.results[0];
+    assert.equal(entry.sampleCount, 1, "the service kept more than one row");
+    assert.equal(entry.fieldPaths[0].sampleCount, 1);
+    // And the same guard covers campaigns, since both share one sampler.
+    const campaigns = await service.certify("awin", { sourceObjects: ["campaigns"] });
+    assert.equal(campaigns.results[0].sampleCount, 1);
+  });
+
   it("3c — page is fixed at 1 and nothing increments it", () => {
     const start = ADAPTER_SRC.indexOf("  coupons: {");
     const spec = ADAPTER_SRC.slice(start, ADAPTER_SRC.indexOf("\n  },", start));
-    assert.match(spec, /pagination: \{ page: 1, pageSize: 1 \}/);
+    assert.match(spec, /pagination: \{ page: 1, pageSize: 200 \}/);
     assert.ok(!/for \(|while \(|page\+\+|hasMore|nextPage/.test(spec), "the spec paginates");
   });
 
@@ -213,9 +254,10 @@ describe("awin coupons — nothing is caller-controlled", () => {
       path: "/publisher/zzattackerzz/promotions",
       filters: { advertiserId: "zzattackerzz" },
       pagination: { page: 9, pageSize: 5000 },
+      pageSize: 1,
     });
     assert.equal(spy.calls[0].path, `/publisher/${PUBLISHER_ID}/promotions`);
-    assert.deepEqual(spy.calls[0].body, { filters: {}, pagination: { page: 1, pageSize: 1 } });
+    assert.deepEqual(spy.calls[0].body, { filters: {}, pagination: { page: 1, pageSize: 200 } });
     assert.ok(!JSON.stringify(spy.calls).includes("zzattackerzz"));
   });
 
@@ -226,7 +268,7 @@ describe("awin coupons — nothing is caller-controlled", () => {
       body: { filters: { advertiserId: "zzattackerzz" }, pagination: { page: 9, pageSize: 5000 } },
     });
     assert.equal(spy.calls[0].path, `/publisher/${PUBLISHER_ID}/promotions`);
-    assert.deepEqual(spy.calls[0].body, { filters: {}, pagination: { page: 1, pageSize: 1 } });
+    assert.deepEqual(spy.calls[0].body, { filters: {}, pagination: { page: 1, pageSize: 200 } });
   });
 
   it("4b2 — a mutating verb is refused by the service, and the guard is unweakened", () => {
