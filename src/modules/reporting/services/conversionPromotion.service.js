@@ -251,6 +251,9 @@ export function mapEntityToConversionIngest(entity) {
             attributionHints: hints,
             couponCode: hints.couponCode,
             country: raw.country ?? null,
+            // Boostiny order rows carry business_category_label. Kept verbatim as EVIDENCE only
+            // (null stays null, absent becomes null); the matcher does not read it.
+            ...(supplier === "BOOSTINY" ? { businessCategoryLabel: raw.business_category_label ?? null } : {}),
             orderValue,
             supplierOrderId: supplierOrderId != null ? String(supplierOrderId) : null,
             supplierCampaignId: supplierCampaignId != null ? String(supplierCampaignId) : null,
