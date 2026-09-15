@@ -80,7 +80,30 @@ function tagDetailRows(rows) {
     }));
 }
 
-async function fetchPaginated(httpClient, endpoint, query = {}, stats = null) {
+/** The campaigns path, as the adapter resolves it when no endpoint override is given. */
+export const BOOSTINY_CAMPAIGNS_PATH = "/publisher/campaigns";
+
+/**
+ * The one Boostiny pager.
+ *
+ * options are OPTIONAL and default to production's behaviour, so a call that passes none is
+ * byte-for-byte what it was — same rate limiter slot, same two retries, same page-1/limit-100
+ * start, same hasNext / has_next / totalPages / full-page continuation. Certification passes:
+ *   singlePage  stops after the FIRST response, before hasMorePages is consulted at all. At
+ *               limit=1 a one-row page IS a full page, so the full-page heuristic would keep
+ *               asking for page 2, 3, 4 — and Boostiny locks accounts out for exactly that.
+ *   retries     pins the attempt count. Production allows two.
+ *   timeoutMs   bounds the one request inside the caller's own budget.
+ * The shared rate limiter is neither reduced nor bypassed: the one request still takes its slot,
+ * and a 429 still resets the limiter for every other caller in this process.
+ */
+async function fetchPaginated(
+  httpClient,
+  endpoint,
+  query = {},
+  stats = null,
+  { singlePage = false, retries, timeoutMs } = {},
+) {
   const all = [];
   const pages = [];
   let page = 1;
@@ -100,8 +123,9 @@ async function fetchPaginated(httpClient, endpoint, query = {}, stats = null) {
               limit: pageSize,
               ...query,
             },
+            ...(timeoutMs ? { timeout: Number(timeoutMs) } : {}),
           }),
-        { retries: 2, delayMs: 2000 },
+        { retries: 2, delayMs: 2000, ...(retries ? { retries } : {}) },
       );
     } catch (error) {
       if (error?.response?.status === 429) {
@@ -118,6 +142,8 @@ async function fetchPaginated(httpClient, endpoint, query = {}, stats = null) {
     const rows = extractRows(responseData);
     all.push(...rows);
 
+    if (singlePage) break;
+
     if (!hasMorePages(responseData, page, pageSize, rows.length)) {
       break;
     }
@@ -131,10 +157,13 @@ export function createBoostinyAdapter({
   apiKey,
   baseURL = "https://api.boostiny.com",
   endpoints = {},
+  // Test seam only: production never passes one, so the shared client with its Authorization
+  // header is what every request goes through.
+  httpClient: injectedHttpClient = null,
 }) {
-  const httpClient = createHttpClient({ baseURL, apiKey });
+  const httpClient = injectedHttpClient ?? createHttpClient({ baseURL, apiKey });
   const resolvedEndpoints = {
-    campaigns: endpoints.campaigns || "/publisher/campaigns",
+    campaigns: endpoints.campaigns || BOOSTINY_CAMPAIGNS_PATH,
     performance: endpoints.performance || "/publisher/performance",
     linkPerformance: endpoints.linkPerformance || "/publisher/link-performance",
     coupons: endpoints.coupons || "/publisher/coupons",
@@ -152,8 +181,10 @@ export function createBoostinyAdapter({
         ],
       };
     },
-    async fetchCampaigns(params = {}, stats = null) {
-      const result = await fetchPaginated(httpClient, resolvedEndpoints.campaigns, params, stats);
+    /** options are OPTIONAL and reach the pager unchanged; fetchCampaigns(params, stats) — every
+     *  production call shape — is byte-for-byte what it was. */
+    async fetchCampaigns(params = {}, stats = null, options = {}) {
+      const result = await fetchPaginated(httpClient, resolvedEndpoints.campaigns, params, stats, options);
       return result.rows;
     },
     fetchPerformance(params = {}, stats = null) {

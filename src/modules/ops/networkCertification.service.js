@@ -6,6 +6,7 @@ import { createAwinAdapter } from "../../adapters/awin.adapter.js";
 import { createCjAdapter } from "../../adapters/cj.adapter.js";
 import { createAdmitadAdapter } from "../../adapters/admitad.adapter.js";
 import { createRakutenAdapter } from "../../adapters/rakuten.adapter.js";
+import { createBoostinyAdapter } from "../../adapters/boostiny.adapter.js";
 import {
   createTrackierAdapter,
   TRACKIER_DEFAULT_REPORT_KPIS,
@@ -18,6 +19,7 @@ import { resolveCjCertificationCredentials } from "../integrations/cjCredentials
 import { resolveAdmitadCertificationCredentials } from "../integrations/admitadCredentials.js";
 import { resolveRakutenCertificationCredentials } from "../integrations/rakutenCredentials.js";
 import { resolveTrackierCertificationCredentials } from "../integrations/trackierCredentials.js";
+import { resolveBoostinyCertificationCredentials } from "../integrations/boostinyCredentials.js";
 import { comparePathSets, summarisePayloads } from "./payloadShape.js";
 
 /**
@@ -744,6 +746,27 @@ const TRACKIER_PROBES = Object.freeze({
   },
 });
 
+/**
+ * Boostiny probes.
+ *
+ * ONE object per phase, and one request per object: Boostiny locks accounts out when requests
+ * bunch up, so the shared six-second limiter stays in force and nothing here adds a second call.
+ */
+const BOOSTINY_PROBES = Object.freeze({
+  // The campaigns list, bounded to the smallest page production's pager can ask for. page and
+  // limit are the two parameters that pager already sends on every call; no other is added.
+  //
+  // A CAMPAIGN ROW IS A LISTING, NOT A RELATIONSHIP. Available is not joined, active is not
+  // approved, a campaign id is not an advertiser id, and a payout field is not payable
+  // commission truth. Certification reports the supplier's field names as they arrive and
+  // canonicalises none of them.
+  campaigns: {
+    method: "GET",
+    endpointKey: "GET /publisher/campaigns (limit=1, page=1)",
+    chain: "boostinyCampaigns",
+  },
+});
+
 const PROBE_REGISTRY = Object.freeze({
   optimise: OPTIMISE_PROBES,
   partnerize: PARTNERIZE_PROBES,
@@ -752,6 +775,7 @@ const PROBE_REGISTRY = Object.freeze({
   admitad: ADMITAD_PROBES,
   rakuten: RAKUTEN_PROBES,
   trackier: TRACKIER_PROBES,
+  boostiny: BOOSTINY_PROBES,
 });
 
 /**
@@ -766,6 +790,7 @@ const ADAPTER_BUILDERS = Object.freeze({
   admitad: "buildAdmitadAdapter",
   rakuten: "buildRakutenAdapter",
   trackier: "buildTrackierAdapter",
+  boostiny: "buildBoostinyAdapter",
 });
 
 /** The networks with an executable probe registry. One source of truth, so a caller-facing
@@ -977,6 +1002,9 @@ export function certificationFailure(base, error, extra = {}, redactValues = [])
 /** The Trackier campaigns bounds: the smallest page the endpoint takes. */
 export const TRACKIER_CERTIFICATION_CAMPAIGN_PARAMS = Object.freeze({ limit: 1, page: 1 });
 
+/** The Boostiny campaigns bounds: the two parameters production's pager already sends, at 1. */
+export const BOOSTINY_CERTIFICATION_CAMPAIGN_PARAMS = Object.freeze({ page: 1, limit: 1 });
+
 /** The Trackier reports bounds. Dates and KPI names are added at call time. */
 export const TRACKIER_CERTIFICATION_REPORT_PARAMS = Object.freeze({ limit: 1, page: 1 });
 
@@ -1152,6 +1180,8 @@ export class NetworkCertificationService {
       deps.rakutenCredentialResolver ?? resolveRakutenCertificationCredentials;
     this.trackierCredentialResolver =
       deps.trackierCredentialResolver ?? resolveTrackierCertificationCredentials;
+    this.boostinyCredentialResolver =
+      deps.boostinyCredentialResolver ?? resolveBoostinyCertificationCredentials;
   }
 
   /**
@@ -1487,6 +1517,25 @@ export class NetworkCertificationService {
     } catch (error) {
       return certificationFailure(base, error, {}, redactionValuesFor(adapter));
     }
+  }
+
+  /**
+   * The Boostiny certification adapter: production's own factory, production's own credential
+   * resolution, production's own base-URL override. No endpoint override is applied, so the
+   * probe certifies the documented path. There is no parameter through which a caller could
+   * substitute a host, a path or a key.
+   */
+  async buildBoostinyAdapter({ accountLabel }) {
+    const credentials = await this.boostinyCredentialResolver(accountLabel);
+    if (!credentials?.apiKey) {
+      // Only whether the credential resolved is reported; nothing about it.
+      throw fail("Boostiny credentials are not configured for this account label.", 424);
+    }
+    const factory = this.adapterFactory ?? createBoostinyAdapter;
+    return recordRedactionValues(
+      factory({ apiKey: credentials.apiKey, ...(credentials.baseURL ? { baseURL: credentials.baseURL } : {}) }),
+      [credentials.apiKey],
+    );
   }
 
   /**
@@ -3080,6 +3129,68 @@ export class NetworkCertificationService {
   }
 
   /**
+   * The Boostiny campaigns chain: exactly ONE request.
+   *
+   * It reuses production's own fetchCampaigns — same shared HTTP client and Authorization header,
+   * same resolved path, same shared rate limiter slot, same row extraction — with three bounds
+   * production does not set: singlePage, so the pager cannot continue on hasNext, has_next,
+   * totalPages or the full-page heuristic; retries pinned to one attempt where production allows
+   * two (a 429 is reported, never retried); and the probe's own timeout. page=1 and limit=1 are
+   * the parameters the pager already sends, at their smallest.
+   *
+   * Zero rows reports OK_NO_ROWS: the account lists no campaign on page 1. It is not evidence of
+   * an unsupported object or an account-state blocker.
+   *
+   * Only structure leaves this method: no campaign, advertiser, URL, payout, currency or account
+   * value can reach the result.
+   */
+  async certifyBoostinyCampaigns({ adapter, key, probe, budgetLeft, sourceObject }) {
+    const base = {
+      network: key,
+      sourceObject,
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+    };
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      const rows = asRows(
+        await adapter.fetchCampaigns({ ...BOOSTINY_CERTIFICATION_CAMPAIGN_PARAMS }, null, {
+          singlePage: true,
+          retries: 1,
+          timeoutMs,
+        }),
+      ).slice(0, 1);
+
+      if (!rows.length) {
+        return {
+          ...base,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        };
+      }
+
+      const fieldPaths = summarisePayloads(rows);
+      return {
+        ...base,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+        schema: "KNOWN_FROM_LIVE_SAMPLE",
+      };
+    } catch (error) {
+      return certificationFailure(base, error, {}, redactionValuesFor(adapter));
+    }
+  }
+
+  /**
    * Certifies one network.
    *
    * Probes run in sequence, not in parallel: a burst of concurrent calls against a supplier's API
@@ -3311,6 +3422,13 @@ export class NetworkCertificationService {
       if (probe.chain === "trackierReportsKpi") {
         results.push(
           await this.certifyTrackierReportsKpi({ adapter, key, probe, budgetLeft, sourceObject }),
+        );
+        continue;
+      }
+
+      if (probe.chain === "boostinyCampaigns") {
+        results.push(
+          await this.certifyBoostinyCampaigns({ adapter, key, probe, budgetLeft, sourceObject }),
         );
         continue;
       }

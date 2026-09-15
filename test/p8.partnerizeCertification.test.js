@@ -291,9 +291,10 @@ describe("Partnerize certification — the request the sampler actually makes", 
       .split("async certifyPartnerizeCampaigns")[1]
       .split("async certifyPartnerizeDatedSample")[0];
     assert.ok(!partnerizeChain.includes("fetchCampaigns("), "Partnerize must use its sampler");
-    // Two Trackier call sites now — the campaigns chain and its detail discovery — and neither
-    // is Partnerize's.
-    assert.equal(serviceSource.split("adapter.fetchCampaigns(").length - 1, 2, "Trackier only");
+    // Three call sites now — Trackier's campaigns chain and detail discovery, and Boostiny's
+    // campaigns chain — each reusing its own production fetcher bounded, and none Partnerize's.
+    assert.equal(serviceSource.split("adapter.fetchCampaigns(").length - 1, 3, "Trackier and Boostiny only");
+    assert.ok(!serviceSource.includes("async certifyPartnerizeCampaigns({ adapter, key, probe, budgetLeft, sourceObject }) {\n    const rows = asRows(await adapter.fetchCampaigns("));
   });
 
   it("9 — no fan-out: one status, one publisher, one request", () => {

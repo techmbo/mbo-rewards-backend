@@ -765,14 +765,18 @@ describe("bounded sampling — the 300s hang", () => {
     // blanket ban stood for: certification never runs an UNBOUNDED production fetcher. Every call
     // the service makes therefore carries all three bounds.
     const campaignCalls = serviceSource.split("adapter.fetchCampaigns(").slice(1);
-    assert.equal(campaignCalls.length, 2, "the Trackier campaigns chain, and its detail discovery");
+    assert.equal(campaignCalls.length, 3, "the Trackier campaigns chain, its detail discovery, and the Boostiny campaigns chain");
     for (const raw of campaignCalls) {
       const call = raw.slice(0, raw.indexOf("),\n"));
       for (const bound of ["singlePage: true", "retries: 1", "timeoutMs"]) {
         assert.ok(call.includes(bound), bound);
       }
-      assert.ok(call.includes("TRACKIER_CERTIFICATION_CAMPAIGN_PARAMS"), "and the supplier bounds");
+      assert.ok(
+        call.includes("TRACKIER_CERTIFICATION_CAMPAIGN_PARAMS") || call.includes("BOOSTINY_CERTIFICATION_CAMPAIGN_PARAMS"),
+        "and the supplier bounds",
+      );
     }
+    assert.equal(campaignCalls.filter((c) => c.includes("BOOSTINY_CERTIFICATION_CAMPAIGN_PARAMS")).length, 1);
     // The detail fetcher is campaign-scoped, so it is bounded the same way.
     const detailCalls = serviceSource.split("adapter.fetchCampaignDetail(").slice(1);
     assert.equal(detailCalls.length, 1, "one detail call site");
