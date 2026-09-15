@@ -270,6 +270,9 @@ async function fetchPageTokenPaginated(httpClient, endpoint, baseParams = {}, op
   return rows;
 }
 
+/** The publisher profile endpoint. One constant, so the probe and production cannot drift. */
+export const TRACKIER_PROFILE_PATH = "/v2/publishers/profile";
+
 function unwrapProfile(responseData) {
   if (responseData?.profile && typeof responseData.profile === "object") {
     return responseData.profile;
@@ -277,14 +280,23 @@ function unwrapProfile(responseData) {
   return getResponseBody(responseData);
 }
 
-export function createTrackierAdapter({ apiKey, baseURL = "https://api.trackier.com" }) {
-  const httpClient = createHttpClient({
-    baseURL,
-    apiKey: "",
-    headers: {
-      "X-Api-Key": String(apiKey),
-    },
-  });
+export function createTrackierAdapter({
+  apiKey,
+  baseURL = "https://api.trackier.com",
+  // The same seam the Awin, CJ, Admitad and Rakuten adapters expose. Default unchanged, so no
+  // production call site is affected; it exists so the certification probe can be exercised as
+  // itself.
+  httpClient: injectedHttpClient = null,
+}) {
+  const httpClient =
+    injectedHttpClient ??
+    createHttpClient({
+      baseURL,
+      apiKey: "",
+      headers: {
+        "X-Api-Key": String(apiKey),
+      },
+    });
 
   return {
     supplierKey: "TRACKIER",
@@ -295,9 +307,26 @@ export function createTrackierAdapter({ apiKey, baseURL = "https://api.trackier.
         notes: ["vCommission aliases to TRACKIER."],
       };
     },
-    fetchProfile() {
-      return requestWithRateLimit(httpClient, trackierCampaignRateLimiter, () =>
-        httpClient.get("/v2/publishers/profile"),
+    /**
+     * The publisher profile.
+     *
+     * retries and timeoutMs are OPTIONAL and default to production's behaviour, so
+     * fetchProfile() — the only call site the sync job makes — is byte-for-byte what it was.
+     * Certification passes retries: 1 (attempt once, never retry) and its own timeout, so one
+     * bounded probe stays one supplier request instead of up to six. Everything else about the
+     * request — the X-Api-Key header, the shared rate limiter, the profile unwrapping — stays here
+     * in production's one place rather than being duplicated into a parallel client.
+     */
+    fetchProfile({ retries, timeoutMs } = {}) {
+      return requestWithRateLimit(
+        httpClient,
+        trackierCampaignRateLimiter,
+        () =>
+          httpClient.get(
+            TRACKIER_PROFILE_PATH,
+            timeoutMs ? { timeout: Number(timeoutMs) } : {},
+          ),
+        retries ? { retries } : {},
       ).then((res) => unwrapProfile(res.data));
     },
 

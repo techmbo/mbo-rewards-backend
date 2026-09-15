@@ -6,12 +6,14 @@ import { createAwinAdapter } from "../../adapters/awin.adapter.js";
 import { createCjAdapter } from "../../adapters/cj.adapter.js";
 import { createAdmitadAdapter } from "../../adapters/admitad.adapter.js";
 import { createRakutenAdapter } from "../../adapters/rakuten.adapter.js";
+import { createTrackierAdapter } from "../../adapters/trackier.adapter.js";
 import { resolveOptimiseCredentials } from "../integrations/optimiseCredentials.js";
 import { resolvePartnerizeCertificationCredentials } from "../integrations/partnerizeCredentials.js";
 import { resolveAwinCertificationCredentials } from "../integrations/awinCredentials.js";
 import { resolveCjCertificationCredentials } from "../integrations/cjCredentials.js";
 import { resolveAdmitadCertificationCredentials } from "../integrations/admitadCredentials.js";
 import { resolveRakutenCertificationCredentials } from "../integrations/rakutenCredentials.js";
+import { resolveTrackierCertificationCredentials } from "../integrations/trackierCredentials.js";
 import { comparePathSets, summarisePayloads } from "./payloadShape.js";
 
 /**
@@ -594,6 +596,29 @@ const RAKUTEN_PROBES = Object.freeze({
   },
 });
 
+/**
+ * Trackier (vCommission is the same network under another name).
+ *
+ * profile is the publisher's own account metadata and the endpoint the sync job reads first, to
+ * learn its own publisher id. It is the right first object to certify because it is the ONE
+ * Trackier read that is scoped to nothing: no campaign, no date window, no page. If the API key
+ * works, this answers; if it does not, nothing else will either.
+ *
+ * A PROFILE IS ONE OBJECT, NOT A COLLECTION. There is no list to bound, so there is no limit or
+ * page to send — the whole request is the path.
+ *
+ * Certification reports the row's SHAPE. No publisher id, name, email, phone, address, API key or
+ * raw supplier response can reach the result: summarisePayloads returns paths, types and
+ * categories and never a value.
+ */
+const TRACKIER_PROBES = Object.freeze({
+  profile: {
+    method: "GET",
+    endpointKey: "GET /v2/publishers/profile",
+    chain: "trackierProfile",
+  },
+});
+
 const PROBE_REGISTRY = Object.freeze({
   optimise: OPTIMISE_PROBES,
   partnerize: PARTNERIZE_PROBES,
@@ -601,6 +626,7 @@ const PROBE_REGISTRY = Object.freeze({
   cj: CJ_PROBES,
   admitad: ADMITAD_PROBES,
   rakuten: RAKUTEN_PROBES,
+  trackier: TRACKIER_PROBES,
 });
 
 /**
@@ -614,6 +640,7 @@ const ADAPTER_BUILDERS = Object.freeze({
   cj: "buildCjAdapter",
   admitad: "buildAdmitadAdapter",
   rakuten: "buildRakutenAdapter",
+  trackier: "buildTrackierAdapter",
 });
 
 /** The networks with an executable probe registry. One source of truth, so a caller-facing
@@ -930,6 +957,8 @@ export class NetworkCertificationService {
       deps.admitadCredentialResolver ?? resolveAdmitadCertificationCredentials;
     this.rakutenCredentialResolver =
       deps.rakutenCredentialResolver ?? resolveRakutenCertificationCredentials;
+    this.trackierCredentialResolver =
+      deps.trackierCredentialResolver ?? resolveTrackierCertificationCredentials;
   }
 
   /**
@@ -1317,6 +1346,26 @@ export class NetworkCertificationService {
       }),
       [credentials.accessToken, credentials.securityToken].filter(Boolean),
     );
+  }
+
+  /**
+   * Trackier certification adapter.
+   *
+   * One secret, resolved here from configuration and handed to the adapter at construction.
+   * Certification never accepts a key from a caller and never discovers one: a caller-supplied key
+   * would let the probe be pointed at another publisher's account entirely.
+   *
+   * The base URL is the adapter's own default, never a caller's — there is no parameter here
+   * through which a host could be substituted.
+   */
+  async buildTrackierAdapter({ accountLabel }) {
+    const credentials = await this.trackierCredentialResolver(accountLabel);
+    if (!credentials?.apiKey) {
+      // Only whether the credential resolved is reported; nothing about it.
+      throw fail("Trackier credentials are not configured for this account label.", 424);
+    }
+    const factory = this.adapterFactory ?? createTrackierAdapter;
+    return recordRedactionValues(factory({ apiKey: credentials.apiKey }), [credentials.apiKey]);
   }
 
   /**
@@ -2169,6 +2218,64 @@ export class NetworkCertificationService {
   }
 
   /**
+   * The Trackier profile chain: exactly ONE request.
+   *
+   * It reuses production's own fetchProfile, pinned to a single attempt — production allows six —
+   * so a bounded probe stays one supplier request. Nothing else about the request changes: the
+   * X-Api-Key header, the shared rate limiter and the profile unwrapping are production's.
+   *
+   * A profile is ONE OBJECT, so "rows" here is at most one. An empty or absent profile reports
+   * OK_NO_ROWS rather than an error: the endpoint answered, and the shape is simply still unknown.
+   *
+   * Only structure leaves this method. No publisher id, name, email, phone, address, API key or
+   * raw response can reach the result.
+   */
+  async certifyTrackierProfile({ adapter, key, probe, budgetLeft, sourceObject }) {
+    const base = {
+      network: key,
+      sourceObject,
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+    };
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      // retries: 1 is "attempt once, never retry" — requestWithRetry counts attempts, not extra
+      // tries, so 0 would run the loop zero times and throw nothing.
+      const profile = await adapter.fetchProfile({ retries: 1, timeoutMs });
+      const rows =
+        profile && typeof profile === "object" && !Array.isArray(profile)
+          ? [profile].filter((row) => Object.keys(row).length > 0)
+          : asRows(profile).slice(0, 1);
+
+      if (!rows.length) {
+        return {
+          ...base,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        };
+      }
+
+      const fieldPaths = summarisePayloads(rows);
+      return {
+        ...base,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+      };
+    } catch (error) {
+      return certificationFailure(base, error, {}, redactionValuesFor(adapter));
+    }
+  }
+
+  /**
    * Certifies one network.
    *
    * Probes run in sequence, not in parallel: a burst of concurrent calls against a supplier's API
@@ -2371,6 +2478,13 @@ export class NetworkCertificationService {
             // The service's own window, computed from the frozen preset. Never a caller's dates.
             window: { ...ctx.window, preset: resolvedWindowPreset },
           }),
+        );
+        continue;
+      }
+
+      if (probe.chain === "trackierProfile") {
+        results.push(
+          await this.certifyTrackierProfile({ adapter, key, probe, budgetLeft, sourceObject }),
         );
         continue;
       }

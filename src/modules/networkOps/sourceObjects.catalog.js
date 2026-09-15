@@ -295,6 +295,9 @@ const CATALOG = Object.freeze({
     obj({ sourceObject: "advanced_reports", label: "Advanced Reports", endpoint: "GET /advancedreports/1.0", live: true, entityType: "payment" }),
   ]),
   trackier: Object.freeze([
+    // Publisher account metadata, and the endpoint the sync job reads first to learn its own
+    // publisher id. Not an entity MBO stores, so it carries no entityType.
+    obj({ sourceObject: "profile", label: "Profile", endpoint: "GET /v2/publishers/profile", live: true }),
     obj({ sourceObject: "campaigns", label: "Campaigns", endpoint: "GET /v2/publisher/campaigns", live: true, entityType: "campaign" }),
     obj({ sourceObject: "conversions", label: "Conversions", endpoint: "GET /v2/publishers/conversions", live: true, entityType: "conversion" }),
     obj({ sourceObject: "tracking", label: "Tracking", endpoint: "GET /v2/publishers/reports", live: true, entityType: "performance" }),
