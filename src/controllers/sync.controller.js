@@ -1,7 +1,7 @@
 import { syncAll, syncPlatformAccount } from "../jobs/sync.job.js";
 import { normalizeBoostinyCanaryOptions } from "../modules/commercial/boostinyCommissionCanary.js";
-import { formatSyncError } from "../jobs/syncErrors.js";
-import { getSyncStatus, runSyncInBackground } from "../jobs/syncState.js";
+import { formatSyncError, getSyncErrorMessage } from "../jobs/syncErrors.js";
+import { getSyncStatus, runExclusiveSync, runSyncInBackground } from "../jobs/syncState.js";
 import { getSchedulerStatus, triggerScheduledSync } from "../jobs/syncScheduler.js";
 
 const SUPPORTED_SYNC_PLATFORMS = new Set([
@@ -93,7 +93,8 @@ export async function triggerSyncPlatform(req, res, next) {
  * Admin-only Boostiny commission canary: one account, one supplier campaign, dry run unless
  * dryRun=false is stated. Runs the ordinary Boostiny account sync restricted to the campaigns
  * source object with the canary filter applied inside the sync, before any commission write.
- * The result is read from GET /sync/status as result[accountLabel].canary / .commissionRules.
+ * The response carries the finished status (result[accountLabel].canary / .commissionRules); the
+ * same payload stays readable from GET /sync/status on the instance that ran it.
  */
 export async function triggerBoostinyCanarySync(req, res, next) {
   try {
@@ -111,7 +112,12 @@ export async function triggerBoostinyCanarySync(req, res, next) {
       return res.status(error.status ?? 400).json({ ok: false, message: error.message });
     }
     const jobName = `sync:boostiny:${accountLabel}:canary:${canary.dryRun ? "dry-run" : "live"}`;
-    return startBackgroundSync(
+    // Certification path: the run is AWAITED, not launched in the background. On serverless hosting
+    // an un-awaited promise does not survive the HTTP response (the instance is frozen once the
+    // response is sent), so the canary must finish — real Boostiny fetch, dry-run plan, status
+    // finalised — before anything is written to the client. The same in-process slot and status
+    // bookkeeping as every other sync is used; only this route waits for it.
+    const run = await runExclusiveSync(
       jobName,
       () =>
         syncPlatformAccount("boostiny", accountLabel, {
@@ -120,9 +126,25 @@ export async function triggerBoostinyCanarySync(req, res, next) {
           sourceObject: "campaigns",
           canary,
         }),
-      res,
       { trigger: "api" },
     );
+    if (!run.started) {
+      return res.status(409).json({ ok: false, status: "running", message: run.reason, syncStatus: run.status });
+    }
+    if (run.error) {
+      return res.status(500).json({
+        ok: false,
+        status: run.status?.status ?? "failed",
+        message: getSyncErrorMessage(run.error),
+        syncStatus: run.status,
+      });
+    }
+    return res.status(200).json({
+      ok: true,
+      status: run.status?.status ?? "success",
+      message: "Boostiny canary completed.",
+      syncStatus: run.status,
+    });
   } catch (error) {
     next(formatSyncError(error));
   }

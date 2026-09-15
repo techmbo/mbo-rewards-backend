@@ -369,6 +369,59 @@ describe("sync wiring — Boostiny only, before any commission write, never sche
   });
 });
 
+describe("awaited canary execution — the run finishes before the response", () => {
+  it("runExclusiveSync resolves only after the sync function has completed, with the finished status and result", async () => {
+    const { runExclusiveSync, getSyncStatus, isSyncRunning } = await import("../src/jobs/syncState.js");
+    let finished = false;
+    let observedRunning = null;
+    const run = await runExclusiveSync("sync:boostiny:default:canary:dry-run", async () => {
+      observedRunning = isSyncRunning();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      finished = true;
+      return { default: { canary: { mode: "DRY_RUN", campaignsFetched: 3, campaignMatched: true, campaignsSelected: 1 }, commissionRules: { dryRun: true, wouldCreate: 2 } } };
+    });
+    assert.equal(finished, true, "resolved only after the sync body completed");
+    assert.equal(observedRunning, true, "status was running while the sync executed");
+    assert.equal(run.started, true);
+    assert.equal(run.error, undefined);
+    assert.equal(run.status.status, "success");
+    assert.equal(run.status.jobName, "sync:boostiny:default:canary:dry-run");
+    assert.ok(run.status.finishedAt, "finalised");
+    assert.equal(run.status.percentComplete, 100);
+    assert.equal(run.status.result.default.canary.mode, "DRY_RUN");
+    assert.equal(run.status.result.default.commissionRules.dryRun, true);
+    assert.equal(isSyncRunning(), false);
+    assert.equal(getSyncStatus().status, "success");
+  });
+
+  it("a failing run is reported truthfully as failed, and the slot is released", async () => {
+    const { runExclusiveSync, isSyncRunning } = await import("../src/jobs/syncState.js");
+    const run = await runExclusiveSync("sync:boostiny:default:canary:dry-run", async () => {
+      throw new Error("boostiny upstream 503");
+    });
+    assert.equal(run.started, true);
+    assert.ok(run.error instanceof Error);
+    assert.equal(run.status.status, "failed");
+    assert.ok(run.status.error, "error message surfaced in status");
+    assert.ok(run.status.finishedAt);
+    assert.equal(isSyncRunning(), false);
+  });
+
+  it("a second run while one holds the slot is refused rather than queued", async () => {
+    const { runExclusiveSync } = await import("../src/jobs/syncState.js");
+    let release;
+    const first = runExclusiveSync("sync:boostiny:default:canary:dry-run", () => new Promise((resolve) => { release = resolve; }));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = await runExclusiveSync("sync:boostiny:default:canary:live", async () => ({}));
+    assert.equal(second.started, false);
+    assert.match(second.reason, /already in progress/);
+    release({ default: {} });
+    const done = await first;
+    assert.equal(done.started, true);
+    assert.equal(done.status.status, "success");
+  });
+});
+
 describe("admin-only entrypoint", () => {
   const routes = codeOf(ROUTES_SRC);
   const controller = codeOf(CONTROLLER_SRC);
@@ -391,7 +444,18 @@ describe("admin-only entrypoint", () => {
     assert.match(handler, /dryRun: req\.body\?\.dryRun \?\? req\.query\?\.dryRun,/);
     assert.match(handler, /syncPlatformAccount\("boostiny", accountLabel, \{\s*fastSync: false,\s*promoteAfter: false,\s*sourceObject: "campaigns",\s*canary,\s*\}\)/);
     assert.match(handler, /return res\.status\(error\.status \?\? 400\)\.json\(\{ ok: false, message: error\.message \}\);/);
-    assert.match(handler, /startBackgroundSync\(/);
+    // Awaited, never fire-and-forget: the response is written only after the run has finished.
+    assert.match(handler, /const run = await runExclusiveSync\(/);
+    assert.ok(!handler.includes("startBackgroundSync("), "no background launcher on the canary route");
+    assert.ok(!handler.includes("runSyncInBackground("), "no un-awaited sync promise");
+    assert.match(handler, /if \(!run\.started\) \{\s*return res\.status\(409\)/);
+    assert.match(handler, /if \(run\.error\) \{\s*return res\.status\(500\)/);
+    assert.match(handler, /message: getSyncErrorMessage\(run\.error\),/);
+    assert.match(handler, /return res\.status\(200\)\.json\(\{\s*ok: true,/);
+    assert.match(handler, /syncStatus: run\.status,/);
+    const others = controller.replace(handler, "");
+    assert.ok(!others.includes("runExclusiveSync("), "every other sync route keeps its background launcher");
+    assert.match(others, /function startBackgroundSync\(/);
     for (const forbidden of ["rawData", "req.body?.campaigns", "req.body?.payouts", "prisma"]) assert.ok(!handler.includes(forbidden), forbidden);
   });
 });
