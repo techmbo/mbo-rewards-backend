@@ -408,8 +408,11 @@ describe("source guards — one unit, nothing in the background, nothing else ch
     const incremental = handlerOf("triggerIncrementalSync");
     assert.match(incremental, /triggerScheduledSync\(\{ reason: "api" \}\)/);
     assert.ok(!incremental.includes("nextWorkableUnit") && !incremental.includes("withLock"));
-    const status = CONTROLLER_SRC.split("export function getSyncStatusHandler")[1].split("\nexport ")[0];
-    assert.match(status, /\.\.\.getSyncStatus\(\)/, "status still reads the in-memory projection in this phase");
+    // Phase 4 made status durable; it must still carry the in-memory block and never mutate.
+    const status = CONTROLLER_SRC.split("export async function getSyncStatusHandler")[1].split("\nexport ")[0];
+    assert.match(status, /inMemory,/);
+    assert.match(status, /inspectLatestRun\(\)/);
+    assert.ok(!status.includes("claimUnit") && !status.includes("refreshRun"));
     const canary = handlerOf("triggerBoostinyCanarySync");
     assert.match(canary, /const run = await runExclusiveSync\(/);
     assert.ok(!canary.includes("withLock"), "the canary is not re-wired in this phase");

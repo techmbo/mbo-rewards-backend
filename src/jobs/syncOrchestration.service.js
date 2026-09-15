@@ -235,6 +235,24 @@ function unitView(unit) {
 }
 
 /**
+ * Redact anything that looks like a credential out of a durable error before it is shown.
+ * Deliberately local: the status projection must not depend on a heavier module, and this runs on
+ * text that a supplier client produced.
+ */
+export function safeUnitError(message) {
+  if (message == null || message === "") return null;
+  let text = String(message);
+  text = text.replace(/Bearer\s+[A-Za-z0-9._\-+=/]+/gi, "Bearer [redacted]");
+  text = text.replace(
+    /\b(api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|secret|token)\s*[:=]\s*\S+/gi,
+    "$1=[redacted]",
+  );
+  text = text.replace(/https?:\/\/\S+/gi, "[url]");
+  text = text.replace(/[A-Za-z0-9+/_-]{40,}={0,2}/g, "[redacted]");
+  return text.length > 300 ? `${text.slice(0, 300)}…` : text;
+}
+
+/**
  * A compact, durable record of what one network unit did. Counts and flags only: the raw supplier
  * result is never copied into the job row.
  */
@@ -590,6 +608,66 @@ export class SyncOrchestrationService {
   }
 
   /**
+   * A safe, durable summary of one unit row: identity, lifecycle and lease only. No supplier
+   * payload, no credentials, no raw sync result — the stored outcome counts are reported as
+   * counts, and any error text is redacted.
+   */
+  unitSummary(unit) {
+    const p = unit?.payload ?? {};
+    const startedAt = unit?.startedAt ?? null;
+    const leaseExpiresAt = startedAt && unit?.status === "RUNNING"
+      ? new Date(new Date(startedAt).getTime() + this.leaseMs)
+      : null;
+    const outcome = unit?.result?.outcome ?? null;
+    return {
+      unitId: unit?.id ?? null,
+      sequence: p.sequence ?? unit?.priority ?? null,
+      kind: p.kind ?? null,
+      platform: p.platform ?? null,
+      accountLabel: p.accountLabel ?? null,
+      sourceObject: p.sourceObject ?? null,
+      lockKey: p.lockKey ?? null,
+      status: unit?.status ?? null,
+      attempt: unit?.attempt ?? 0,
+      maxAttempts: unit?.maxAttempts ?? null,
+      executable: isUnitExecutable(unit),
+      blockedReason: isUnitExecutable(unit) ? null : (p.blockedReason ?? UNIT_BLOCKED_REASON),
+      startedAt,
+      completedAt: unit?.completedAt ?? null,
+      leaseExpiresAt,
+      // A RUNNING unit whose lease has expired: its worker died or was killed mid-flight, and the
+      // unit is reclaimable by the next worker.
+      staleClaim: Boolean(leaseExpiresAt && leaseExpiresAt <= this.now()),
+      counts: outcome?.counts ?? null,
+      partialSuccess: outcome?.partialSuccess ?? null,
+      lastError: safeUnitError(unit?.lastError),
+    };
+  }
+
+  /** Read-only per-unit summaries of a run, in execution order. Never mutates. */
+  async listUnitSummaries(runId) {
+    const units = await this.listUnits(runId);
+    return units.map((unit) => this.unitSummary(unit));
+  }
+
+  /**
+   * Read-only inspection of one run: the durable projection plus safe per-unit summaries.
+   * Performs NO write: it never refreshes, claims, collapses or resumes anything.
+   */
+  async inspectRun(runId) {
+    const run = await this.describeRun(runId);
+    if (!run) return null;
+    return { ...run, units: await this.listUnitSummaries(runId) };
+  }
+
+  /** The run to show when no id is given: the active one, else the most recent. Read-only. */
+  async inspectLatestRun() {
+    const active = await this.findActiveRun();
+    const parent = active ?? (await this.db.jobRun.findFirst({ where: { jobName: ORCHESTRATION_JOB_NAME }, orderBy: [{ createdAt: "desc" }] }));
+    return parent ? this.inspectRun(parent.id) : null;
+  }
+
+  /**
    * The oldest active run that has executable work, with the one unit to work next, or null.
    * Non-executable units are never offered (see nextUnit), so a worker cannot reach an unbounded
    * stage; a run whose remaining work is all blocked is simply skipped.
@@ -644,8 +722,10 @@ export class SyncOrchestrationService {
       unitsPercentComplete: summary.unitsPercentComplete,
       percentComplete: summary.percentComplete,
       totalWorkKnown: summary.totalWorkKnown,
-      latestError: summary.latestError ?? parent.lastError ?? null,
-      latestWarning: summary.latestWarning,
+      // Redacted at the projection boundary: these come from supplier-produced text, and this
+      // projection is what /sync/status, /sync/all and the worker all return.
+      latestError: safeUnitError(summary.latestError ?? parent.lastError ?? null),
+      latestWarning: safeUnitError(summary.latestWarning),
       options: parent.payload?.options ?? null,
       // Backward-compatible names used by the in-memory status readers.
       jobName: kind === "incremental" ? "scheduledSyncAll" : kind === "manual" ? "sync:manual" : "syncAll",

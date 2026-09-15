@@ -81,12 +81,56 @@ export async function respondWithExclusiveSync({ jobName, syncFn, res, trigger =
   });
 }
 
-export function getSyncStatusHandler(_req, res) {
+/**
+ * Durable sync status, readable from any instance.
+ *
+ * The in-memory projection only describes the instance that happens to answer, so on serverless
+ * hosting it is blind to work done elsewhere and is lost on a cold start. This reads the durable
+ * JobRun state instead: the parent run, its counters, and a safe per-unit summary showing
+ * PENDING / RUNNING / COMPLETED / FAILED / DEAD_LETTER, with no supplier payload and no
+ * credentials. `?runId=` inspects one specific run; without it, the active run, else the latest.
+ *
+ * STRICTLY READ-ONLY: it never refreshes, claims, collapses, resumes or finalises anything.
+ * The legacy in-memory block is kept under `inMemory` for anything that still reads it, and a
+ * database failure degrades to that block rather than failing the one endpoint used to diagnose
+ * database trouble.
+ */
+export async function getSyncStatusHandler(req, res) {
   res.set("Cache-Control", "no-store");
-  res.json({
+  const inMemory = getSyncStatus();
+  const scheduler = getSchedulerStatus();
+  const requestedRunId = typeof req?.query?.runId === "string" ? req.query.runId.trim() : "";
+
+  let run = null;
+  let durableError = null;
+  try {
+    const orchestration = orchestrationServiceFor(req);
+    run = requestedRunId
+      ? await orchestration.inspectRun(requestedRunId)
+      : await orchestration.inspectLatestRun();
+    if (requestedRunId && !run) {
+      return res.status(404).json({
+        ok: false,
+        source: "durable",
+        message: "No orchestration run with that id.",
+        runId: requestedRunId,
+      });
+    }
+  } catch (error) {
+    durableError = getSyncErrorMessage(error);
+  }
+
+  const { units = [], ...summary } = run ?? {};
+  return res.json({
     ok: true,
-    ...getSyncStatus(),
-    scheduler: getSchedulerStatus(),
+    source: run ? "durable" : "in-memory",
+    status: run ? run.status : inMemory.status,
+    runId: run?.runId ?? null,
+    run: run ? summary : null,
+    units,
+    durableError,
+    inMemory,
+    scheduler,
   });
 }
 
