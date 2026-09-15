@@ -245,13 +245,24 @@ export class SyncOrchestrationService {
     this.locks = locks ?? new SyncAccountLockService({ prisma, now, leaseMs });
   }
 
-  /** The active (PENDING/RUNNING) parent run of a kind, oldest first, or null. */
-  async findActiveRun({ kind = null } = {}) {
+  /**
+   * The active (PENDING/RUNNING) parent run matching a kind AND the execution options that change
+   * what the work IS, oldest first, or null. Matching on kind alone would silently fold an
+   * incompatible request (e.g. ?fast=true) into an unrelated run and give the caller a run id
+   * whose units do different work than they asked for.
+   */
+  async findActiveRun({ kind = null, options = null } = {}) {
+    const conditions = [];
+    if (kind) conditions.push({ payload: { path: ["kind"], equals: kind } });
+    if (options) {
+      conditions.push({ payload: { path: ["options", "fastSync"], equals: Boolean(options.fastSync) } });
+      conditions.push({ payload: { path: ["options", "promoteAfter"], equals: options.promoteAfter !== false } });
+    }
     return this.db.jobRun.findFirst({
       where: {
         jobName: ORCHESTRATION_JOB_NAME,
         status: { in: ACTIVE_STATUSES },
-        ...(kind ? { payload: { path: ["kind"], equals: kind } } : {}),
+        ...(conditions.length ? { AND: conditions } : {}),
       },
       orderBy: [{ createdAt: "asc" }],
     });
@@ -316,13 +327,24 @@ export class SyncOrchestrationService {
     return { id: parent.id, kind, trigger, totalUnits: planned.length, created: true };
   }
 
-  /** Reuse the active run of this kind when one exists; otherwise create it. */
+  /**
+   * Resume the active run that does the SAME work, or create one. A reused run reports its own
+   * recorded trigger and options, never the caller's, so a resume never misrepresents the run.
+   */
   async getOrCreateRun({ kind = "full", trigger = "api", options = {} } = {}) {
-    const existing = await this.findActiveRun({ kind });
+    const existing = await this.findActiveRun({ kind, options });
     if (existing) {
-      return { id: existing.id, kind, trigger: existing.payload?.trigger ?? null, totalUnits: existing.payload?.totalUnits ?? null, created: false };
+      return {
+        id: existing.id,
+        kind: existing.payload?.kind ?? kind,
+        trigger: existing.payload?.trigger ?? null,
+        options: existing.payload?.options ?? null,
+        totalUnits: existing.payload?.totalUnits ?? null,
+        created: false,
+      };
     }
-    return this.createRun({ kind, trigger, options });
+    const created = await this.createRun({ kind, trigger, options });
+    return { ...created, options: { fastSync: Boolean(options.fastSync), promoteAfter: options.promoteAfter !== false } };
   }
 
   async listUnits(runId) {
@@ -473,9 +495,10 @@ export class SyncOrchestrationService {
       runningUnits: summary.runningUnits,
       blockedUnits: summary.blockedUnits,
       postSyncStages,
-      // Outstanding post-sync work, not merely requested: a run finalised by an unrecoverable
-      // failure is waiting for nothing, so it does not report post-sync work as pending.
-      postSyncPending: summary.awaitingPostSync || summary.blocked,
+      // Post-sync work that still has to happen: requested (deferred) or materialised but not
+      // runnable (blocked), on a run that has not been finalised. A run finalised by an
+      // unrecoverable failure is waiting for nothing, so it reports false.
+      postSyncPending: (postSyncStages === "deferred" || postSyncStages === "blocked") && !summary.finished,
       currentUnit: current,
       // Truthful progress of the units that exist; `percentComplete` is null while the run's total
       // work is not yet knowable (see summarizeUnits).

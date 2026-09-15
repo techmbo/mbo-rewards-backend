@@ -70,9 +70,11 @@ describe("handler wiring — only the manual per-network route reads promote", (
     assert.match(canary, /promoteAfter: false,/);
     assert.ok(!canary.includes("resolvePlatformSyncOptions"));
     const all = handlerOf("triggerSyncAll");
-    assert.match(all, /syncAll\(\{ fastSync, promoteAfter: true \}\)/);
-    assert.ok(!all.includes("promote:") && !all.includes("resolvePlatformSyncOptions"));
-    assert.match(all, /return startBackgroundSync\(/);
+    // Full sync always requests promotion; it does not read the manual route's promote option.
+    assert.match(all, /const options = \{ fastSync, promoteAfter: true \};/);
+    assert.ok(!all.includes("resolvePlatformSyncOptions"));
+    assert.ok(!/\bq\.promote\b|req\.query\?\.promote/.test(all));
+    assert.match(all, /getOrCreateRun\(\{/);
     const incremental = handlerOf("triggerIncrementalSync");
     assert.match(incremental, /triggerScheduledSync\(\{ reason: "api" \}\)/);
     assert.ok(!incremental.includes("promote"));

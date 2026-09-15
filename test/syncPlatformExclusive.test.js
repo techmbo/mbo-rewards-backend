@@ -120,9 +120,11 @@ describe("triggerSyncPlatform — handler wiring", () => {
     assert.match(helper, /res\.status\(200\)\.json\(\{\s*ok: true,/);
   });
 
-  it("the other routes are untouched: /sync/all and /sync/incremental keep their background launch; the canary keeps its own awaited block", () => {
+  it("the other routes keep their own shapes: /sync/all enqueues durably, /sync/incremental is unchanged, the canary keeps its awaited block", () => {
     const all = CONTROLLER_SRC.split("export async function triggerSyncAll")[1].split("\nexport ")[0];
-    assert.match(all, /return startBackgroundSync\(/);
+    assert.match(all, /await [\w.]*\.getOrCreateRun\(\{/, "full sync enqueues a durable run");
+    assert.match(all, /res\.status\(202\)/);
+    assert.ok(!all.includes("respondWithExclusiveSync("), "the manual per-network helper is not used by full sync");
     const incremental = CONTROLLER_SRC.split("export async function triggerIncrementalSync")[1].split("\nexport ")[0];
     assert.match(incremental, /triggerScheduledSync\(\{ reason: "api" \}\)/);
     assert.match(incremental, /res\.status\(202\)/);

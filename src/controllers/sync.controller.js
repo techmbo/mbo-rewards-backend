@@ -1,8 +1,9 @@
-import { syncAll, syncPlatformAccount } from "../jobs/sync.job.js";
+import { syncPlatformAccount } from "../jobs/sync.job.js";
 import { normalizeBoostinyCanaryOptions } from "../modules/commercial/boostinyCommissionCanary.js";
 import { formatSyncError, getSyncErrorMessage } from "../jobs/syncErrors.js";
-import { getSyncStatus, runExclusiveSync, runSyncInBackground } from "../jobs/syncState.js";
+import { getSyncStatus, runExclusiveSync } from "../jobs/syncState.js";
 import { getSchedulerStatus, triggerScheduledSync } from "../jobs/syncScheduler.js";
+import { SyncOrchestrationService } from "../jobs/syncOrchestration.service.js";
 
 const SUPPORTED_SYNC_PLATFORMS = new Set([
   "boostiny",
@@ -21,23 +22,12 @@ function parseBoolQuery(value, defaultValue = false) {
   return normalized === "true" || normalized === "1" || normalized === "yes";
 }
 
-function startBackgroundSync(jobName, syncFn, res, { trigger = "api" } = {}) {
-  const launch = runSyncInBackground(jobName, syncFn, { trigger });
-  if (!launch.started) {
-    return res.status(202).json({
-      ok: true,
-      status: "running",
-      message: launch.reason,
-      syncStatus: launch.status,
-    });
-  }
-
-  return res.status(202).json({
-    ok: true,
-    status: "running",
-    message: "Sync started in background. Poll /sync/status for progress.",
-    syncStatus: launch.status,
-  });
+/**
+ * The durable orchestration service. Overridable per app (tests, or a future worker sharing one
+ * instance) through app.locals; otherwise the default, backed by the runtime Prisma client.
+ */
+function orchestrationServiceFor(req) {
+  return req?.app?.locals?.syncOrchestration ?? new SyncOrchestrationService();
 }
 
 /**
@@ -77,15 +67,38 @@ export function getSyncStatusHandler(_req, res) {
   });
 }
 
-export async function triggerSyncAll(req, res) {
-  // Manual sync refreshes campaigns/coupons by default; pass ?fast=true for incremental-only.
-  const fastSync = parseBoolQuery(req.query?.fast, false);
-  return startBackgroundSync(
-    "syncAll",
-    () => syncAll({ fastSync, promoteAfter: true }),
-    res,
-    { trigger: "api" },
-  );
+/**
+ * Enqueue (or resume) a durable full-sync run. This route does NO work: an un-awaited sync does
+ * not survive the HTTP response on serverless hosting, and a full sync cannot fit in one
+ * invocation anyway. It creates the parent run and its bounded network units transactionally and
+ * returns 202 with the run id; the units are executed later, one per invocation, by the worker.
+ *
+ * A request that matches an active run resumes it rather than duplicating the work; a request
+ * whose execution options differ gets its own run.
+ */
+export async function triggerSyncAll(req, res, next) {
+  try {
+    // Manual sync refreshes campaigns/coupons by default; pass ?fast=true for incremental-only.
+    const fastSync = parseBoolQuery(req.query?.fast, false);
+    // A full sync still asks for post-sync promotion; it is recorded on the run and stays deferred
+    // until its bounded units exist, so the run cannot report success before that work is done.
+    const options = { fastSync, promoteAfter: true };
+    const orchestration = orchestrationServiceFor(req);
+    const run = await orchestration.getOrCreateRun({ kind: "full", trigger: "api", options });
+    const syncStatus = await orchestration.describeRun(run.id);
+    return res.status(202).json({
+      ok: true,
+      status: syncStatus?.status ?? "running",
+      message: run.created
+        ? "Full sync run created. Poll /sync/status for progress."
+        : "A matching full sync run is already active; resuming it.",
+      runId: run.id,
+      created: run.created,
+      syncStatus,
+    });
+  } catch (error) {
+    next(formatSyncError(error));
+  }
 }
 
 /**
