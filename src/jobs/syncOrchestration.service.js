@@ -1,0 +1,503 @@
+/**
+ * Durable sync orchestration — Phase 1: model + service. No execution, no routes.
+ *
+ * On serverless hosting an invocation cannot own a long-running sync: it is frozen once its
+ * response is sent and hard-killed at the function limit. A full sync is therefore modelled as a
+ * durable PARENT run plus one durable row per BOUNDED UNIT of work, all on the existing JobRun
+ * table (no schema change):
+ *
+ *   parent  JobRun { jobName: "sync:orchestration", correlationId: <own id>, payload: { kind,
+ *                    trigger, options, totalUnits }, result: <projected counters>, progress }
+ *   unit    JobRun { jobName: "sync:unit", correlationId: <parent id>, priority: <sequence>,
+ *                    payload: { parentRunId, sequence, kind, platform, accountLabel,
+ *                    sourceObject, options, lockKey }, result: { claim, outcome } }
+ *
+ * Units are claimed ATOMICALLY (conditional updateMany PENDING → RUNNING), held under a LEASE
+ * longer than any invocation can live (a RUNNING unit whose lease expired is reclaimable), and
+ * mutually excluded across runs by a LOCK KEY (the same network/account/source object is never
+ * RUNNING twice). Failures return the unit to PENDING while attempts remain — no in-process
+ * sleep or retry loop — and end in DEAD_LETTER otherwise. The parent's status is a projection
+ * of its units, recomputed after every outcome, so progress survives cold starts and instances.
+ *
+ * Execution of a unit (Phase 3) and the routes (Phases 2–5) build on these primitives.
+ */
+
+import { prisma as defaultPrisma } from "../database/prisma.js";
+import { listMarketplaceAccounts } from "../modules/integrations/oauth.service.js";
+import {
+  DEFAULT_LEASE_MS as LOCK_LEASE_MS,
+  SyncAccountLockService,
+  accountLockKey,
+  stageLockKey,
+} from "./syncAccountLock.service.js";
+
+export const ORCHESTRATION_JOB_NAME = "sync:orchestration";
+export const UNIT_JOB_NAME = "sync:unit";
+
+export const UNIT_KINDS = Object.freeze({
+  NETWORK: "network",
+  PROMOTION: "promotion",
+  CONVERSION_PROMOTION: "conversion-promotion",
+  AGGREGATION: "aggregation",
+});
+
+/**
+ * Lease and lock semantics are OWNED BY the shared durable lock service, so an orchestration unit
+ * and a manual per-network run take the same key under the same lease. Re-exported here for
+ * callers that only import the orchestrator.
+ */
+export const DEFAULT_LEASE_MS = LOCK_LEASE_MS;
+export const DEFAULT_UNIT_MAX_ATTEMPTS = 3;
+
+/**
+ * Kinds a worker may execute TODAY. Post-sync stages are planned as non-executable placeholders
+ * until their bounded (paged / per-day) implementation exists: the existing global PromotionJob,
+ * conversion promotion and 14-day rebuild must never be run as one unit inside an invocation.
+ */
+export const EXECUTABLE_UNIT_KINDS = Object.freeze([UNIT_KINDS.NETWORK]);
+export const UNIT_BLOCKED_REASON = "bounded_units_not_implemented";
+
+/** Platforms in the established syncAll order; account-labelled ones enumerate connected accounts. */
+const ACCOUNT_LABELLED_PLATFORMS = ["boostiny", "optimise_sea", "optimise_mena", "optimise_uk", "trackier"];
+const SINGLE_ACCOUNT_PLATFORMS = ["impact", "partnerize", "awin", "admitad", "rakuten", "cj"];
+
+const ACTIVE_STATUSES = ["PENDING", "RUNNING"];
+const TERMINAL_STATUSES = ["COMPLETED", "FAILED", "CANCELLED", "DEAD_LETTER"];
+
+function text(value) {
+  if (value === null || value === undefined) return null;
+  const s = String(value).trim();
+  return s === "" ? null : s;
+}
+
+/**
+ * The durable mutual-exclusion key of a unit, from the SHARED lock vocabulary. A network unit
+ * locks the whole ACCOUNT, whatever its source-object scope: a full account sync covers every
+ * source object, so a campaigns-only run and a full run of the same account must conflict.
+ */
+export function unitLockKey(unit = {}) {
+  if (unit.kind === UNIT_KINDS.NETWORK) {
+    return accountLockKey({ platform: unit.platform, accountLabel: unit.accountLabel });
+  }
+  return stageLockKey(unit.kind, unit.kind === UNIT_KINDS.AGGREGATION ? unit.day : null);
+}
+
+/** Whether a planned/stored unit may be executed by a worker in the current phase. */
+export function isUnitExecutable(unit = {}) {
+  const descriptor = unit?.payload ?? unit;
+  if (descriptor?.executable === false) return false;
+  return EXECUTABLE_UNIT_KINDS.includes(descriptor?.kind);
+}
+
+/** Throw the refusal a worker must surface rather than running an unbounded stage. */
+export function assertUnitExecutable(unit = {}) {
+  if (isUnitExecutable(unit)) return true;
+  const descriptor = unit?.payload ?? unit;
+  const error = new Error(
+    `Unit kind "${descriptor?.kind}" is not executable yet: ${descriptor?.blockedReason ?? UNIT_BLOCKED_REASON}`,
+  );
+  error.code = "unit_not_executable";
+  throw error;
+}
+
+async function defaultListAccounts(platform) {
+  const accounts = await listMarketplaceAccounts(platform);
+  return [...new Set(accounts.map((acc) => acc.accountLabel).filter(Boolean))];
+}
+
+/**
+ * Plan the bounded units of one run, in execution order:
+ *   every connected account of every platform (syncAll order) → promotion → conversion-promotion
+ *   → aggregation. Network units NEVER run the global post-sync stages themselves
+ *   (promoteAfter:false); those are their own units, present only when the run asks for them.
+ */
+export async function buildSyncPlan({
+  kind = "full",
+  fastSync = false,
+  promoteAfter = true,
+  includePostSyncUnits = false,
+  listAccounts = defaultListAccounts,
+} = {}) {
+  const units = [];
+  const networkOptions = { fastSync: kind === "incremental" ? true : Boolean(fastSync), promoteAfter: false };
+  for (const platform of ACCOUNT_LABELLED_PLATFORMS) {
+    const labels = await listAccounts(platform);
+    for (const accountLabel of labels) units.push({ kind: UNIT_KINDS.NETWORK, platform, accountLabel, options: { ...networkOptions } });
+  }
+  for (const platform of SINGLE_ACCOUNT_PLATFORMS) {
+    units.push({ kind: UNIT_KINDS.NETWORK, platform, accountLabel: "default", options: { ...networkOptions } });
+  }
+  // Post-sync stages are NOT planned by default. The existing promotion, conversion-promotion and
+  // 14-day rebuild are unbounded; until they are generated as bounded units they may only be
+  // materialised as explicit, non-executable placeholders that a worker must refuse.
+  if (promoteAfter && includePostSyncUnits) {
+    for (const kindName of [UNIT_KINDS.PROMOTION, UNIT_KINDS.CONVERSION_PROMOTION, UNIT_KINDS.AGGREGATION]) {
+      units.push({ kind: kindName, options: {}, executable: false, blockedReason: UNIT_BLOCKED_REASON });
+    }
+  }
+  return units.map((unit, index) => ({ ...unit, sequence: index + 1, lockKey: unitLockKey(unit) }));
+}
+
+/**
+ * Project the run from its units. `postSyncStages` is the PARENT's record of what was requested:
+ *   "none"     — promotion was not requested; the run is done when its units are done
+ *   "deferred" — promotion WAS requested but its bounded units do not exist yet
+ *   "blocked"  — non-executable placeholders are present
+ *
+ * Precedence once every materialised unit has settled:
+ *   1. a permanently failed unit (DEAD_LETTER / FAILED / CANCELLED) finalises the parent FAILED —
+ *      an unrecoverable failure in the network phase is NOT waited on, and no post-sync work is
+ *      materialised after it, unless a partial-success continuation policy is designed later;
+ *   2. otherwise requested-but-outstanding post-sync work keeps the parent non-terminal;
+ *   3. otherwise every requested unit completed and the parent finalises.
+ *
+ * Progress: `unitsPercentComplete` is the truthful progress of the units that EXIST. Overall
+ * `percentComplete` is null while the run's total work is not yet knowable (promotion requested,
+ * bounded units not materialised) — the denominator is unknown, and no weighting is invented.
+ */
+function summarizeUnits(units, { postSyncStages = "none" } = {}) {
+  const counters = { totalUnits: units.length, completedUnits: 0, failedUnits: 0, pendingUnits: 0, runningUnits: 0, blockedUnits: 0 };
+  let partial = false;
+  let latestError = null;
+  let latestWarning = null;
+  let current = null;
+  for (const unit of units) {
+    if (unit.status === "COMPLETED") {
+      counters.completedUnits += 1;
+      if (unit.result?.outcome?.partialSuccess) partial = true;
+      const warnings = unit.result?.outcome?.warnings;
+      if (Array.isArray(warnings) && warnings.length) latestWarning = String(warnings[warnings.length - 1]);
+    } else if (unit.status === "DEAD_LETTER" || unit.status === "FAILED" || unit.status === "CANCELLED") {
+      counters.failedUnits += 1;
+      if (unit.lastError) latestError = unit.lastError;
+    } else if (unit.status === "RUNNING") {
+      counters.runningUnits += 1;
+      if (!current) current = unit;
+    } else if (!isUnitExecutable(unit)) {
+      // Planned but not runnable in this phase: never offered to a worker, never silently "done".
+      counters.blockedUnits += 1;
+    } else {
+      counters.pendingUnits += 1;
+      if (unit.lastError && !latestError) latestError = unit.lastError;
+    }
+  }
+  const terminal = counters.completedUnits + counters.failedUnits;
+  const unitsPercentComplete = counters.totalUnits > 0 ? Math.min(100, Math.round((terminal / counters.totalUnits) * 100)) : 0;
+  const settled = terminal + counters.blockedUnits === counters.totalUnits && counters.totalUnits > 0;
+  // 1 — an unrecoverable unit failure beats any outstanding post-sync work.
+  const permanentlyFailed = settled && counters.failedUnits > 0;
+  // 2 — otherwise, requested post-sync work that does not exist yet keeps the run open.
+  const awaitingPostSync = settled && !permanentlyFailed && postSyncStages === "deferred";
+  const blocked = settled && !permanentlyFailed && !awaitingPostSync && counters.blockedUnits > 0;
+  const finished = settled && (permanentlyFailed || (!awaitingPostSync && counters.blockedUnits === 0));
+  // The overall denominator is unknown while promotion is requested but not materialised — except
+  // once the run is finished, when nothing further will be materialised.
+  const totalWorkKnown = postSyncStages !== "deferred" || finished;
+  const percentComplete = totalWorkKnown ? unitsPercentComplete : null;
+  let status = "running";
+  if (finished) status = counters.failedUnits > 0 ? "failed" : partial ? "partial" : "success";
+  else if (blocked) status = "blocked";
+  else if (awaitingPostSync) status = "awaiting_post_sync";
+  return {
+    ...counters,
+    unitsPercentComplete,
+    percentComplete,
+    totalWorkKnown,
+    finished,
+    settled,
+    permanentlyFailed,
+    awaitingPostSync,
+    blocked,
+    status,
+    latestError,
+    latestWarning,
+    current,
+  };
+}
+
+function unitView(unit) {
+  if (!unit) return null;
+  const p = unit.payload ?? {};
+  return {
+    unitId: unit.id,
+    sequence: p.sequence ?? unit.priority ?? null,
+    kind: p.kind ?? null,
+    platform: p.platform ?? null,
+    accountLabel: p.accountLabel ?? null,
+    sourceObject: p.sourceObject ?? null,
+    lockKey: p.lockKey ?? null,
+    status: unit.status,
+    attempt: unit.attempt ?? 0,
+    startedAt: unit.startedAt ?? null,
+    executable: isUnitExecutable(unit),
+    blockedReason: isUnitExecutable(unit) ? null : (p.blockedReason ?? UNIT_BLOCKED_REASON),
+  };
+}
+
+export class SyncOrchestrationService {
+  constructor({ prisma = defaultPrisma, now = () => new Date(), leaseMs = DEFAULT_LEASE_MS, maxAttempts = DEFAULT_UNIT_MAX_ATTEMPTS, listAccounts = defaultListAccounts, locks = null } = {}) {
+    this.db = prisma;
+    this.now = now;
+    this.leaseMs = leaseMs;
+    this.maxAttempts = maxAttempts;
+    this.listAccounts = listAccounts;
+    // One shared durable lock vocabulary for orchestration units AND (later) the manual route.
+    this.locks = locks ?? new SyncAccountLockService({ prisma, now, leaseMs });
+  }
+
+  /** The active (PENDING/RUNNING) parent run of a kind, oldest first, or null. */
+  async findActiveRun({ kind = null } = {}) {
+    return this.db.jobRun.findFirst({
+      where: {
+        jobName: ORCHESTRATION_JOB_NAME,
+        status: { in: ACTIVE_STATUSES },
+        ...(kind ? { payload: { path: ["kind"], equals: kind } } : {}),
+      },
+      orderBy: [{ createdAt: "asc" }],
+    });
+  }
+
+  /**
+   * Create a parent run and its unit rows in one transaction. `units` may be supplied (e.g. a
+   * single manual unit); otherwise the plan is built from connected accounts.
+   */
+  async createRun({ kind = "full", trigger = "api", options = {}, units = null } = {}) {
+    const planned = units
+      ? units.map((unit, index) => ({ ...unit, sequence: index + 1, lockKey: unitLockKey(unit) }))
+      : await buildSyncPlan({
+          kind,
+          fastSync: options.fastSync,
+          promoteAfter: options.promoteAfter !== false,
+          includePostSyncUnits: options.includePostSyncUnits === true,
+          listAccounts: this.listAccounts,
+        });
+    const startedAt = this.now();
+    const run = async (tx) => {
+      const parent = await tx.jobRun.create({
+        data: {
+          jobName: ORCHESTRATION_JOB_NAME,
+          status: "RUNNING",
+          priority: 100,
+          maxAttempts: 1,
+          startedAt,
+          payload: {
+            kind,
+            trigger,
+            options: { fastSync: Boolean(options.fastSync), promoteAfter: options.promoteAfter !== false },
+            // Explicit, never silent: "none" when promotion was not requested, "blocked" when
+            // placeholders exist, "deferred" when promotion was asked for but has no bounded units.
+            postSyncStages:
+              options.promoteAfter === false
+                ? "none"
+                : planned.some((unit) => unit.executable === false)
+                  ? "blocked"
+                  : "deferred",
+            totalUnits: planned.length,
+          },
+          result: { totalUnits: planned.length, completedUnits: 0, failedUnits: 0, pendingUnits: planned.length, runningUnits: 0, percentComplete: 0 },
+        },
+      });
+      await tx.jobRun.update({ where: { id: parent.id }, data: { correlationId: parent.id } });
+      for (const unit of planned) {
+        await tx.jobRun.create({
+          data: {
+            jobName: UNIT_JOB_NAME,
+            status: "PENDING",
+            priority: unit.sequence,
+            maxAttempts: this.maxAttempts,
+            correlationId: parent.id,
+            payload: { parentRunId: parent.id, ...unit },
+          },
+        });
+      }
+      return parent;
+    };
+    const parent = typeof this.db.$transaction === "function" ? await this.db.$transaction(run) : await run(this.db);
+    return { id: parent.id, kind, trigger, totalUnits: planned.length, created: true };
+  }
+
+  /** Reuse the active run of this kind when one exists; otherwise create it. */
+  async getOrCreateRun({ kind = "full", trigger = "api", options = {} } = {}) {
+    const existing = await this.findActiveRun({ kind });
+    if (existing) {
+      return { id: existing.id, kind, trigger: existing.payload?.trigger ?? null, totalUnits: existing.payload?.totalUnits ?? null, created: false };
+    }
+    return this.createRun({ kind, trigger, options });
+  }
+
+  async listUnits(runId) {
+    return this.db.jobRun.findMany({
+      where: { jobName: UNIT_JOB_NAME, correlationId: runId },
+      orderBy: [{ priority: "asc" }],
+    });
+  }
+
+  /**
+   * The next unit to work: lowest sequence that is PENDING, or RUNNING with an expired lease.
+   * Non-executable units are never offered — a worker cannot pick up an unbounded stage by accident.
+   */
+  async nextUnit(runId) {
+    const staleBefore = new Date(this.now().getTime() - this.leaseMs);
+    const units = await this.listUnits(runId);
+    return (
+      units.find(
+        (u) =>
+          isUnitExecutable(u) &&
+          (u.status === "PENDING" || (u.status === "RUNNING" && u.startedAt && new Date(u.startedAt) < staleBefore)),
+      ) ?? null
+    );
+  }
+
+  /**
+   * Any live holder of the key — another orchestration unit OR an explicit lock row taken by a
+   * different path (e.g. the manual per-network route) — or null. Delegated to the shared service
+   * so both paths see each other across instances.
+   */
+  async lockHolder(lockKey, { excludeUnitId = null } = {}) {
+    return this.locks.findHolder(lockKey, { excludeId: excludeUnitId });
+  }
+
+  /**
+   * Atomically claim a unit for this worker. Exactly one of concurrent claimers wins: the claim
+   * is a conditional update (PENDING → RUNNING, or RUNNING with an EXPIRED lease → RUNNING).
+   * Refused with `lock_held` when the unit's lock key is RUNNING elsewhere under a live lease.
+   */
+  async claimUnit(unitId, { workerId = null } = {}) {
+    const unit = await this.db.jobRun.findUnique({ where: { id: unitId } });
+    if (!unit || unit.jobName !== UNIT_JOB_NAME) return { claimed: false, reason: "not_found" };
+    if (!isUnitExecutable(unit)) {
+      return { claimed: false, reason: "not_executable", blockedReason: unit.payload?.blockedReason ?? UNIT_BLOCKED_REASON };
+    }
+    const lockKey = unit.payload?.lockKey ?? null;
+    if (lockKey) {
+      const holder = await this.lockHolder(lockKey, { excludeUnitId: unitId });
+      if (holder) return { claimed: false, reason: "lock_held", heldBy: holder.id };
+    }
+    const now = this.now();
+    const staleBefore = new Date(now.getTime() - this.leaseMs);
+    const previousWorker = unit.status === "RUNNING" ? unit.result?.claim?.workerId ?? null : null;
+    const claim = { workerId, claimedAt: now.toISOString(), ...(unit.status === "RUNNING" ? { reclaimedFrom: previousWorker } : {}) };
+    const data = { status: "RUNNING", startedAt: now, attempt: { increment: 1 }, result: { ...(unit.result ?? {}), claim } };
+    const fresh = await this.db.jobRun.updateMany({ where: { id: unitId, status: "PENDING" }, data });
+    if (fresh.count === 1) return { claimed: true, reclaimed: false, unitId };
+    const stale = await this.db.jobRun.updateMany({ where: { id: unitId, status: "RUNNING", startedAt: { lt: staleBefore } }, data });
+    if (stale.count === 1) return { claimed: true, reclaimed: true, unitId };
+    return { claimed: false, reason: "already_claimed" };
+  }
+
+  async completeUnit(unitId, outcome = null) {
+    const unit = await this.db.jobRun.findUnique({ where: { id: unitId } });
+    if (!unit) return null;
+    const updated = await this.db.jobRun.update({
+      where: { id: unitId },
+      data: { status: "COMPLETED", progress: 100, completedAt: this.now(), lastError: null, result: { ...(unit.result ?? {}), outcome: outcome ?? null } },
+    });
+    await this.refreshRun(unit.correlationId);
+    return updated;
+  }
+
+  /** Retryable while attempts remain (back to PENDING, no sleep); DEAD_LETTER otherwise. */
+  async failUnit(unitId, error) {
+    const unit = await this.db.jobRun.findUnique({ where: { id: unitId } });
+    if (!unit) return null;
+    const message = String(error?.message ?? error ?? "unit failed").slice(0, 2000);
+    const retry = (unit.attempt ?? 0) < (unit.maxAttempts ?? this.maxAttempts);
+    const updated = await this.db.jobRun.update({
+      where: { id: unitId },
+      data: retry
+        ? { status: "PENDING", lastError: message }
+        : { status: "DEAD_LETTER", lastError: message, completedAt: this.now() },
+    });
+    await this.refreshRun(unit.correlationId);
+    return updated;
+  }
+
+  /** Recompute the parent's counters/progress from its units; finalise when every unit is terminal. */
+  async refreshRun(runId) {
+    if (!runId) return null;
+    const [parent, units] = await Promise.all([this.db.jobRun.findUnique({ where: { id: runId } }), this.listUnits(runId)]);
+    if (!parent) return null;
+    const summary = summarizeUnits(units, { postSyncStages: parent.payload?.postSyncStages ?? "none" });
+    const data = {
+      // The Int column carries the progress of the units that exist; the nullable overall
+      // percentage lives in `result`, where "unknown" can be represented truthfully.
+      progress: summary.unitsPercentComplete,
+      result: {
+        totalUnits: summary.totalUnits,
+        completedUnits: summary.completedUnits,
+        failedUnits: summary.failedUnits,
+        pendingUnits: summary.pendingUnits,
+        runningUnits: summary.runningUnits,
+        blockedUnits: summary.blockedUnits,
+        unitsPercentComplete: summary.unitsPercentComplete,
+        percentComplete: summary.percentComplete,
+        totalWorkKnown: summary.totalWorkKnown,
+        status: summary.status,
+        latestError: summary.latestError,
+        latestWarning: summary.latestWarning,
+        currentUnit: unitView(summary.current),
+      },
+    };
+    if (summary.finished && !TERMINAL_STATUSES.includes(parent.status)) {
+      data.status = summary.failedUnits > 0 ? "FAILED" : "COMPLETED";
+      data.completedAt = this.now();
+      data.lastError = summary.latestError;
+    }
+    return this.db.jobRun.update({ where: { id: runId }, data });
+  }
+
+  /** Durable status projection of one run (null when unknown). */
+  async describeRun(runId) {
+    if (!runId) return null;
+    const parent = await this.db.jobRun.findUnique({ where: { id: runId } });
+    if (!parent || parent.jobName !== ORCHESTRATION_JOB_NAME) return null;
+    const units = await this.listUnits(runId);
+    const postSyncStages = parent.payload?.postSyncStages ?? "none";
+    const summary = summarizeUnits(units, { postSyncStages });
+    const status = TERMINAL_STATUSES.includes(parent.status) && !summary.finished
+      ? (parent.status === "COMPLETED" ? "success" : "failed")
+      : summary.status;
+    const current = unitView(summary.current);
+    const kind = parent.payload?.kind ?? null;
+    return {
+      runId: parent.id,
+      kind,
+      status,
+      trigger: parent.payload?.trigger ?? null,
+      startedAt: parent.startedAt ?? parent.createdAt ?? null,
+      finishedAt: parent.completedAt ?? null,
+      totalUnits: summary.totalUnits,
+      completedUnits: summary.completedUnits,
+      failedUnits: summary.failedUnits,
+      pendingUnits: summary.pendingUnits,
+      runningUnits: summary.runningUnits,
+      blockedUnits: summary.blockedUnits,
+      postSyncStages,
+      // Outstanding post-sync work, not merely requested: a run finalised by an unrecoverable
+      // failure is waiting for nothing, so it does not report post-sync work as pending.
+      postSyncPending: summary.awaitingPostSync || summary.blocked,
+      currentUnit: current,
+      // Truthful progress of the units that exist; `percentComplete` is null while the run's total
+      // work is not yet knowable (see summarizeUnits).
+      unitsPercentComplete: summary.unitsPercentComplete,
+      percentComplete: summary.percentComplete,
+      totalWorkKnown: summary.totalWorkKnown,
+      latestError: summary.latestError ?? parent.lastError ?? null,
+      latestWarning: summary.latestWarning,
+      options: parent.payload?.options ?? null,
+      // Backward-compatible names used by the in-memory status readers.
+      jobName: kind === "incremental" ? "scheduledSyncAll" : kind === "manual" ? "sync:manual" : "syncAll",
+      totalAccounts: summary.totalUnits,
+      completedAccounts: summary.completedUnits,
+      failedAccounts: summary.failedUnits,
+      currentStage: current ? (current.kind === UNIT_KINDS.NETWORK ? current.platform : current.kind) : summary.finished ? null : "starting",
+    };
+  }
+
+  /** The most recent run of any kind (active first, else latest), or null when none exists. */
+  async describeLatestRun() {
+    const active = await this.findActiveRun();
+    const parent = active ?? (await this.db.jobRun.findFirst({ where: { jobName: ORCHESTRATION_JOB_NAME }, orderBy: [{ createdAt: "desc" }] }));
+    return parent ? this.describeRun(parent.id) : null;
+  }
+}
