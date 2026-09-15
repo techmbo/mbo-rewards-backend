@@ -88,6 +88,33 @@ export async function triggerSyncAll(req, res) {
   );
 }
 
+/**
+ * Only an EXPLICIT false ("false", "0", "no"; case-insensitive, trimmed) switches a flag off.
+ * Anything else — absent, empty, unknown text — keeps the default, so the default never changes
+ * silently on a typo.
+ */
+function explicitFalse(value) {
+  if (typeof value !== "string") return false;
+  return ["false", "0", "no"].includes(value.trim().toLowerCase());
+}
+
+/**
+ * Options of the manual per-network sync, from the query string:
+ *  - fast=true            → fastSync (incremental windows)
+ *  - sourceObject=<key>   → restrict fetch/staging to one source object
+ *  - promote=false        → skip the post-sync promotion / conversion promotion / aggregation
+ *                           (the unscoped, all-network stage that does not fit a serverless
+ *                           request); default stays promoteAfter: true.
+ */
+export function resolvePlatformSyncOptions(query = {}) {
+  const q = query && typeof query === "object" ? query : {};
+  return {
+    fastSync: parseBoolQuery(q.fast, false),
+    promoteAfter: !explicitFalse(q.promote),
+    sourceObject: q.sourceObject || q.source_object || undefined,
+  };
+}
+
 export async function triggerSyncPlatform(req, res, next) {
   try {
     const { platform, accountLabel } = req.params;
@@ -95,9 +122,7 @@ export async function triggerSyncPlatform(req, res, next) {
       return res.status(400).json({ ok: false, message: `Unsupported platform: ${platform}` });
     }
 
-    const fastSync = parseBoolQuery(req.query?.fast, false);
-    const sourceObject =
-      req.query?.sourceObject || req.query?.source_object || undefined;
+    const { fastSync, promoteAfter, sourceObject } = resolvePlatformSyncOptions(req.query);
     const jobName = accountLabel
       ? `sync:${platform}:${accountLabel}${sourceObject ? `:${sourceObject}` : ""}`
       : `sync:${platform}${sourceObject ? `:${sourceObject}` : ""}`;
@@ -107,7 +132,7 @@ export async function triggerSyncPlatform(req, res, next) {
       syncFn: () =>
         syncPlatformAccount(platform, accountLabel || undefined, {
           fastSync,
-          promoteAfter: true,
+          promoteAfter,
           sourceObject: sourceObject || undefined,
         }),
       res,
