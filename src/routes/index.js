@@ -21,6 +21,7 @@ import {
   triggerSyncAll,
   triggerSyncPlatform,
   triggerBoostinyCanarySync,
+  triggerSyncWorker,
 } from "../controllers/sync.controller.js";
 import { getConnections, oauthCallback, oauthConnect } from "../controllers/oauth.controller.js";
 import {
@@ -369,6 +370,14 @@ router.post(
   requirePermission(PERMISSIONS.SYNC_TRIGGER),
   auditAction("sync.incremental", "sync"),
   triggerIncrementalSync,
+);
+router.post(
+  "/sync/worker",
+  authenticate,
+  requireAdminRole,
+  requirePermission(PERMISSIONS.SYNC_TRIGGER),
+  auditAction("sync.worker", "sync:worker"),
+  triggerSyncWorker,
 );
 router.post(
   "/sync/boostiny/:accountLabel/canary",

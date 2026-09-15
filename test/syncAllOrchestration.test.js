@@ -415,15 +415,24 @@ describe("source guards — enqueue only, and the other routes untouched", () =>
     assert.match(incremental, /res\.status\(202\)/);
     assert.ok(!incremental.includes("getOrCreateRun"), "incremental is not part of phase 2");
     const platform = handlerOf("triggerSyncPlatform");
-    assert.match(platform, /return respondWithExclusiveSync\(\{/);
+    // Phase 3: still awaited, now under the shared durable account lock.
+    assert.match(platform, /await locks\.withLock\(/);
+    assert.match(platform, /respondWithExclusiveSync\(\{/);
     assert.match(platform, /resolvePlatformSyncOptions\(req\.query\)/);
     assert.ok(!platform.includes("getOrCreateRun"));
     const canary = handlerOf("triggerBoostinyCanarySync");
     assert.match(canary, /const run = await runExclusiveSync\(/);
     assert.match(canary, /promoteAfter: false,/);
     assert.ok(!canary.includes("getOrCreateRun"));
-    // No worker, no cron in this phase.
-    for (const forbidden of ["claimUnit", "nextUnit", "completeUnit", "cancel"]) {
+    // Unit execution belongs to the worker alone: no other handler claims or completes units,
+    // and nothing in the controller wires a cron.
+    const worker = handlerOf("triggerSyncWorker");
+    const others = CONTROLLER_SRC.replace(worker, "");
+    for (const verb of ["claimUnit", "completeUnit", "failUnit", "nextWorkableUnit"]) {
+      assert.ok(worker.includes(verb), `the worker uses ${verb}`);
+      assert.ok(!others.includes(verb), `${verb} is confined to the worker`);
+    }
+    for (const forbidden of ["cron", "CRON", "collapseDuplicateRun"]) {
       assert.ok(!CONTROLLER_SRC.includes(forbidden), forbidden);
     }
   });

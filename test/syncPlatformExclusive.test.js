@@ -106,10 +106,11 @@ describe("triggerSyncPlatform — handler wiring", () => {
 
   it("awaits the exclusive runner with the unchanged sync options and no background launcher", () => {
     const handler = CONTROLLER_SRC.split("export async function triggerSyncPlatform")[1].split("\nexport ")[0];
-    assert.match(handler, /return respondWithExclusiveSync\(\{/);
+    assert.match(handler, /await locks\.withLock\(/, "held under the durable account lock");
+    assert.match(handler, /respondWithExclusiveSync\(\{/, "still awaited inside the lock");
     // Options resolved once from the query (promoteAfter defaults to true; see syncPlatformPromoteOption tests).
     assert.match(handler, /const \{ fastSync, promoteAfter, sourceObject \} = resolvePlatformSyncOptions\(req\.query\);/);
-    assert.match(handler, /syncPlatformAccount\(platform, accountLabel \|\| undefined, \{\s*fastSync,\s*promoteAfter,\s*sourceObject: sourceObject \|\| undefined,\s*\}\)/);
+    assert.match(handler, /accountSyncFor\(req\)\(platform, accountLabel \|\| undefined, \{\s*fastSync,\s*promoteAfter,\s*sourceObject: sourceObject \|\| undefined,\s*\}\)/);
     assert.ok(!handler.includes("startBackgroundSync("), "no background launcher on the manual per-network path");
     assert.ok(!handler.includes("runSyncInBackground("));
     assert.ok(!handler.includes("202"));

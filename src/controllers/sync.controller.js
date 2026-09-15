@@ -3,7 +3,12 @@ import { normalizeBoostinyCanaryOptions } from "../modules/commercial/boostinyCo
 import { formatSyncError, getSyncErrorMessage } from "../jobs/syncErrors.js";
 import { getSyncStatus, runExclusiveSync } from "../jobs/syncState.js";
 import { getSchedulerStatus, triggerScheduledSync } from "../jobs/syncScheduler.js";
-import { SyncOrchestrationService } from "../jobs/syncOrchestration.service.js";
+import {
+  SyncOrchestrationService,
+  assertUnitExecutable,
+  summariseSyncUnitOutcome,
+} from "../jobs/syncOrchestration.service.js";
+import { SyncAccountLockService, accountLockKey } from "../jobs/syncAccountLock.service.js";
 
 const SUPPORTED_SYNC_PLATFORMS = new Set([
   "boostiny",
@@ -28,6 +33,24 @@ function parseBoolQuery(value, defaultValue = false) {
  */
 function orchestrationServiceFor(req) {
   return req?.app?.locals?.syncOrchestration ?? new SyncOrchestrationService();
+}
+
+/**
+ * The shared durable account lock. Taken from the orchestration service when one is provided, so
+ * every path in a process speaks the same lock vocabulary; otherwise the default, backed by the
+ * runtime Prisma client. Module memory cannot exclude another serverless instance — this can.
+ */
+function accountLocksFor(req) {
+  return (
+    req?.app?.locals?.syncAccountLocks ??
+    req?.app?.locals?.syncOrchestration?.locks ??
+    new SyncAccountLockService()
+  );
+}
+
+/** The account sync entrypoint; overridable per app so the worker can be driven in tests. */
+function accountSyncFor(req) {
+  return req?.app?.locals?.syncPlatformAccount ?? syncPlatformAccount;
 }
 
 /**
@@ -139,18 +162,38 @@ export async function triggerSyncPlatform(req, res, next) {
     const jobName = accountLabel
       ? `sync:${platform}:${accountLabel}${sourceObject ? `:${sourceObject}` : ""}`
       : `sync:${platform}${sourceObject ? `:${sourceObject}` : ""}`;
-    // Awaited: the manual per-network sync finishes before the response (see respondWithExclusiveSync).
-    return respondWithExclusiveSync({
-      jobName,
-      syncFn: () =>
-        syncPlatformAccount(platform, accountLabel || undefined, {
-          fastSync,
-          promoteAfter,
-          sourceObject: sourceObject || undefined,
+    // Durable, cross-instance exclusion on the ACCOUNT, the same key and lease the orchestration
+    // worker uses: a manual run and a worker unit for the same account can never overlap, whatever
+    // source object either is scoped to. The in-process runExclusiveSync below remains only as a
+    // local guard; it is not the authoritative lock. The lock is released on success and failure.
+    const lockKey = accountLockKey({ platform, accountLabel });
+    const locks = accountLocksFor(req);
+    const outcome = await locks.withLock(
+      lockKey,
+      // Awaited: the manual per-network sync finishes before the response (see respondWithExclusiveSync).
+      () =>
+        respondWithExclusiveSync({
+          jobName,
+          syncFn: () =>
+            accountSyncFor(req)(platform, accountLabel || undefined, {
+              fastSync,
+              promoteAfter,
+              sourceObject: sourceObject || undefined,
+            }),
+          res,
+          trigger: "api",
         }),
-      res,
-      trigger: "api",
-    });
+      { holderId: `manual:${jobName}` },
+    );
+    if (!outcome.ran) {
+      return res.status(409).json({
+        ok: false,
+        status: "running",
+        message: "This account is already being synced (durable account lock held).",
+        lock: { key: lockKey, heldBy: outcome.heldBy ?? null, heldByJob: outcome.heldByJob ?? null },
+      });
+    }
+    return outcome.result;
   } catch (error) {
     next(formatSyncError(error));
   }
@@ -211,6 +254,97 @@ export async function triggerBoostinyCanarySync(req, res, next) {
       status: run.status?.status ?? "success",
       message: "Boostiny canary completed.",
       syncStatus: run.status,
+    });
+  } catch (error) {
+    next(formatSyncError(error));
+  }
+}
+
+/**
+ * Advance a durable sync run by EXACTLY ONE bounded unit, then return.
+ *
+ * One invocation does one unit: find the oldest active run with executable work, claim its next
+ * unit (which verifies the shared durable account lock), await exactly one account sync, record
+ * the outcome and refresh the parent. No loop, no recursion, no background promise, and no
+ * promotion, conversion-promotion or aggregation — those stages are not executable yet and are
+ * refused. Call it again to advance the next unit.
+ */
+export async function triggerSyncWorker(req, res, next) {
+  try {
+    const orchestration = orchestrationServiceFor(req);
+    const workable = await orchestration.nextWorkableUnit();
+    if (!workable) {
+      return res.status(200).json({
+        ok: true,
+        worked: false,
+        status: "idle",
+        message: "No executable sync unit is ready.",
+      });
+    }
+
+    const { run, unit } = workable;
+    const descriptor = unit.payload ?? {};
+    // Defence in depth: nextUnit already withholds non-executable kinds.
+    assertUnitExecutable(unit);
+
+    const workerId = `worker:${process.env.VERCEL_DEPLOYMENT_ID || process.pid}:${Date.now()}`;
+    const claim = await orchestration.claimUnit(unit.id, { workerId });
+    if (!claim.claimed) {
+      return res.status(409).json({
+        ok: false,
+        worked: false,
+        status: "busy",
+        message: "The next unit could not be claimed; another worker or a manual sync holds it.",
+        reason: claim.reason,
+        runId: run.id,
+        unitId: unit.id,
+        lock: { key: descriptor.lockKey ?? null, heldBy: claim.heldBy ?? null },
+      });
+    }
+
+    const unitView = {
+      unitId: unit.id,
+      sequence: descriptor.sequence ?? null,
+      kind: descriptor.kind ?? null,
+      platform: descriptor.platform ?? null,
+      accountLabel: descriptor.accountLabel ?? null,
+      sourceObject: descriptor.sourceObject ?? null,
+    };
+
+    let result;
+    try {
+      result = await accountSyncFor(req)(descriptor.platform, descriptor.accountLabel || undefined, {
+        // The unit's own recorded options…
+        fastSync: Boolean(descriptor.options?.fastSync),
+        // …except promotion, which a unit NEVER runs: the global post-sync stages do not fit an
+        // invocation and are their own (not yet executable) units.
+        promoteAfter: false,
+        sourceObject: descriptor.sourceObject || undefined,
+      });
+    } catch (error) {
+      const failed = await orchestration.failUnit(unit.id, error);
+      const syncStatus = await orchestration.describeRun(run.id);
+      return res.status(200).json({
+        ok: false,
+        worked: true,
+        status: failed?.status === "DEAD_LETTER" ? "unit_failed" : "unit_retry",
+        message: getSyncErrorMessage(error),
+        runId: run.id,
+        unit: { ...unitView, status: failed?.status ?? null, attempt: failed?.attempt ?? null },
+        syncStatus,
+      });
+    }
+
+    await orchestration.completeUnit(unit.id, summariseSyncUnitOutcome(result, { accountLabel: descriptor.accountLabel }));
+    const syncStatus = await orchestration.describeRun(run.id);
+    return res.status(200).json({
+      ok: true,
+      worked: true,
+      status: "unit_completed",
+      message: "One sync unit completed.",
+      runId: run.id,
+      unit: { ...unitView, status: "COMPLETED" },
+      syncStatus,
     });
   } catch (error) {
     next(formatSyncError(error));

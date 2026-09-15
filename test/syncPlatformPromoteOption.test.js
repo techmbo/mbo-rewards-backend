@@ -51,9 +51,10 @@ describe("handler wiring — only the manual per-network route reads promote", (
   it("triggerSyncPlatform passes the resolved options straight through to syncPlatformAccount", () => {
     const handler = handlerOf("triggerSyncPlatform");
     assert.match(handler, /const \{ fastSync, promoteAfter, sourceObject \} = resolvePlatformSyncOptions\(req\.query\);/);
-    assert.match(handler, /syncPlatformAccount\(platform, accountLabel \|\| undefined, \{\s*fastSync,\s*promoteAfter,\s*sourceObject: sourceObject \|\| undefined,\s*\}\)/);
+    assert.match(handler, /accountSyncFor\(req\)\(platform, accountLabel \|\| undefined, \{\s*fastSync,\s*promoteAfter,\s*sourceObject: sourceObject \|\| undefined,\s*\}\)/);
     assert.ok(!handler.includes("promoteAfter: true"), "no hard-coded promotion any more");
-    assert.match(handler, /return respondWithExclusiveSync\(\{/, "still awaited");
+    assert.match(handler, /respondWithExclusiveSync\(\{/, "still awaited");
+    assert.match(handler, /await locks\.withLock\(/, "under the durable account lock");
   });
 
   it("the awaited 200/409/500 helper is unchanged", () => {

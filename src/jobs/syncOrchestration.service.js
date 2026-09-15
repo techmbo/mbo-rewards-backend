@@ -234,6 +234,40 @@ function unitView(unit) {
   };
 }
 
+/**
+ * A compact, durable record of what one network unit did. Counts and flags only: the raw supplier
+ * result is never copied into the job row.
+ */
+export function summariseSyncUnitOutcome(result, { accountLabel = null } = {}) {
+  const account = accountLabel && result?.[accountLabel] && typeof result[accountLabel] === "object"
+    ? result[accountLabel]
+    : (result && typeof result === "object" ? Object.values(result).find((v) => v && typeof v === "object") ?? {} : {});
+  const warnings = [];
+  const collect = (node, depth = 0) => {
+    if (!node || typeof node !== "object" || depth > 4) return;
+    if (Array.isArray(node.warnings)) warnings.push(...node.warnings.filter(Boolean).map((w) => String(w).slice(0, 500)));
+    for (const value of Object.values(node)) if (value && typeof value === "object") collect(value, depth + 1);
+  };
+  collect(result);
+  const counts = {};
+  for (const [key, value] of Object.entries(account)) {
+    if (typeof value === "number" && Number.isFinite(value)) counts[key] = value;
+  }
+  const hasPartial = (node, depth = 0) => {
+    if (!node || typeof node !== "object" || depth > 4) return false;
+    if (node.partialSuccess === true) return true;
+    return Object.values(node).some((value) => value && typeof value === "object" && hasPartial(value, depth + 1));
+  };
+  return {
+    partialSuccess: hasPartial(result),
+    skipped: account?.skipped === true,
+    failed: account?.failed === true,
+    ...(account?.reason ? { reason: String(account.reason).slice(0, 500) } : {}),
+    counts,
+    warnings: warnings.slice(0, 5),
+  };
+}
+
 export class SyncOrchestrationService {
   constructor({ prisma = defaultPrisma, now = () => new Date(), leaseMs = DEFAULT_LEASE_MS, maxAttempts = DEFAULT_UNIT_MAX_ATTEMPTS, listAccounts = defaultListAccounts, locks = null } = {}) {
     this.db = prisma;
@@ -553,6 +587,24 @@ export class SyncOrchestrationService {
       data.lastError = summary.latestError;
     }
     return this.db.jobRun.update({ where: { id: runId }, data });
+  }
+
+  /**
+   * The oldest active run that has executable work, with the one unit to work next, or null.
+   * Non-executable units are never offered (see nextUnit), so a worker cannot reach an unbounded
+   * stage; a run whose remaining work is all blocked is simply skipped.
+   */
+  async nextWorkableUnit() {
+    const runs = await this.db.jobRun.findMany({
+      where: { jobName: ORCHESTRATION_JOB_NAME, status: { in: ACTIVE_STATUSES } },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+    for (const run of runs) {
+      // eslint-disable-next-line no-await-in-loop
+      const unit = await this.nextUnit(run.id);
+      if (unit) return { run, unit };
+    }
+    return null;
   }
 
   /** Durable status projection of one run (null when unknown). */
