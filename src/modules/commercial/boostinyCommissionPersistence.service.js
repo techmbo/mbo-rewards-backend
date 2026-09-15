@@ -20,10 +20,15 @@ import {
   BOOSTINY_PAYOUT_GROUP_SOURCE_OBJECT,
   BOOSTINY_SUMMARY_FAN_OUT_SOURCE_PATH,
   boostinyCampaignId,
+  boostinyCampaignOutcomeKeyPrefix,
   campaignHasPayoutGroups,
   mapBoostinyPayoutGroupCandidates,
 } from "./boostinyPayoutGroup.mapper.js";
+import { canonicalConditionSignature } from "./supplierCommissionReadiness.js";
 import { SupplierCommissionRuleService, sameRuleEconomics } from "./services/supplierCommissionRule.service.js";
+
+/** Every payout-group rule carries a sourcePath under payouts[]; the summary fan-out does not. */
+const PAYOUT_GROUP_SOURCE_PATH_PREFIX = "payouts[";
 
 function validDate(value) {
   if (!value) return null;
@@ -41,6 +46,19 @@ function sameDate(a, b) {
 
 function normalizeCurrency(value) {
   return value ? String(value).slice(0, 3).toUpperCase() : null;
+}
+
+/**
+ * Whether two versions of one outcome describe the same supplier rule. Economics through the
+ * rule service's own comparison; qualifiers (every child condition, the MBO gate included) and
+ * supplier precedence on top, because the rule service does not version on those alone.
+ */
+export function sameBoostinyRuleVersion(row, candidate) {
+  return (
+    sameRuleEconomics(row, candidate, normalizeCurrency(candidate.currency)) &&
+    canonicalConditionSignature(row.conditions ?? []) === canonicalConditionSignature(candidate.conditions ?? []) &&
+    (row.priority == null ? null : Number(row.priority)) === (candidate.priority == null ? null : Number(candidate.priority))
+  );
 }
 
 export class BoostinyCommissionPersistenceService {
@@ -85,33 +103,76 @@ export class BoostinyCommissionPersistenceService {
   /**
    * The effective window the rule service should version this candidate under.
    *
-   * The supplier's payout start_date is the rule's effectiveFrom. When the supplier changes a
-   * group's value WITHOUT moving start_date, the open version and the new economics would share
-   * one (outcomeKey, effectiveFrom) — an identity the schema keeps unique. The successor is then
-   * versioned from the observation time instead, the prior version is closed at that instant by
-   * the rule service, and the supplier's own start_date stays in metadata. History is never
-   * overwritten.
+   * First version: the supplier's payout start_date (or, without one, the observation time the
+   * rule service falls back to). Re-sync with nothing material changed: the open version's own
+   * effectiveFrom, so the rule service finds that exact version and updates it in place —
+   * idempotent. Material change (economics, any qualifier, priority): a successor versioned from
+   * the observation time, strictly after the open version so the rule service closes that prior
+   * version at the same instant — never two open versions, never an overwrite. The supplier's
+   * own start_date stays in metadata either way.
    */
   async resolveVersionWindow(candidate, { sourceAccountLabel, evidenceAt }, client = null) {
     const db = client ?? this.db;
     const supplierStart = validDate(candidate.effectiveFrom);
-    if (!supplierStart || !db?.supplierCommissionRule?.findMany) {
-      return { effectiveFrom: candidate.effectiveFrom, effectiveFromSource: supplierStart ? "SUPPLIER_START_DATE" : "OBSERVED" };
-    }
+    const firstVersion = { effectiveFrom: candidate.effectiveFrom, effectiveFromSource: supplierStart ? "SUPPLIER_START_DATE" : "OBSERVED" };
+    if (!db?.supplierCommissionRule?.findMany) return firstVersion;
     const versions = await db.supplierCommissionRule.findMany({
       where: { supplier: "BOOSTINY", sourceAccountLabel, outcomeKey: candidate.outcomeKey },
+      include: { conditions: true },
     });
-    const openAtSupplierStart = (versions ?? []).find(
-      (row) => row.effectiveUntil == null && sameDate(row.effectiveFrom, supplierStart),
-    );
-    if (
-      openAtSupplierStart &&
-      !sameRuleEconomics(openAtSupplierStart, candidate, normalizeCurrency(candidate.currency)) &&
-      evidenceAt.getTime() > supplierStart.getTime()
-    ) {
-      return { effectiveFrom: evidenceAt, effectiveFromSource: "OBSERVED_CHANGE" };
+    const open = (versions ?? []).find((row) => row.effectiveUntil == null);
+    if (!open) return firstVersion;
+    if (sameBoostinyRuleVersion(open, candidate)) {
+      return {
+        effectiveFrom: open.effectiveFrom,
+        effectiveFromSource: open.metadata?.effectiveFromSource ?? (supplierStart ? "SUPPLIER_START_DATE" : "OBSERVED"),
+      };
     }
-    return { effectiveFrom: candidate.effectiveFrom, effectiveFromSource: "SUPPLIER_START_DATE" };
+    const openFrom = validDate(open.effectiveFrom)?.getTime() ?? 0;
+    return {
+      effectiveFrom: new Date(Math.max(evidenceAt.getTime(), openFrom + 1000)),
+      effectiveFromSource: "OBSERVED_CHANGE",
+    };
+  }
+
+  /**
+   * Close open payout-group rules of one campaign whose outcome the supplier no longer lists.
+   *
+   * Closing (effectiveUntil) is the existing rule-history primitive; nothing is deleted. Only
+   * rules of THIS campaign, carrying a payouts[] sourcePath, are candidates; summary fan-out rules
+   * and other suppliers are never touched. A rule that had not yet become effective is closed at
+   * its own effectiveFrom, so it never reads as having been active.
+   */
+  async closeStalePayoutGroupRules({ sourceAccountLabel = "default", sourceCampaignId, activeOutcomeKeys, closedAt }, client = null) {
+    const db = client ?? this.db;
+    if (!db?.supplierCommissionRule?.findMany || !db?.supplierCommissionRule?.update) return 0;
+    const active = new Set(activeOutcomeKeys ?? []);
+    const open = await db.supplierCommissionRule.findMany({
+      where: {
+        supplier: "BOOSTINY",
+        sourceAccountLabel,
+        sourceObject: BOOSTINY_PAYOUT_GROUP_SOURCE_OBJECT,
+        sourcePath: { startsWith: PAYOUT_GROUP_SOURCE_PATH_PREFIX },
+        effectiveUntil: null,
+        outcomeKey: { startsWith: boostinyCampaignOutcomeKeyPrefix(sourceCampaignId) },
+      },
+    });
+    let closed = 0;
+    for (const row of open ?? []) {
+      if (active.has(row.outcomeKey)) continue;
+      const from = validDate(row.effectiveFrom);
+      const effectiveUntil = from && from.getTime() > closedAt.getTime() ? from : closedAt;
+      // eslint-disable-next-line no-await-in-loop
+      await db.supplierCommissionRule.update({
+        where: { id: row.id },
+        data: {
+          effectiveUntil,
+          metadata: { ...(row.metadata ?? {}), closedReason: "supplier_payout_group_no_longer_listed", closedAt: closedAt.toISOString() },
+        },
+      });
+      closed += 1;
+    }
+    return closed;
   }
 
   /** Persist the candidates of one campaign row and close its superseded summary rules. */
@@ -139,6 +200,7 @@ export class BoostinyCommissionPersistenceService {
     let financeReady = 0;
     let reviewRequired = 0;
     const ruleIds = [];
+    const activeOutcomeKeys = candidates.map((candidate) => candidate.outcomeKey);
 
     for (const candidate of candidates) {
       // eslint-disable-next-line no-await-in-loop
@@ -173,9 +235,14 @@ export class BoostinyCommissionPersistenceService {
     }
 
     let supersededSummaryRules = 0;
+    let staleRulesClosed = 0;
     if (persisted > 0 && sourceCampaignId) {
       supersededSummaryRules = await this.closeSupersededCampaignSummaryRules(
         { sourceAccountLabel, sourceCampaignId, closedAt: evidenceAt },
+        db,
+      );
+      staleRulesClosed = await this.closeStalePayoutGroupRules(
+        { sourceAccountLabel, sourceCampaignId, activeOutcomeKeys, closedAt: evidenceAt },
         db,
       );
     }
@@ -189,6 +256,7 @@ export class BoostinyCommissionPersistenceService {
       financeReady,
       reviewRequired,
       supersededSummaryRules,
+      staleRulesClosed,
       ruleIds,
       linked: Boolean(campaignSourceId),
     };
@@ -233,6 +301,7 @@ export class BoostinyCommissionPersistenceService {
       financeReady: 0,
       reviewRequired: 0,
       supersededSummaryRules: 0,
+      staleRulesClosed: 0,
       persistErrors: [],
       campaigns: [],
     };
@@ -252,6 +321,7 @@ export class BoostinyCommissionPersistenceService {
         summary.financeReady += result.financeReady;
         summary.reviewRequired += result.reviewRequired;
         summary.supersededSummaryRules += result.supersededSummaryRules;
+        summary.staleRulesClosed += result.staleRulesClosed;
         if (result.persisted > 0 && !result.linked) summary.campaignsUnlinked += 1;
         summary.campaigns.push(result);
       } catch (error) {

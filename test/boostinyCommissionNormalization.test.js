@@ -379,6 +379,7 @@ describe("qualifiers stay with the one rule they qualify — never flattened, ne
     const rules = candidatesOf(campaign([payout({ groups: [group({ id: 1, priority: 2, value: 4 }), group({ id: 2, priority: 1, value: 2 })] })]));
     assert.deepEqual(rules.map((r) => r.priority), [2, 1]);
     assert.equal(rules.length, 2, "the lower-priority group is not dropped as a loser");
+    assert.ok(!codeOf(PERSIST_SRC).includes("deleteMany") && !codeOf(PERSIST_SRC).includes(".delete("), "closing is the only supersession primitive");
     for (const src of [codeOf(MAPPER_SRC), codeOf(PERSIST_SRC)]) {
       for (const forbidden of [
         "clientCommission",
@@ -407,7 +408,7 @@ describe("qualifiers stay with the one rule they qualify — never flattened, ne
 });
 
 describe("identity comes from supplier evidence, and never from display or value", () => {
-  it("is network + campaign + payout identity + group id + qualifiers", () => {
+  it("is network + source object + campaign + payout identity + group id — and nothing else", () => {
     const [rule] = candidatesOf(campaign([payout()], 7001));
     const parts = rule.outcomeKey.split("::");
     assert.equal(parts[0], "boostiny");
@@ -415,9 +416,25 @@ describe("identity comes from supplier evidence, and never from display or value
     assert.equal(parts[2], "7001");
     assert.match(parts[3], /^payout:fp:[0-9a-f]{16}$/);
     assert.equal(parts[4], "group:9101");
-    assert.equal(parts[5], "slot:1");
-    assert.equal(parts[6], "", "an unqualified rule has an empty condition signature");
-    assert.equal(parts.length, 7, "exactly these segments and nothing else");
+    assert.equal(parts.length, 5, "exactly these segments and nothing else");
+    assert.equal(rule.outcomeKey, "boostiny::campaigns::7001::" + parts[3] + "::group:9101");
+  });
+
+  it("excludes qualifiers, priority and type: the same campaign + payout + group id is one identity", () => {
+    const base = candidatesOf(campaign([payout({ groups: [group({ id: 9101 })] })]))[0].outcomeKey;
+    for (const variant of [
+      group({ id: 9101, conditions: [{ field: "customer_type", operator: "equals", value: "zznewzz" }] }),
+      group({ id: 9101, product_categories: ["zzcatzz"] }),
+      group({ id: 9101, coupons: ["zzcouponzz"] }),
+      group({ id: 9101, capping: { max_payout: 1 } }),
+      group({ id: 9101, priority: 7 }),
+      group({ id: 9101, type: "fixed-amount", value: 3 }),
+      group({ id: 9101, value: 99 }),
+    ]) {
+      assert.equal(candidatesOf(campaign([payout({ groups: [variant] })]))[0].outcomeKey, base, JSON.stringify(variant));
+    }
+    assert.ok(!base.includes("slot:"));
+    assert.ok(!base.includes("CUSTOMER_TYPE"));
   });
 
   it("excludes the value: a changed value keeps the same identity", () => {
@@ -445,10 +462,16 @@ describe("identity comes from supplier evidence, and never from display or value
     assert.notEqual(a.key, c.key);
   });
 
-  it("a group without an id is fingerprinted from stable semantics and flagged, never keyed by position", () => {
+  it("a group without an id is fingerprinted from stable structural semantics and flagged, never keyed by position", () => {
     const identity = boostinyGroupIdentity({ type: "sale-share", priority: 1, value: 4 });
     assert.equal(identity.strategy, "ANONYMOUS_SEMANTIC_FINGERPRINT");
     assert.equal(identity.key, boostinyGroupIdentity({ type: "sale-share", priority: 1, value: 99 }).key, "value excluded");
+    assert.equal(identity.key, boostinyGroupIdentity({ type: "sale-share", priority: 9, value: 4 }).key, "priority excluded");
+    assert.equal(identity.key, boostinyGroupIdentity({ type: "sale-share", priority: 1, value: 4 }).key, "deterministic");
+    assert.notEqual(identity.key, boostinyGroupIdentity({ type: "sale-share", coupons: ["zzczz"] }).key, "structural qualifiers distinguish siblings");
+    const siblings = candidatesOf(campaign([payout({ groups: [group({ id: undefined, value: 4 }), group({ id: undefined, value: 2, coupons: ["zzczz"] })] })]));
+    assert.equal(siblings.length, 2, "two structurally different anonymous groups stay separate");
+    assert.ok(siblings.every((r) => r.mappingStatus === "REVIEW_REQUIRED" && r.metadata.reviewReasons.includes("supplier_group_id_missing")));
     const [rule] = candidatesOf(campaign([payout({ groups: [group({ id: undefined })] })]));
     assert.equal(rule.sourceGroupId, null);
     assert.ok(rule.metadata.reviewReasons.includes("supplier_group_id_missing"));
@@ -469,12 +492,22 @@ function createRuleDb({ supplierCampaign = null } = {}) {
   const uniqueKey = (row) => `${row.supplier}|${row.sourceAccountLabel}|${row.outcomeKey}|${new Date(row.effectiveFrom).getTime()}`;
   const model = {
     async findMany({ where }) {
+      const matchString = (actual, filter) => {
+        if (filter == null) return true;
+        if (typeof filter === "string") return actual === filter;
+        if (filter.startsWith != null && !String(actual ?? "").startsWith(filter.startsWith)) return false;
+        if (filter.notIn && filter.notIn.includes(actual)) return false;
+        return true;
+      };
       return rows
         .filter(
           (row) =>
             (where.supplier == null || row.supplier === where.supplier) &&
             (where.sourceAccountLabel == null || row.sourceAccountLabel === where.sourceAccountLabel) &&
-            (where.outcomeKey == null || (typeof where.outcomeKey === "string" ? row.outcomeKey === where.outcomeKey : true)),
+            (where.sourceObject == null || row.sourceObject === where.sourceObject) &&
+            matchString(row.sourcePath, where.sourcePath) &&
+            matchString(row.outcomeKey, where.outcomeKey) &&
+            (!("effectiveUntil" in where) || row.effectiveUntil == where.effectiveUntil),
         )
         .sort((a, b) => new Date(b.effectiveFrom) - new Date(a.effectiveFrom))
         .map((row) => ({ ...row, conditions: [...(row.conditions || [])] }));
@@ -598,13 +631,151 @@ describe("persistence — idempotent, versioned, one rule per group", () => {
     assert.equal(group2[0].effectiveUntil, null);
   });
 
-  it("a moved supplier start_date versions from the supplier date", async () => {
+  it("a moved supplier start_date is a different payout identity", async () => {
     const { rows, db } = createRuleDb();
     await serviceFor(db).persistCampaigns({ campaigns: [campaign([payout({ start_date: "2026-01-01", groups: [group({ value: 4 })] })])] });
     await serviceFor(db, () => new Date("2026-09-11T12:00:00.000Z")).persistCampaigns({ campaigns: [campaign([payout({ start_date: "2026-07-01", groups: [group({ value: 5 })] })])] });
-    // A different start_date is a different payout identity (window is payout semantics); both stay.
-    assert.equal(openRows(rows).length, 2);
+    // A different start_date is a different payout identity (window is payout semantics): the new
+    // identity opens from its supplier date, and the old identity — no longer listed — is closed.
+    assert.equal(rows.length, 2);
+    assert.equal(openRows(rows).length, 1);
     assert.ok(rows.every((row) => row.metadata.effectiveFromSource === "SUPPLIER_START_DATE"));
+    const [old, fresh] = rows;
+    assert.equal(old.metadata.closedReason, "supplier_payout_group_no_longer_listed");
+    assert.equal(fresh.effectiveUntil, null);
+    assert.equal(new Date(fresh.effectiveFrom).toISOString().slice(0, 10), "2026-07-01");
+    assert.notEqual(old.outcomeKey, fresh.outcomeKey);
+  });
+
+  it("same group + same payout + same qualifiers => same outcomeKey and idempotent", async () => {
+    const { rows, db } = createRuleDb();
+    const raw = campaign([payout({ groups: [QUALIFIED_GROUP] })]);
+    await serviceFor(db).persistCampaigns({ campaigns: [raw] });
+    const [first] = rows;
+    await serviceFor(db, () => new Date("2026-09-12T12:00:00.000Z")).persistCampaigns({ campaigns: [raw], fetchedAt: new Date("2026-09-12T12:00:00.000Z") });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].id, first.id);
+    assert.equal(rows[0].effectiveUntil, null);
+    assert.equal(rows[0].outcomeKey, first.outcomeKey);
+  });
+
+  for (const [label, change] of [
+    ["conditions", { conditions: [{ field: "customer_type", operator: "equals", value: "zzreturningzz" }] }],
+    ["product_categories", { product_categories: ["zzcatthreezz"] }],
+    ["coupons", { coupons: ["zzcouponczz"] }],
+    ["capping", { capping: { max_payout: 999 } }],
+    ["priority", { priority: 9 }],
+    ["type", { type: "fixed-amount" }],
+  ]) {
+    it(`same group id + ${label} change => same identity, prior version closed, one successor`, async () => {
+      const { rows, db } = createRuleDb();
+      await serviceFor(db).persistCampaigns({ campaigns: [campaign([payout({ groups: [QUALIFIED_GROUP] })])] });
+      const [before] = rows;
+      const at = new Date("2026-09-12T12:00:00.000Z");
+      const summary = await serviceFor(db, () => at).persistCampaigns({ campaigns: [campaign([payout({ groups: [{ ...QUALIFIED_GROUP, ...change }] })])], fetchedAt: at });
+      assert.deepEqual(summary.persistErrors, []);
+      assert.equal(rows.length, 2, "exactly one successor");
+      const [prior, successor] = rows;
+      assert.equal(prior.id, before.id);
+      assert.equal(prior.outcomeKey, successor.outcomeKey, "same supplier-rule identity");
+      assert.equal(new Date(prior.effectiveUntil).getTime(), at.getTime(), "the prior version is closed at the observation");
+      assert.equal(successor.effectiveUntil, null);
+      assert.equal(new Date(successor.effectiveFrom).getTime(), at.getTime());
+      assert.equal(successor.metadata.effectiveFromSource, "OBSERVED_CHANGE");
+      assert.equal(successor.metadata.payoutStartDate, "2026-01-01", "the supplier window is still evidence");
+      assert.equal(openRows(rows).length, 1, "never two open versions");
+      if (label === "priority") assert.equal(successor.priority, 9);
+      if (label === "type") assert.equal(successor.fixedAmount, 6);
+      if (label === "coupons") assert.ok(successor.conditions.some((c) => c.conditionType === "COUPON" && c.value === "zzcouponczz"));
+    });
+  }
+
+  it("after a versioned change, an identical re-sync is idempotent again: no third version", async () => {
+    const { rows, db } = createRuleDb();
+    await serviceFor(db).persistCampaigns({ campaigns: [campaign([payout({ groups: [group({ value: 4 })] })])] });
+    const changed = campaign([payout({ groups: [group({ value: 5 })] })]);
+    await serviceFor(db, () => new Date("2026-09-12T12:00:00.000Z")).persistCampaigns({ campaigns: [changed] });
+    assert.equal(rows.length, 2);
+    const successorId = openRows(rows)[0].id;
+    for (const day of ["13", "14"]) {
+      // eslint-disable-next-line no-await-in-loop
+      const summary = await serviceFor(db, () => new Date(`2026-09-${day}T12:00:00.000Z`)).persistCampaigns({ campaigns: [changed] });
+      assert.deepEqual(summary.persistErrors, [], "the re-sync must succeed, not collide on the closed version's date");
+      assert.equal(summary.rulesPersisted, 1);
+    }
+    assert.equal(rows.length, 2);
+    assert.equal(openRows(rows).length, 1);
+    assert.equal(openRows(rows)[0].id, successorId);
+  });
+
+  it("a change on a not-yet-effective (future) payout still leaves exactly one open version, strictly after the prior", async () => {
+    const { rows, db } = createRuleDb();
+    await serviceFor(db).persistCampaigns({ campaigns: [campaign([payout({ start_date: "2031-01-01", groups: [group({ value: 4 })] })])] });
+    await serviceFor(db, () => new Date("2026-09-12T12:00:00.000Z")).persistCampaigns({ campaigns: [campaign([payout({ start_date: "2031-01-01", groups: [group({ value: 5 })] })])] });
+    assert.equal(rows.length, 2);
+    assert.equal(openRows(rows).length, 1);
+    const [prior, successor] = rows;
+    assert.ok(new Date(successor.effectiveFrom) > new Date(prior.effectiveFrom));
+    assert.equal(new Date(prior.effectiveUntil).getTime(), new Date(successor.effectiveFrom).getTime());
+    assert.equal(successor.ratePercent, 5);
+  });
+
+  it("reordered payouts and groups keep every identity and create no version", async () => {
+    const { rows, db } = createRuleDb();
+    const a = payout({ groups: [group({ id: 1, value: 4 }), group({ id: 2, value: 2, priority: 2 })] });
+    const b = payout({ model: "cpa", start_date: "2026-03-01", groups: [group({ id: 3, type: "fixed-amount", value: 7 })] });
+    await serviceFor(db).persistCampaigns({ campaigns: [campaign([a, b])] });
+    const ids = rows.map((r) => r.id).sort();
+    const keys = rows.map((r) => r.outcomeKey).sort();
+    await serviceFor(db, () => new Date("2026-09-12T12:00:00.000Z")).persistCampaigns({
+      campaigns: [campaign([{ ...b }, { ...a, groups: [...a.groups].reverse() }])],
+    });
+    assert.equal(rows.length, 3);
+    assert.deepEqual(rows.map((r) => r.id).sort(), ids);
+    assert.deepEqual(rows.map((r) => r.outcomeKey).sort(), keys);
+    assert.equal(openRows(rows).length, 3);
+  });
+
+  it("a supplier group that disappears on a later sync is closed; nothing unrelated is touched", async () => {
+    const { rows, db } = createRuleDb();
+    const closedAt = new Date("2026-09-12T12:00:00.000Z");
+    rows.push(
+      { id: "summary-1", supplier: "BOOSTINY", sourceAccountLabel: "default", sourceObject: "campaigns", sourcePath: "commission", outcomeKey: "7001::campaigns::commission::9101::PERCENT::PERCENT_OF_SALE::::slot:1::", effectiveFrom: new Date("2026-01-05"), effectiveUntil: null, conditions: [], metadata: {} },
+      { id: "optimise-1", supplier: "OPTIMISE", sourceAccountLabel: "default", sourceObject: "commission_groups", sourcePath: "payouts[0].groups[0]", outcomeKey: "boostiny::campaigns::7001::payout:x::group:99", effectiveFrom: new Date("2026-01-05"), effectiveUntil: null, conditions: [], metadata: {} },
+      { id: "other-account", supplier: "BOOSTINY", sourceAccountLabel: "second", sourceObject: "campaigns", sourcePath: "payouts[0].groups[0]", outcomeKey: "boostiny::campaigns::7001::payout:x::group:10", effectiveFrom: new Date("2026-01-05"), effectiveUntil: null, conditions: [], metadata: {} },
+    );
+    const sync1 = [campaign([payout({ groups: [group({ id: 10, value: 4 }), group({ id: 11, value: 2 })] })], 7001), campaign([payout({ groups: [group({ id: 10, value: 1 })] })], 7002)];
+    await serviceFor(db).persistCampaigns({ campaigns: sync1 });
+    const before = rows.filter((r) => r.sourcePath?.startsWith("payouts[") && r.supplier === "BOOSTINY" && r.sourceAccountLabel === "default");
+    assert.equal(before.length, 3);
+
+    const sync2 = [campaign([payout({ groups: [group({ id: 11, value: 2 })] })], 7001), campaign([payout({ groups: [group({ id: 10, value: 1 })] })], 7002)];
+    const summary = await serviceFor(db, () => closedAt).persistCampaigns({ campaigns: sync2, fetchedAt: closedAt });
+    assert.equal(summary.staleRulesClosed, 1);
+    const gone = rows.find((r) => r.sourceGroupId === "10" && r.outcomeKey.includes("::7001::"));
+    assert.equal(new Date(gone.effectiveUntil).getTime(), closedAt.getTime());
+    assert.equal(gone.metadata.closedReason, "supplier_payout_group_no_longer_listed");
+    assert.equal(gone.ratePercent, 4, "history is preserved, not deleted or overwritten");
+    assert.equal(rows.find((r) => r.sourceGroupId === "11").effectiveUntil, null, "the sibling that still exists stays open");
+    assert.equal(rows.find((r) => r.sourceGroupId === "10" && r.outcomeKey.includes("::7002::")).effectiveUntil, null, "another campaign's same group id is untouched");
+    assert.equal(rows.find((r) => r.id === "other-account").effectiveUntil, null, "another account is untouched");
+    assert.equal(rows.find((r) => r.id === "optimise-1").effectiveUntil, null, "another supplier is untouched");
+    assert.equal(rows.length, before.length + 3, "closing creates no rows");
+  });
+
+  it("a stale rule that never became effective is closed at its own effectiveFrom, never with a negative window", async () => {
+    const { rows, db } = createRuleDb();
+    await serviceFor(db).persistCampaigns({ campaigns: [campaign([payout({ start_date: "2031-01-01", groups: [group({ id: 10 }), group({ id: 11 })] })])] });
+    await serviceFor(db, () => new Date("2026-09-12T12:00:00.000Z")).persistCampaigns({ campaigns: [campaign([payout({ start_date: "2031-01-01", groups: [group({ id: 11 })] })])] });
+    const gone = rows.find((r) => r.sourceGroupId === "10");
+    assert.equal(new Date(gone.effectiveUntil).getTime(), new Date(gone.effectiveFrom).getTime());
+  });
+
+  it("a campaign absent from the payload closes nothing: absence of a row is not supplier evidence", async () => {
+    const { rows, db } = createRuleDb();
+    await serviceFor(db).persistCampaigns({ campaigns: [campaign([payout()], 7001)] });
+    await serviceFor(db, () => new Date("2026-09-12T12:00:00.000Z")).persistCampaigns({ campaigns: [campaign([payout()], 7002)] });
+    assert.equal(rows.find((r) => r.outcomeKey.includes("::7001::")).effectiveUntil, null);
   });
 
   it("closes the campaign-summary fan-out rules it supersedes, and nothing else", async () => {

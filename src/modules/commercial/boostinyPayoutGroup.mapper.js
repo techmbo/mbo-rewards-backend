@@ -9,9 +9,11 @@
  * - every distinct payout outcome — every group under every payout — is its own
  *   SupplierCommissionRule. Nothing is averaged, merged or collapsed; "Commission 1..N" is a
  *   display sequence, never identity;
- * - identity is supplier evidence: network + source campaign id + payout identity + group id.
- *   The group id is only known to be unique within its payout, so the payout identity is part of
- *   the key. The payout value is EXCLUDED, so a value change versions the same outcome;
+ * - identity is supplier evidence and nothing else: network + source object + source campaign id
+ *   + payout identity + group id. The group id is only known to be unique within its payout, so
+ *   the payout identity is part of the key. Value, rate, amount, priority, qualifiers, display
+ *   sequence and array positions are all EXCLUDED: a change to any of them versions the same
+ *   outcome through the rule service instead of minting a second, unrelated identity;
  * - qualifiers are NOT flattened into the outcome: groups[].conditions, product_categories,
  *   coupons and capping become child conditions of the one rule they qualify, so later matching
  *   can decide which supplier rule applies to an order. Nothing here decides that;
@@ -28,7 +30,7 @@
  */
 
 import { looksPercent, payoutBasisFrom } from "../ops/campaignCommissions.js";
-import { canonicalConditionSignature, canonicalJson, fingerprint } from "./supplierCommissionReadiness.js";
+import { canonicalJson, fingerprint } from "./supplierCommissionReadiness.js";
 import { conditionsFromSourceEntry } from "./supplierCommissionRuleFanOut.js";
 
 /** The rules come from the campaigns rows themselves; there is no separate Boostiny endpoint. */
@@ -135,15 +137,16 @@ export function boostinyPayoutIdentity(payout = {}) {
 }
 
 /**
- * Group identity: the supplier group id. Without one, a fingerprint of the group's stable
- * non-economic semantics (type, priority, qualifiers) — flagged for review, never the index.
+ * Group identity: the supplier group id. Without one, a deterministic fingerprint of the group's
+ * stable STRUCTURAL semantics (type and qualifiers) — enough to tell sibling groups apart, but
+ * never the value, the priority, the display sequence or the array index, so a change to any of
+ * those still versions the same fallback identity. Always flagged for review.
  */
 export function boostinyGroupIdentity(group = {}) {
   const id = text(group.id ?? group.group_id ?? group.groupId);
   if (id) return { strategy: "SUPPLIER_ID", sufficient: true, key: id, inputs: { id } };
   const inputs = {
     type: text(group.type)?.toLowerCase() ?? null,
-    priority: explicitNumber(group.priority),
     conditions: isEmpty(group.conditions) ? null : group.conditions,
     productCategories: isEmpty(group.product_categories) ? null : group.product_categories,
     coupons: isEmpty(group.coupons) ? null : group.coupons,
@@ -239,16 +242,20 @@ export function boostinyGroupConditions(group = {}) {
   return conditions;
 }
 
-export function boostinyPayoutGroupOutcomeKey({ campaignId, payoutKey, groupKey, conditions }) {
+/** The stable supplier-rule identity. Exactly these five segments; nothing mutable in them. */
+export function boostinyPayoutGroupOutcomeKey({ campaignId, payoutKey, groupKey }) {
   return [
     "boostiny",
     BOOSTINY_PAYOUT_GROUP_SOURCE_OBJECT,
     campaignId ?? "NO_CAMPAIGN_ID",
     `payout:${payoutKey}`,
     `group:${groupKey}`,
-    "slot:1",
-    canonicalConditionSignature(conditions),
   ].join("::");
+}
+
+/** The outcomeKey prefix shared by every payout-group rule of one campaign. */
+export function boostinyCampaignOutcomeKeyPrefix(campaignId) {
+  return `boostiny::${BOOSTINY_PAYOUT_GROUP_SOURCE_OBJECT}::${campaignId ?? "NO_CAMPAIGN_ID"}::payout:`;
 }
 
 /** Source campaign id encoded in a payout-group outcomeKey (null for other keys). */
@@ -335,7 +342,6 @@ export function mapBoostinyPayoutGroupCandidates(raw = {}, context = {}) {
         campaignId,
         payoutKey: payoutIdentity.key,
         groupKey: groupIdentity.key,
-        conditions,
       });
       if (seen.has(outcomeKey)) return;
       seen.add(outcomeKey);
