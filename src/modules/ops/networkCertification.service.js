@@ -793,6 +793,20 @@ const BOOSTINY_PROBES = Object.freeze({
     chain: "boostinyPerformance",
     dated: true,
   },
+  // Link performance, under the catalog's existing name for GET /publisher/link-performance:
+  // link_reports. Dated exactly as performance is — production sends from/to on every call — and
+  // read RAW through fetchLinkPerformance, never fetchAll.
+  //
+  // A LINK-PERFORMANCE ROW IS A REPORT ROW ABOUT A LINK. It is not a tracking-link asset, not a
+  // conversion row and not a settlement: no TrackingLink is manufactured from it, no URL in it
+  // is canonicalised, and the sync job's own report_type tag is not applied. Field names are
+  // reported as they arrive.
+  link_reports: {
+    method: "GET",
+    endpointKey: "GET /publisher/link-performance (from/to window, limit=1, page=1)",
+    chain: "boostinyLinkPerformance",
+    dated: true,
+  },
 });
 
 const PROBE_REGISTRY = Object.freeze({
@@ -1038,6 +1052,9 @@ export const BOOSTINY_CERTIFICATION_COUPON_PARAMS = Object.freeze({ page: 1, lim
 
 /** The Boostiny performance bounds. The from/to pair is added from the service window at call time. */
 export const BOOSTINY_CERTIFICATION_PERFORMANCE_PARAMS = Object.freeze({ page: 1, limit: 1 });
+
+/** The Boostiny link-performance bounds. The from/to pair is added from the service window at call time. */
+export const BOOSTINY_CERTIFICATION_LINK_PERFORMANCE_PARAMS = Object.freeze({ page: 1, limit: 1 });
 
 /** The Trackier reports bounds. Dates and KPI names are added at call time. */
 export const TRACKIER_CERTIFICATION_REPORT_PARAMS = Object.freeze({ limit: 1, page: 1 });
@@ -3360,6 +3377,82 @@ export class NetworkCertificationService {
   }
 
   /**
+   * The Boostiny link-performance chain: exactly ONE request to the raw link-performance endpoint.
+   *
+   * It reuses production's own fetchLinkPerformance — the same shared client, Authorization
+   * header, rate limiter slot and row extraction, with the same from/to names production sends —
+   * through the same bounded pager seam as the other Boostiny probes: singlePage, one attempt,
+   * the probe's timeout, page=1, limit=1. The window is the SERVICE's, from a frozen preset —
+   * never a caller's dates. It never calls fetchAll, so no other resource is read alongside it.
+   *
+   * Zero rows reports OK_NO_ROWS: the window held no link performance under this account. It is
+   * not evidence of an unsupported object or an account-state blocker. Only structure leaves this
+   * method: no URL, link id, campaign, count, amount, date or subid value can reach the result.
+   */
+  async certifyBoostinyLinkPerformance({ adapter, key, probe, budgetLeft, sourceObject, window = null }) {
+    const base = {
+      network: key,
+      sourceObject,
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+      windowPreset: window?.preset ?? null,
+    };
+
+    if (!window?.from || !window?.to) {
+      return {
+        ...base,
+        ok: false,
+        statusCategory: "SKIPPED_NO_WINDOW",
+        fieldCount: 0,
+        schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        note: "Link performance is a dated object and no bounded window was supplied, so no supplier request was made.",
+      };
+    }
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      const rows = asRows(
+        await adapter.fetchLinkPerformance(
+          { from: window.from, to: window.to, ...BOOSTINY_CERTIFICATION_LINK_PERFORMANCE_PARAMS },
+          null,
+          { singlePage: true, retries: 1, timeoutMs },
+        ),
+      ).slice(0, 1);
+
+      if (!rows.length) {
+        return {
+          ...base,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        };
+      }
+
+      const fieldPaths = summarisePayloads(rows);
+      return {
+        ...base,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+        schema: "KNOWN_FROM_LIVE_SAMPLE",
+      };
+    } catch (error) {
+      return certificationFailure(
+        base,
+        error,
+        { windowPreset: window?.preset ?? null },
+        redactionValuesFor(adapter),
+      );
+    }
+  }
+
+  /**
    * Certifies one network.
    *
    * Probes run in sequence, not in parallel: a burst of concurrent calls against a supplier's API
@@ -3605,6 +3698,21 @@ export class NetworkCertificationService {
       if (probe.chain === "boostinyCoupons") {
         results.push(
           await this.certifyBoostinyCoupons({ adapter, key, probe, budgetLeft, sourceObject }),
+        );
+        continue;
+      }
+
+      if (probe.chain === "boostinyLinkPerformance") {
+        results.push(
+          await this.certifyBoostinyLinkPerformance({
+            adapter,
+            key,
+            probe,
+            budgetLeft,
+            sourceObject,
+            // The service's own window, computed from the frozen preset. Never a caller's dates.
+            window: { ...ctx.window, preset: resolvedWindowPreset },
+          }),
         );
         continue;
       }

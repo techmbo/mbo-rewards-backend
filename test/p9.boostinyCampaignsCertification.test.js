@@ -174,7 +174,7 @@ const VALUE_MARKERS = [
 describe("Boostiny is registered in the certification framework", () => {
   it("appears as a probe network, with campaigns first among the objects certified so far", () => {
     assert.ok(listProbeNetworks().includes("boostiny"));
-    assert.deepEqual(listProbeSourceObjects("boostiny"), ["campaigns", "coupons", "api_reports"]);
+    assert.deepEqual(listProbeSourceObjects("boostiny"), ["campaigns", "coupons", "api_reports", "link_reports"]);
   });
 
   it("has an adapter builder registered under its own name", () => {
@@ -196,7 +196,7 @@ describe("Boostiny is registered in the certification framework", () => {
   });
 
   it("refuses an object this phase does not certify", async () => {
-    for (const notYet of ["link_reports", "settlement", "performance", "conversions"]) {
+    for (const notYet of ["settlement", "performance", "conversions", "tracking_links"]) {
       assert.ok(!listProbeSourceObjects("boostiny").includes(notYet), notYet);
       await assert.rejects(
         () => serviceWith(adapterWith(spyHttp())).certify("boostiny", { sourceObjects: [notYet] }),
@@ -705,7 +705,7 @@ describe("read-only, and production Boostiny behaviour unchanged", () => {
     assert.equal((await adapterWith(couponSpy).fetchCoupons({})).length, 2);
     assert.equal(couponSpy.calls[0].path, "/publisher/coupons");
     const code = codeOf(ADAPTER_SRC);
-    for (const untouched of ["fetchPerformance(params = {}, stats = null, options = {})", "fetchLinkPerformance(params = {}, stats = null)", "fetchCoupons(params = {}, stats = null, options = {})"]) {
+    for (const untouched of ["fetchPerformance(params = {}, stats = null, options = {})", "fetchLinkPerformance(params = {}, stats = null, options = {})", "fetchCoupons(params = {}, stats = null, options = {})"]) {
       assert.ok(code.includes(untouched), untouched);
     }
   });

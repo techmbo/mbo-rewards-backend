@@ -88,6 +88,11 @@ export const BOOSTINY_CAMPAIGNS_PATH = "/publisher/campaigns";
  *  certification reads beneath that layer. */
 export const BOOSTINY_PERFORMANCE_PATH = "/publisher/performance";
 
+/** The link-performance (report) path. Date-windowed with from/to like performance, page-numbered,
+ *  and read RAW here. A link-performance row is a report row about a link; it is not a tracking
+ *  link asset, not a conversion row and not a settlement. */
+export const BOOSTINY_LINK_PERFORMANCE_PATH = "/publisher/link-performance";
+
 /** The dedicated coupons path. A SEPARATE listing from the coupons[] embedded in campaign rows:
  *  certification reads each on its own and never substitutes one for the other. */
 export const BOOSTINY_COUPONS_PATH = "/publisher/coupons";
@@ -174,7 +179,7 @@ export function createBoostinyAdapter({
   const resolvedEndpoints = {
     campaigns: endpoints.campaigns || BOOSTINY_CAMPAIGNS_PATH,
     performance: endpoints.performance || BOOSTINY_PERFORMANCE_PATH,
-    linkPerformance: endpoints.linkPerformance || "/publisher/link-performance",
+    linkPerformance: endpoints.linkPerformance || BOOSTINY_LINK_PERFORMANCE_PATH,
     coupons: endpoints.coupons || BOOSTINY_COUPONS_PATH,
   };
 
@@ -201,8 +206,10 @@ export function createBoostinyAdapter({
     fetchPerformance(params = {}, stats = null, options = {}) {
       return fetchPaginated(httpClient, resolvedEndpoints.performance, params, stats, options);
     },
-    async fetchLinkPerformance(params = {}, stats = null) {
-      const result = await fetchPaginated(httpClient, resolvedEndpoints.linkPerformance, params, stats);
+    /** options are OPTIONAL and reach the pager unchanged; fetchLinkPerformance(params, stats) —
+     *  every production call shape, fetchAll's included — is byte-for-byte what it was. */
+    async fetchLinkPerformance(params = {}, stats = null, options = {}) {
+      const result = await fetchPaginated(httpClient, resolvedEndpoints.linkPerformance, params, stats, options);
       return result.rows;
     },
     /** options are OPTIONAL and reach the pager unchanged; fetchCoupons(params, stats) — every

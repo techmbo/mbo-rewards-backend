@@ -592,7 +592,7 @@ describe("read-only, and everything else unchanged", () => {
     assert.equal((await adapterWith(linkSpy).fetchLinkPerformance({})).length, 2);
     assert.equal(linkSpy.calls[0].path, "/publisher/link-performance");
     const code = codeOf(ADAPTER_SRC);
-    for (const untouched of ["fetchPerformance(params = {}, stats = null, options = {})", "fetchLinkPerformance(params = {}, stats = null)"]) {
+    for (const untouched of ["fetchPerformance(params = {}, stats = null, options = {})", "fetchLinkPerformance(params = {}, stats = null, options = {})"]) {
       assert.ok(code.includes(untouched), untouched);
     }
   });
@@ -600,8 +600,8 @@ describe("read-only, and everything else unchanged", () => {
   it("runs every Boostiny probe with one request each", async () => {
     const spy = spyHttp([{ data: [COUPON] }]);
     const out = await serviceWith(adapterWith(spy)).certify("boostiny");
-    assert.deepEqual(out.results.map((r) => r.sourceObject), ["campaigns", "coupons", "api_reports"]);
-    assert.deepEqual(spy.calls.map((c) => c.path), [BOOSTINY_CAMPAIGNS_PATH, BOOSTINY_COUPONS_PATH, "/publisher/performance"]);
+    assert.deepEqual(out.results.map((r) => r.sourceObject), ["campaigns", "coupons", "api_reports", "link_reports"]);
+    assert.deepEqual(spy.calls.map((c) => c.path), [BOOSTINY_CAMPAIGNS_PATH, BOOSTINY_COUPONS_PATH, "/publisher/performance", "/publisher/link-performance"]);
     assert.ok(out.results.every((r) => r.ok));
   });
 });
