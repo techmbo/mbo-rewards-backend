@@ -134,6 +134,7 @@ describe("Trackier is registered in the certification framework", () => {
     assert.deepEqual(listProbeSourceObjects("trackier").sort(), [
       "campaign_detail",
       "campaigns",
+      "conversions",
       "coupons",
       "deals",
       "profile",
@@ -141,7 +142,7 @@ describe("Trackier is registered in the certification framework", () => {
   });
 
   it("adds no probe for the objects this phase defers", () => {
-    for (const notYet of ["conversions", "tracking", "finance"]) {
+    for (const notYet of ["tracking", "finance", "reports"]) {
       assert.ok(!listProbeSourceObjects("trackier").includes(notYet), notYet);
     }
   });
@@ -298,7 +299,11 @@ describe("the existing adapter and fetcher are reused", () => {
       .split("async buildTrackierAdapter")[1]
       .split("\n  }")[0];
     assert.match(builder, /createTrackierAdapter/);
-    assert.match(codeOf(SERVICE_SRC), /import \{ createTrackierAdapter \} from "\.\.\/\.\.\/adapters\/trackier\.adapter\.js"/);
+    // The factory, and the conversions probe's refusal code, both from the one adapter module.
+    assert.match(
+      codeOf(SERVICE_SRC),
+      /import \{ createTrackierAdapter, TRACKIER_WINDOW_NOT_ONE_CHUNK \} from "\.\.\/\.\.\/adapters\/trackier\.adapter\.js"/,
+    );
   });
 
   it("keeps the header, rate limiter and profile unwrapping in the adapter's one place", () => {

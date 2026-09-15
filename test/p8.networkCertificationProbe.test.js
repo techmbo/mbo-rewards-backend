@@ -755,7 +755,7 @@ describe("bounded sampling — the 300s hang", () => {
       "src/modules/ops/networkCertification.service.js",
       "utf8",
     );
-    for (const sync of ["fetchVoucherCodes(", "fetchConversions(", "fetchPayments(", "fetchInvoices(", "fetchProductFeeds(", "fetchAll("]) {
+    for (const sync of ["fetchVoucherCodes(", "fetchPayments(", "fetchInvoices(", "fetchProductFeeds(", "fetchAll("]) {
       assert.ok(!serviceSource.includes(sync), `service must not call ${sync}`);
     }
     assert.ok(serviceSource.includes("fetchCertificationSample"));
@@ -780,6 +780,17 @@ describe("bounded sampling — the 300s hang", () => {
     for (const bound of ["retries: 1", "timeoutMs"]) {
       assert.ok(detailCall.includes(bound), bound);
     }
+    // fetchConversions is the dated one: besides page and retry it must also be pinned to a
+    // single date chunk, or the production chunker could fan one window out into many requests.
+    const conversionCalls = serviceSource.split("adapter.fetchConversions(").slice(1);
+    assert.equal(conversionCalls.length, 1, "one conversions call site: the Trackier chain");
+    const conversionCall = conversionCalls[0].slice(0, conversionCalls[0].indexOf("),\n"));
+    for (const bound of ["singleChunk: true", "singlePage: true", "retries: 1", "timeoutMs"]) {
+      assert.ok(conversionCall.includes(bound), bound);
+    }
+    assert.ok(conversionCall.includes("TRACKIER_CERTIFICATION_CONVERSION_PARAMS"), "and the supplier bounds");
+    const chainStart = serviceSource.indexOf("async certifyTrackierConversions");
+    assert.ok(chainStart >= 0 && serviceSource.indexOf("adapter.fetchConversions(") > chainStart, "inside the Trackier chain");
   });
 
   it("covers every sampleable Optimise source object", () => {

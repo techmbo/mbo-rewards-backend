@@ -6,7 +6,7 @@ import { createAwinAdapter } from "../../adapters/awin.adapter.js";
 import { createCjAdapter } from "../../adapters/cj.adapter.js";
 import { createAdmitadAdapter } from "../../adapters/admitad.adapter.js";
 import { createRakutenAdapter } from "../../adapters/rakuten.adapter.js";
-import { createTrackierAdapter } from "../../adapters/trackier.adapter.js";
+import { createTrackierAdapter, TRACKIER_WINDOW_NOT_ONE_CHUNK } from "../../adapters/trackier.adapter.js";
 import { resolveOptimiseCredentials } from "../integrations/optimiseCredentials.js";
 import { resolvePartnerizeCertificationCredentials } from "../integrations/partnerizeCredentials.js";
 import { resolveAwinCertificationCredentials } from "../integrations/awinCredentials.js";
@@ -688,6 +688,22 @@ const TRACKIER_PROBES = Object.freeze({
     endpointKey: "GET /v2/publishers/deals (one page, no page token)",
     chain: "trackierDeals",
   },
+  // Conversions, over the service's own window.
+  //
+  // The only DATED Trackier object. Production fetchConversions splits a wide range into date
+  // chunks and pages each chunk; the probe forbids both. Its window is the service's frozen
+  // preset, rendered in the YYYY-MM-DD the adapter already speaks — no date format is invented.
+  //
+  // A CONVERSION ROW IS SUPPLIER EVIDENCE, NOT FINANCE TRUTH. A conversion id is not an order id,
+  // a click id is not a transaction id, a payout is not a final payable, and a sale amount is not
+  // settled revenue. Certification reports the supplier's field names as they arrive and
+  // canonicalises none of them.
+  conversions: {
+    method: "GET",
+    endpointKey: "GET /v2/publishers/conversions (startDate/endDate window, limit=1, page=1)",
+    chain: "trackierConversions",
+    dated: true,
+  },
 });
 
 const PROBE_REGISTRY = Object.freeze({
@@ -922,6 +938,9 @@ export function certificationFailure(base, error, extra = {}, redactValues = [])
  */
 /** The Trackier campaigns bounds: the smallest page the endpoint takes. */
 export const TRACKIER_CERTIFICATION_CAMPAIGN_PARAMS = Object.freeze({ limit: 1, page: 1 });
+
+/** The Trackier conversions bounds. The date pair is added from the service window at call time. */
+export const TRACKIER_CERTIFICATION_CONVERSION_PARAMS = Object.freeze({ limit: 1, page: 1 });
 
 export const WINDOW_PRESETS = Object.freeze({ "7d": 7, "30d": 30, "90d": 90 });
 export const DEFAULT_WINDOW_PRESET = "7d";
@@ -2693,6 +2712,97 @@ export class NetworkCertificationService {
   }
 
   /**
+   * The Trackier conversions chain: exactly ONE request.
+   *
+   * It reuses production's own fetchConversions — same client, same X-Api-Key header, same path,
+   * same report rate limiter, same conversions row extraction, same YYYY-MM-DD date handling —
+   * with four bounds production does not set: singleChunk, so a window needing more than one date
+   * chunk is refused before any request; singlePage, so the one chunk is never paged; retries
+   * pinned to one attempt where production allows six; and the probe's own timeout.
+   *
+   * The window is the SERVICE's, computed from a frozen preset — never a caller's dates. A missing
+   * or half-open window is refused before any request.
+   *
+   * Zero rows reports OK_NO_ROWS: the window held no conversion. It is not evidence of an
+   * unsupported object or an account-state blocker.
+   *
+   * Only structure leaves this method: no conversion, order, click or campaign identifier, payout,
+   * sale amount, subid, customer datum or URL can reach the result.
+   */
+  async certifyTrackierConversions({ adapter, key, probe, budgetLeft, sourceObject, window = null }) {
+    const base = {
+      network: key,
+      sourceObject,
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+      windowPreset: window?.preset ?? null,
+    };
+
+    if (!window?.from || !window?.to) {
+      return {
+        ...base,
+        ok: false,
+        statusCategory: "SKIPPED_NO_WINDOW",
+        fieldCount: 0,
+        schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        note: "Conversions is a dated object and no bounded window was supplied, so no supplier request was made.",
+      };
+    }
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      const rows = asRows(
+        await adapter.fetchConversions(
+          { startDate: window.from, endDate: window.to, ...TRACKIER_CERTIFICATION_CONVERSION_PARAMS },
+          { singleChunk: true, singlePage: true, retries: 1, timeoutMs },
+        ),
+      ).slice(0, 1);
+
+      if (!rows.length) {
+        return {
+          ...base,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        };
+      }
+
+      const fieldPaths = summarisePayloads(rows);
+      return {
+        ...base,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+      };
+    } catch (error) {
+      // The adapter refused before sending anything: the preset spans more date chunks than the
+      // one request this probe is allowed. Not a supplier failure, so not classified as one.
+      if (error?.code === TRACKIER_WINDOW_NOT_ONE_CHUNK) {
+        return {
+          ...base,
+          ok: false,
+          statusCategory: "SKIPPED_WINDOW_NOT_ONE_CHUNK",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+          note: "The window preset spans more than one supplier date chunk, so no supplier request was made.",
+        };
+      }
+      return certificationFailure(
+        base,
+        error,
+        { windowPreset: window?.preset ?? null },
+        redactionValuesFor(adapter),
+      );
+    }
+  }
+
+  /**
    * Certifies one network.
    *
    * Probes run in sequence, not in parallel: a burst of concurrent calls against a supplier's API
@@ -2887,6 +2997,21 @@ export class NetworkCertificationService {
       if (probe.chain === "rakutenAdvancedReport") {
         results.push(
           await this.certifyRakutenAdvancedReport({
+            adapter,
+            key,
+            probe,
+            budgetLeft,
+            sourceObject,
+            // The service's own window, computed from the frozen preset. Never a caller's dates.
+            window: { ...ctx.window, preset: resolvedWindowPreset },
+          }),
+        );
+        continue;
+      }
+
+      if (probe.chain === "trackierConversions") {
+        results.push(
+          await this.certifyTrackierConversions({
             adapter,
             key,
             probe,

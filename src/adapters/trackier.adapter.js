@@ -235,12 +235,24 @@ async function fetchCampaignPages(
   return rows;
 }
 
+/**
+ * The page-NUMBER pager, used by conversions and reports.
+ *
+ * singlePage, retries and timeoutMs are OPTIONAL and default to production's behaviour, so a call
+ * that passes none is byte-for-byte what it was. singlePage breaks after the FIRST response,
+ * before hasMoreNumberedPages is consulted: at limit=1 a one-row page IS a full page, so the
+ * heuristic's fallback (rowsCount >= pageSize) would keep asking for page 2, 3, 4. A bounded probe
+ * cannot rely on the loop deciding to stop.
+ */
 async function fetchPageNumberPaginated(httpClient, endpoint, baseParams = {}, options = {}) {
   const {
     rateLimiter = trackierCampaignRateLimiter,
     collectionKeys = [],
     pageParam = "page",
     limitParam = "limit",
+    singlePage = false,
+    retries,
+    timeoutMs,
   } = options;
 
   const rows = [];
@@ -251,18 +263,25 @@ async function fetchPageNumberPaginated(httpClient, endpoint, baseParams = {}, o
   delete staticParams[limitParam];
 
   for (;;) {
-    const response = await requestWithRateLimit(httpClient, rateLimiter, () =>
-      httpClient.get(endpoint, {
-        params: {
-          ...staticParams,
-          [pageParam]: page,
-          [limitParam]: limit,
-        },
-      }),
+    const response = await requestWithRateLimit(
+      httpClient,
+      rateLimiter,
+      () =>
+        httpClient.get(endpoint, {
+          params: {
+            ...staticParams,
+            [pageParam]: page,
+            [limitParam]: limit,
+          },
+          ...(timeoutMs ? { timeout: Number(timeoutMs) } : {}),
+        }),
+      retries ? { retries } : {},
     );
 
     const pageRows = extractRows(response.data, collectionKeys);
     rows.push(...pageRows);
+
+    if (singlePage) break;
 
     if (!hasMoreNumberedPages(response.data, page, limit, pageRows.length)) {
       break;
@@ -342,6 +361,14 @@ export const TRACKIER_COUPONS_PATH = "/v2/publishers/coupons";
 /** The publisher deals endpoint. A sibling of coupons on the same page-token pager, and a
  *  SEPARATE object: a deal is not automatically a coupon code. */
 export const TRACKIER_DEALS_PATH = "/v2/publishers/deals";
+
+/** The publisher conversions endpoint. Date-windowed, page-numbered, and chunked by production
+ *  when a range exceeds TRACKIER_CONVERSIONS_MAX_DAYS. */
+export const TRACKIER_CONVERSIONS_PATH = "/v2/publishers/conversions";
+
+/** Error code for a singleChunk refusal of fetchConversions. The refusal happens BEFORE any
+ *  request is made, so a caller can tell it from a supplier failure. */
+export const TRACKIER_WINDOW_NOT_ONE_CHUNK = "TRACKIER_WINDOW_NOT_ONE_CHUNK";
 
 function unwrapProfile(responseData) {
   if (responseData?.profile && typeof responseData.profile === "object") {
@@ -464,7 +491,20 @@ export function createTrackierAdapter({
       });
     },
 
-    async fetchConversions(params = {}) {
+    /**
+     * Conversions over a date range.
+     *
+     * options are OPTIONAL and default to production's behaviour, so fetchConversions(params) — the
+     * sync job's only call shape — is byte-for-byte what it was. Certification passes:
+     *   singleChunk  refuse BEFORE any request if the range would split into more than one date
+     *                chunk. Not "the 7d window happens to fit" but an enforced precondition: a
+     *                window that needed two chunks would need two requests, and the probe is
+     *                allowed one.
+     *   singlePage   stop after the first page of the one chunk.
+     *   retries      one attempt where production allows six.
+     *   timeoutMs    the probe's own bound.
+     */
+    async fetchConversions(params = {}, { singleChunk = false, singlePage, retries, timeoutMs } = {}) {
       const {
         start,
         end,
@@ -492,6 +532,13 @@ export function createTrackierAdapter({
       }
 
       const chunks = splitDateRange(rangeStart, rangeEnd, TRACKIER_CONVERSIONS_MAX_DAYS);
+      if (singleChunk && chunks.length !== 1) {
+        const refusal = new Error(
+          `Trackier conversions certification requires a window that fits one date chunk; ${chunks.length} would be needed`,
+        );
+        refusal.code = TRACKIER_WINDOW_NOT_ONE_CHUNK;
+        throw refusal;
+      }
       const rows = [];
       const filterParams = {
         ...(status ? { status } : {}),
@@ -509,7 +556,7 @@ export function createTrackierAdapter({
         // eslint-disable-next-line no-await-in-loop
         const chunkRows = await fetchPageNumberPaginated(
           httpClient,
-          "/v2/publishers/conversions",
+          TRACKIER_CONVERSIONS_PATH,
           {
             ...filterParams,
             startDate: chunk.startDate,
@@ -518,6 +565,9 @@ export function createTrackierAdapter({
           {
             collectionKeys: ["conversions"],
             rateLimiter: trackierReportRateLimiter,
+            singlePage,
+            retries,
+            timeoutMs,
           },
         );
         rows.push(...chunkRows);
