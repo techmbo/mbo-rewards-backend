@@ -83,6 +83,10 @@ function tagDetailRows(rows) {
 /** The campaigns path, as the adapter resolves it when no endpoint override is given. */
 export const BOOSTINY_CAMPAIGNS_PATH = "/publisher/campaigns";
 
+/** The dedicated coupons path. A SEPARATE listing from the coupons[] embedded in campaign rows:
+ *  certification reads each on its own and never substitutes one for the other. */
+export const BOOSTINY_COUPONS_PATH = "/publisher/coupons";
+
 /**
  * The one Boostiny pager.
  *
@@ -166,7 +170,7 @@ export function createBoostinyAdapter({
     campaigns: endpoints.campaigns || BOOSTINY_CAMPAIGNS_PATH,
     performance: endpoints.performance || "/publisher/performance",
     linkPerformance: endpoints.linkPerformance || "/publisher/link-performance",
-    coupons: endpoints.coupons || "/publisher/coupons",
+    coupons: endpoints.coupons || BOOSTINY_COUPONS_PATH,
   };
 
   return {
@@ -194,8 +198,10 @@ export function createBoostinyAdapter({
       const result = await fetchPaginated(httpClient, resolvedEndpoints.linkPerformance, params, stats);
       return result.rows;
     },
-    async fetchCoupons(params = {}, stats = null) {
-      const result = await fetchPaginated(httpClient, resolvedEndpoints.coupons, params, stats);
+    /** options are OPTIONAL and reach the pager unchanged; fetchCoupons(params, stats) — every
+     *  production call shape — is byte-for-byte what it was. */
+    async fetchCoupons(params = {}, stats = null, options = {}) {
+      const result = await fetchPaginated(httpClient, resolvedEndpoints.coupons, params, stats, options);
       return result.rows;
     },
     async fetchPerformanceReport(params = {}, stats = null, { campaigns = [], usePerCampaign = false } = {}) {

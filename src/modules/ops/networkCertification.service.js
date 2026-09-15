@@ -765,6 +765,18 @@ const BOOSTINY_PROBES = Object.freeze({
     endpointKey: "GET /publisher/campaigns (limit=1, page=1)",
     chain: "boostinyCampaigns",
   },
+  // The DEDICATED coupons listing, read on its own. Campaign rows carry an embedded coupons[]
+  // too; this probe never reads a campaign row, so the two shapes can be compared later without
+  // one having stood in for the other.
+  //
+  // A COUPON ROW IS A COUPON ASSET, NOT A COUPON CODE. The row may carry no code under any
+  // spelling and still be a complete row; a country is not a currency; a coupon status says
+  // nothing about the campaign relationship. Field names are reported as they arrive.
+  coupons: {
+    method: "GET",
+    endpointKey: "GET /publisher/coupons (limit=1, page=1)",
+    chain: "boostinyCoupons",
+  },
 });
 
 const PROBE_REGISTRY = Object.freeze({
@@ -1004,6 +1016,9 @@ export const TRACKIER_CERTIFICATION_CAMPAIGN_PARAMS = Object.freeze({ limit: 1, 
 
 /** The Boostiny campaigns bounds: the two parameters production's pager already sends, at 1. */
 export const BOOSTINY_CERTIFICATION_CAMPAIGN_PARAMS = Object.freeze({ page: 1, limit: 1 });
+
+/** The Boostiny coupons bounds: the same two pager parameters, at 1. */
+export const BOOSTINY_CERTIFICATION_COUPON_PARAMS = Object.freeze({ page: 1, limit: 1 });
 
 /** The Trackier reports bounds. Dates and KPI names are added at call time. */
 export const TRACKIER_CERTIFICATION_REPORT_PARAMS = Object.freeze({ limit: 1, page: 1 });
@@ -3191,6 +3206,64 @@ export class NetworkCertificationService {
   }
 
   /**
+   * The Boostiny coupons chain: exactly ONE request to the dedicated coupons endpoint.
+   *
+   * It reuses production's own fetchCoupons through the same bounded pager seam the campaigns
+   * chain uses — singlePage, one attempt, the probe's timeout, page=1 and limit=1 — on the same
+   * shared client, Authorization header and rate limiter slot. It never reads a campaign row, so
+   * the embedded campaign coupons[] can never be what this probe certifies.
+   *
+   * Zero rows reports OK_NO_ROWS: the account lists no coupon on page 1. It is not evidence of an
+   * unsupported object or an account-state blocker. Only structure leaves this method: no code,
+   * campaign, advertiser, account-manager, country, date or URL value can reach the result.
+   */
+  async certifyBoostinyCoupons({ adapter, key, probe, budgetLeft, sourceObject }) {
+    const base = {
+      network: key,
+      sourceObject,
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+    };
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      const rows = asRows(
+        await adapter.fetchCoupons({ ...BOOSTINY_CERTIFICATION_COUPON_PARAMS }, null, {
+          singlePage: true,
+          retries: 1,
+          timeoutMs,
+        }),
+      ).slice(0, 1);
+
+      if (!rows.length) {
+        return {
+          ...base,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        };
+      }
+
+      const fieldPaths = summarisePayloads(rows);
+      return {
+        ...base,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+        schema: "KNOWN_FROM_LIVE_SAMPLE",
+      };
+    } catch (error) {
+      return certificationFailure(base, error, {}, redactionValuesFor(adapter));
+    }
+  }
+
+  /**
    * Certifies one network.
    *
    * Probes run in sequence, not in parallel: a burst of concurrent calls against a supplier's API
@@ -3429,6 +3502,13 @@ export class NetworkCertificationService {
       if (probe.chain === "boostinyCampaigns") {
         results.push(
           await this.certifyBoostinyCampaigns({ adapter, key, probe, budgetLeft, sourceObject }),
+        );
+        continue;
+      }
+
+      if (probe.chain === "boostinyCoupons") {
+        results.push(
+          await this.certifyBoostinyCoupons({ adapter, key, probe, budgetLeft, sourceObject }),
         );
         continue;
       }
