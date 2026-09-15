@@ -197,15 +197,61 @@ function qualifierValues(list) {
 }
 
 /**
+ * Boostiny operations that state membership or equality over the listed value(s). Each expands
+ * to one EQ row per value — the shared representation of same-dimension alternatives, which the
+ * matcher evaluates as "any of". Anything else passes through verbatim (upper-cased) so the
+ * matcher reports an unsupported operator and fails closed rather than guessing a meaning.
+ */
+const BOOSTINY_OPERATION_MAP = Object.freeze({ contains: "EQ", in: "EQ", equals: "EQ", eq: "EQ", "=": "EQ" });
+
+/**
+ * Adapt ONE Boostiny group condition — { dimension, operation, value } — to the key names the
+ * shared normalizer reads (type / operator / value). `dimension` becomes the source dimension, so
+ * "country" reaches the canonical COUNTRY map while an unmapped dimension such as
+ * "business-category" stays OTHER_SOURCE_CONDITION with its dimension preserved as the source
+ * type. Conditions not in that shape are returned as-is. The input is never mutated.
+ */
+export function adaptBoostinyCondition(condition) {
+  if (!condition || typeof condition !== "object") return condition;
+  const dimension = text(condition.dimension);
+  const operation = text(condition.operation);
+  if (!dimension && !operation) return condition;
+  const operator = operation
+    ? (BOOSTINY_OPERATION_MAP[operation.toLowerCase()] ?? operation.toUpperCase().replace(/[^A-Z0-9]+/g, "_"))
+    : "EQ";
+  return { type: dimension ?? "conditions", operator, value: condition.value ?? condition.values ?? null };
+}
+
+/**
  * Child conditions of ONE rule. Each qualifier dimension stays with the outcome it qualifies
  * (Pointer 39); same-dimension values are alternatives, different dimensions are conjunctive —
  * exactly as the matcher evaluates them.
  */
 export function boostinyGroupConditions(group = {}) {
-  const conditions = conditionsFromSourceEntry({ conditions: group.conditions ?? null }).map((condition) => ({
-    ...condition,
-    metadata: { ...(condition.metadata ?? {}), matcherReady: false, reason: "boostiny_condition_semantics_not_verified_live" },
-  }));
+  const conditions = Array.isArray(group.conditions)
+    ? group.conditions.flatMap((original, sourceConditionIndex) => {
+        if (original == null) return [];
+        // Adapt the Boostiny { dimension, operation, value } shape for the shared normalizer, then
+        // re-attach the ORIGINAL supplier object as the evidence — never the adapted one.
+        const adapted = adaptBoostinyCondition(original);
+        return conditionsFromSourceEntry({ conditions: [adapted] }).map((condition) => ({
+          ...condition,
+          sourceConditionValue: original,
+          metadata: {
+            ...(condition.metadata ?? {}),
+            sourceCondition: original,
+            sourceConditionIndex,
+            sourceDimension: typeof original === "object" ? text(original.dimension) : null,
+            sourceOperation: typeof original === "object" ? text(original.operation) : null,
+            matcherReady: false,
+            reason: "boostiny_condition_semantics_not_verified_live",
+          },
+        }));
+      })
+    : conditionsFromSourceEntry({ conditions: group.conditions ?? null }).map((condition) => ({
+        ...condition,
+        metadata: { ...(condition.metadata ?? {}), matcherReady: false, reason: "boostiny_condition_semantics_not_verified_live" },
+      }));
 
   for (const { value, source } of qualifierValues(group.product_categories)) {
     conditions.push({
