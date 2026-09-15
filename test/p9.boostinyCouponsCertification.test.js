@@ -592,16 +592,16 @@ describe("read-only, and everything else unchanged", () => {
     assert.equal((await adapterWith(linkSpy).fetchLinkPerformance({})).length, 2);
     assert.equal(linkSpy.calls[0].path, "/publisher/link-performance");
     const code = codeOf(ADAPTER_SRC);
-    for (const untouched of ["fetchPerformance(params = {}, stats = null)", "fetchLinkPerformance(params = {}, stats = null)"]) {
+    for (const untouched of ["fetchPerformance(params = {}, stats = null, options = {})", "fetchLinkPerformance(params = {}, stats = null)"]) {
       assert.ok(code.includes(untouched), untouched);
     }
   });
 
-  it("runs both Boostiny probes with one request each", async () => {
+  it("runs every Boostiny probe with one request each", async () => {
     const spy = spyHttp([{ data: [COUPON] }]);
     const out = await serviceWith(adapterWith(spy)).certify("boostiny");
-    assert.deepEqual(out.results.map((r) => r.sourceObject), ["campaigns", "coupons"]);
-    assert.deepEqual(spy.calls.map((c) => c.path), [BOOSTINY_CAMPAIGNS_PATH, BOOSTINY_COUPONS_PATH]);
+    assert.deepEqual(out.results.map((r) => r.sourceObject), ["campaigns", "coupons", "api_reports"]);
+    assert.deepEqual(spy.calls.map((c) => c.path), [BOOSTINY_CAMPAIGNS_PATH, BOOSTINY_COUPONS_PATH, "/publisher/performance"]);
     assert.ok(out.results.every((r) => r.ok));
   });
 });

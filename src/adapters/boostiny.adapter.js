@@ -83,6 +83,11 @@ function tagDetailRows(rows) {
 /** The campaigns path, as the adapter resolves it when no endpoint override is given. */
 export const BOOSTINY_CAMPAIGNS_PATH = "/publisher/campaigns";
 
+/** The performance (report) path. Date-windowed with from/to, page-numbered, and read RAW here:
+ *  fetchPerformanceReport layers summary inspection and a per-campaign fallback on top of it, and
+ *  certification reads beneath that layer. */
+export const BOOSTINY_PERFORMANCE_PATH = "/publisher/performance";
+
 /** The dedicated coupons path. A SEPARATE listing from the coupons[] embedded in campaign rows:
  *  certification reads each on its own and never substitutes one for the other. */
 export const BOOSTINY_COUPONS_PATH = "/publisher/coupons";
@@ -168,7 +173,7 @@ export function createBoostinyAdapter({
   const httpClient = injectedHttpClient ?? createHttpClient({ baseURL, apiKey });
   const resolvedEndpoints = {
     campaigns: endpoints.campaigns || BOOSTINY_CAMPAIGNS_PATH,
-    performance: endpoints.performance || "/publisher/performance",
+    performance: endpoints.performance || BOOSTINY_PERFORMANCE_PATH,
     linkPerformance: endpoints.linkPerformance || "/publisher/link-performance",
     coupons: endpoints.coupons || BOOSTINY_COUPONS_PATH,
   };
@@ -191,8 +196,10 @@ export function createBoostinyAdapter({
       const result = await fetchPaginated(httpClient, resolvedEndpoints.campaigns, params, stats, options);
       return result.rows;
     },
-    fetchPerformance(params = {}, stats = null) {
-      return fetchPaginated(httpClient, resolvedEndpoints.performance, params, stats);
+    /** options are OPTIONAL and reach the pager unchanged; fetchPerformance(params, stats) — every
+     *  production call shape, fetchPerformanceReport's included — is byte-for-byte what it was. */
+    fetchPerformance(params = {}, stats = null, options = {}) {
+      return fetchPaginated(httpClient, resolvedEndpoints.performance, params, stats, options);
     },
     async fetchLinkPerformance(params = {}, stats = null) {
       const result = await fetchPaginated(httpClient, resolvedEndpoints.linkPerformance, params, stats);

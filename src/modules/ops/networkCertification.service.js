@@ -777,6 +777,22 @@ const BOOSTINY_PROBES = Object.freeze({
     endpointKey: "GET /publisher/coupons (limit=1, page=1)",
     chain: "boostinyCoupons",
   },
+  // Performance, under the catalog's existing name for GET /publisher/performance: api_reports.
+  //
+  // The only DATED Boostiny object. Production sends from/to (YYYY-MM-DD) on every performance
+  // call, so the probe sends the service's own window under those two names and nothing else it
+  // invents. It reads the RAW endpoint through fetchPerformance, never fetchPerformanceReport,
+  // whose summary inspection and per-campaign fallback can add supplier calls.
+  //
+  // A PERFORMANCE ROW IS A REPORT ROW. It is not a conversion row and not a final settlement: a
+  // payout column is not payable commission, and a summary row is not a campaign row. Field
+  // names are reported as they arrive and none is canonicalised or conflated.
+  api_reports: {
+    method: "GET",
+    endpointKey: "GET /publisher/performance (from/to window, limit=1, page=1)",
+    chain: "boostinyPerformance",
+    dated: true,
+  },
 });
 
 const PROBE_REGISTRY = Object.freeze({
@@ -1019,6 +1035,9 @@ export const BOOSTINY_CERTIFICATION_CAMPAIGN_PARAMS = Object.freeze({ page: 1, l
 
 /** The Boostiny coupons bounds: the same two pager parameters, at 1. */
 export const BOOSTINY_CERTIFICATION_COUPON_PARAMS = Object.freeze({ page: 1, limit: 1 });
+
+/** The Boostiny performance bounds. The from/to pair is added from the service window at call time. */
+export const BOOSTINY_CERTIFICATION_PERFORMANCE_PARAMS = Object.freeze({ page: 1, limit: 1 });
 
 /** The Trackier reports bounds. Dates and KPI names are added at call time. */
 export const TRACKIER_CERTIFICATION_REPORT_PARAMS = Object.freeze({ limit: 1, page: 1 });
@@ -3264,6 +3283,83 @@ export class NetworkCertificationService {
   }
 
   /**
+   * The Boostiny performance chain: exactly ONE request to the raw performance endpoint.
+   *
+   * It reuses production's own fetchPerformance — the same shared client, Authorization header,
+   * rate limiter slot and row extraction, with the same from/to names production sends — through
+   * the same bounded pager seam as campaigns and coupons: singlePage, one attempt, the probe's
+   * timeout, page=1, limit=1. The window is the SERVICE's, from a frozen preset — never a
+   * caller's dates. It never calls fetchPerformanceReport, so no summary is inspected and no
+   * per-campaign fallback can fan out.
+   *
+   * Zero rows reports OK_NO_ROWS: the window held no performance under this account. It is not
+   * evidence of an unsupported object or an account-state blocker. Only structure leaves this
+   * method: no campaign, count, amount, id, subid or date value can reach the result.
+   */
+  async certifyBoostinyPerformance({ adapter, key, probe, budgetLeft, sourceObject, window = null }) {
+    const base = {
+      network: key,
+      sourceObject,
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+      windowPreset: window?.preset ?? null,
+    };
+
+    if (!window?.from || !window?.to) {
+      return {
+        ...base,
+        ok: false,
+        statusCategory: "SKIPPED_NO_WINDOW",
+        fieldCount: 0,
+        schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        note: "Performance is a dated object and no bounded window was supplied, so no supplier request was made.",
+      };
+    }
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      const rows = asRows(
+        await adapter.fetchPerformance(
+          { from: window.from, to: window.to, ...BOOSTINY_CERTIFICATION_PERFORMANCE_PARAMS },
+          null,
+          { singlePage: true, retries: 1, timeoutMs },
+        ),
+      ).slice(0, 1);
+
+      if (!rows.length) {
+        return {
+          ...base,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        };
+      }
+
+      const fieldPaths = summarisePayloads(rows);
+      return {
+        ...base,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+        schema: "KNOWN_FROM_LIVE_SAMPLE",
+      };
+    } catch (error) {
+      return certificationFailure(
+        base,
+        error,
+        { windowPreset: window?.preset ?? null },
+        redactionValuesFor(adapter),
+      );
+    }
+  }
+
+  /**
    * Certifies one network.
    *
    * Probes run in sequence, not in parallel: a burst of concurrent calls against a supplier's API
@@ -3509,6 +3605,21 @@ export class NetworkCertificationService {
       if (probe.chain === "boostinyCoupons") {
         results.push(
           await this.certifyBoostinyCoupons({ adapter, key, probe, budgetLeft, sourceObject }),
+        );
+        continue;
+      }
+
+      if (probe.chain === "boostinyPerformance") {
+        results.push(
+          await this.certifyBoostinyPerformance({
+            adapter,
+            key,
+            probe,
+            budgetLeft,
+            sourceObject,
+            // The service's own window, computed from the frozen preset. Never a caller's dates.
+            window: { ...ctx.window, preset: resolvedWindowPreset },
+          }),
         );
         continue;
       }
