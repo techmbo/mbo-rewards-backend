@@ -495,7 +495,7 @@ function collectSourceEntries({ groups, raw } = {}) {
   return bags.flatMap((bag) => flattenCommissionEntries(bag));
 }
 
-export { collectSourceEntries };
+export { collectSourceEntries, payoutBasisFrom };
 
 /**
  * Current campaign display/reporting facts only.

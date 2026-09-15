@@ -81,6 +81,7 @@ import {
   optimiseCommissionGroupSyncConfig,
 } from "./optimiseCommissionGroupSync.js";
 import { OptimiseCommissionGroupPersistenceService } from "../modules/commercial/optimiseCommissionGroupPersistence.service.js";
+import { BoostinyCommissionPersistenceService } from "../modules/commercial/boostinyCommissionPersistence.service.js";
 import {
   fetchOptimiseSourceObject,
   fetchTrackierSourceObject,
@@ -626,7 +627,13 @@ async function syncBoostinyAccount(accountLabel) {
     });
   }
 
+  // Campaign rows that carry payouts[].groups[] are normalized one rule per group by the
+  // Boostiny payout-group persistence below; the campaign-summary fan-out (which flattens the
+  // same payouts) is skipped for them so the same supplier payout is never represented twice.
+  let commissionRules = null;
   if (refreshCampaigns && includeSourceObject(requested, "campaigns")) {
+    const boostinyCommissionPersistence = new BoostinyCommissionPersistenceService();
+    const payoutGroupCampaignIds = boostinyCommissionPersistence.campaignIdsWithPayoutGroups(payload.campaigns);
     await upsertManyRawEntities({
       networkSource: "boostiny",
       entityType: "campaign",
@@ -637,7 +644,22 @@ async function syncBoostinyAccount(accountLabel) {
       evidence: evidenceFromRunSummary(
         sourceObjectRuns.find((r) => r?.sourceObject === "campaigns"),
       ),
+      commissionRuleSkipCampaignIds: [...payoutGroupCampaignIds],
     });
+    // Detailed rules → canonical SupplierCommissionRule[] with historical versioning. A failure
+    // here is reported only; campaign staging above and existing rules stay untouched.
+    try {
+      const campaignsRun = sourceObjectRuns.find((r) => r?.sourceObject === "campaigns");
+      commissionRules = await boostinyCommissionPersistence.persistCampaigns({
+        networkSource: "boostiny",
+        sourceAccountLabel: accountLabel || "default",
+        campaigns: payload.campaigns,
+        fetchedAt: campaignsRun?.finishedAt ?? null,
+        syncRunId: campaignsRun?.syncRunId ?? campaignsRun?.id ?? null,
+      });
+    } catch (error) {
+      commissionRules = { error: error?.message || String(error) };
+    }
   }
 
   const factPromo = { upserted: 0 };
@@ -757,6 +779,7 @@ async function syncBoostinyAccount(accountLabel) {
     conversions: boostinyConversionRows.length,
     linkPerformance: payload.linkPerformance.length,
     coupons: refreshCoupons ? payload.coupons.length : 0,
+    commissionRules,
     apiRequestCount: payload.apiRequestCount ?? null,
     usedPerCampaignPerformance: payload.usedPerCampaignPerformance ?? null,
     incrementalFrom: from,

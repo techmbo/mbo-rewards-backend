@@ -74,7 +74,7 @@ function sameDate(a, b) {
   return new Date(a).getTime() === new Date(b).getTime();
 }
 
-function sameRuleEconomics(row, input, currency) {
+export function sameRuleEconomics(row, input, currency) {
   return (
     sameMoney(row.ratePercent, input.ratePercent) &&
     sameMoney(row.fixedAmount, input.fixedAmount) &&
