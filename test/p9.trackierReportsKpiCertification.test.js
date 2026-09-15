@@ -650,7 +650,7 @@ describe("read-only, and the other probes unchanged", () => {
     for (const forbidden of ["fetchReports(", "fetchPerformance", "Payment", "Invoice", "SupplierCommissionRule", "relationshipState"]) {
       assert.ok(!chain.includes(forbidden), forbidden);
     }
-    for (const notYet of ["tracking", "finance", "reports"]) {
+    for (const notYet of ["finance", "reports", "payments"]) {
       assert.ok(!listProbeSourceObjects("trackier").includes(notYet), notYet);
     }
   });
@@ -701,7 +701,7 @@ describe("read-only, and the other probes unchanged", () => {
     assert.equal(conversions.windowPreset, "7d");
   });
 
-  it("runs the whole Trackier set with one reports-kpi request among them, and no reports-data request", async () => {
+  it("runs the whole Trackier set: one reports-kpi request for this probe, one more for the reports probe's discovery", async () => {
     const spy = spyHttp([
       { profile: { id: "zzprofileidzz" } },
       { campaigns: [{ id: "zzdiscoveredzz" }] },
@@ -711,16 +711,18 @@ describe("read-only, and the other probes unchanged", () => {
       { deals: [{ id: "zzdealzz" }] },
       { conversions: [{ id: "zzconvzz" }] },
       { allowedKpi: [DEFINITION] },
+      { allowedKpi: NAME_LIST },
+      { records: [{ zzkpinamezz: 1 }] },
     ]);
     const out = await serviceWith(adapterWith(spy)).certify("trackier");
     assert.deepEqual(
       out.results.map((r) => r.sourceObject),
-      ["profile", "campaigns", "campaign_detail", "coupons", "deals", "conversions", "reports_kpi"],
+      ["profile", "campaigns", "campaign_detail", "coupons", "deals", "conversions", "reports_kpi", "tracking"],
     );
-    assert.equal(spy.calls.filter((c) => c.path === TRACKIER_REPORTS_KPI_PATH).length, 1);
-    assert.equal(spy.calls.filter((c) => c.path === "/v2/publishers/reports").length, 0);
-    assert.equal(spy.calls.length, 8);
+    assert.equal(spy.calls.filter((c) => c.path === TRACKIER_REPORTS_KPI_PATH).length, 2);
+    assert.equal(spy.calls.filter((c) => c.path === "/v2/publishers/reports").length, 1);
+    assert.equal(spy.calls.length, 10);
     assert.ok(out.results.every((r) => r.ok), JSON.stringify(out.results.map((r) => r.statusCategory)));
-    assert.equal(out.results.at(-1).schema, "KPI_DEFINITION_ARRAY");
+    assert.equal(out.results.find((r) => r.sourceObject === "reports_kpi").schema, "KPI_DEFINITION_ARRAY");
   });
 });

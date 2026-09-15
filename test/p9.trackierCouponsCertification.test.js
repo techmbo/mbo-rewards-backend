@@ -573,7 +573,7 @@ describe("read-only, and the other probes unchanged", () => {
     for (const forbidden of ["fetchDeals", "fetchConversions", "fetchReports", "fetchPerformance"]) {
       assert.ok(!chain.includes(forbidden), forbidden);
     }
-    for (const notYet of ["tracking", "finance", "reports"]) {
+    for (const notYet of ["finance", "reports", "payments"]) {
       assert.ok(!listProbeSourceObjects("trackier").includes(notYet), notYet);
     }
   });

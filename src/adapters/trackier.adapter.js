@@ -23,7 +23,14 @@ const TRACKIER_REPORTS_MAX_DAYS = Number(process.env.TRACKIER_REPORTS_MAX_DAYS |
 const trackierCampaignRateLimiter = createRateLimiter(TRACKIER_CAMPAIGN_MIN_INTERVAL_MS);
 const trackierReportRateLimiter = createRateLimiter(TRACKIER_REPORT_MIN_INTERVAL_MS);
 
-const DEFAULT_REPORT_KPIS = ["clicks", "approvedConversions", "payout", "saleAmount"];
+/** The KPIs production asks the reports endpoint for when a caller names none. Exported so the
+ *  certification probe can PREFER these names — but only ones the supplier's own reports-kpi
+ *  metadata lists; it never sends a name that is not in allowedKpi[]. */
+export const TRACKIER_DEFAULT_REPORT_KPIS = Object.freeze(["clicks", "approvedConversions", "payout", "saleAmount"]);
+const DEFAULT_REPORT_KPIS = TRACKIER_DEFAULT_REPORT_KPIS;
+
+/** The grouping production has always sent to the reports endpoint when a caller names none. */
+export const TRACKIER_DEFAULT_REPORT_GROUPING = Object.freeze(["campaign_name", "created"]);
 
 function normalizeKpiList(kpis) {
   if (!kpis) return DEFAULT_REPORT_KPIS;
@@ -374,6 +381,11 @@ export const TRACKIER_WINDOW_NOT_ONE_CHUNK = "TRACKIER_WINDOW_NOT_ONE_CHUNK";
  *  performance data. */
 export const TRACKIER_REPORTS_KPI_PATH = "/v2/publishers/reports-kpi";
 
+/** The reports DATA endpoint. Date-windowed, page-numbered, grouped, and chunked by production
+ *  when a range exceeds TRACKIER_REPORTS_MAX_DAYS. A report row is an aggregate over the grouping;
+ *  it is not a conversion row and not a finance record. */
+export const TRACKIER_REPORTS_PATH = "/v2/publishers/reports";
+
 /** The envelope keys production has always looked under for the KPI container, in order. */
 export const TRACKIER_KPI_CONTAINER_KEYS = Object.freeze(["allowedKpi", "kpis", "kpi"]);
 
@@ -630,7 +642,16 @@ export function createTrackierAdapter({
       return Array.isArray(container) ? container : [];
     },
 
-    async fetchReports(params = {}) {
+    /**
+     * Reports over a date range.
+     *
+     * options are OPTIONAL and default to production's behaviour, so fetchReports(params) — the
+     * sync job's only call shape — is byte-for-byte what it was. Certification passes the same
+     * four bounds it passes to fetchConversions: singleChunk (refuse BEFORE any request if the
+     * range would split), singlePage, retries pinned to one attempt, and its own timeout. It
+     * names its KPIs explicitly and leaves the grouping to production's default.
+     */
+    async fetchReports(params = {}, { singleChunk = false, singlePage, retries, timeoutMs } = {}) {
       const {
         start,
         end,
@@ -639,7 +660,7 @@ export function createTrackierAdapter({
         from,
         to,
         kpis = DEFAULT_REPORT_KPIS,
-        grouping = ["campaign_name", "created"],
+        grouping = TRACKIER_DEFAULT_REPORT_GROUPING,
         groupBy,
         campaignId,
         campaignIds,
@@ -656,6 +677,13 @@ export function createTrackierAdapter({
       const kpiList = normalizeKpiList(kpis);
       const groupingValue = groupBy ?? grouping;
       const chunks = splitDateRange(rangeStart, rangeEnd, TRACKIER_REPORTS_MAX_DAYS);
+      if (singleChunk && chunks.length !== 1) {
+        const refusal = new Error(
+          `Trackier reports certification requires a window that fits one date chunk; ${chunks.length} would be needed`,
+        );
+        refusal.code = TRACKIER_WINDOW_NOT_ONE_CHUNK;
+        throw refusal;
+      }
       const rows = [];
 
       for (const chunk of chunks) {
@@ -673,9 +701,12 @@ export function createTrackierAdapter({
         }
 
         // eslint-disable-next-line no-await-in-loop
-        const chunkRows = await fetchPageNumberPaginated(httpClient, "/v2/publishers/reports", query, {
+        const chunkRows = await fetchPageNumberPaginated(httpClient, TRACKIER_REPORTS_PATH, query, {
           collectionKeys: ["records"],
           rateLimiter: trackierReportRateLimiter,
+          singlePage,
+          retries,
+          timeoutMs,
         });
         rows.push(...chunkRows);
       }

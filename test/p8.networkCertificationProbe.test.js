@@ -793,11 +793,21 @@ describe("bounded sampling — the 300s hang", () => {
     assert.ok(chainStart >= 0 && serviceSource.indexOf("adapter.fetchConversions(") > chainStart, "inside the Trackier chain");
     // fetchReportsKpi takes no parameters, so retry and timeout are its only bounds.
     const kpiCalls = serviceSource.split("adapter.fetchReportsKpi(").slice(1);
-    assert.equal(kpiCalls.length, 1, "one reports-kpi call site: the Trackier chain");
-    const kpiCall = kpiCalls[0].slice(0, kpiCalls[0].indexOf("});"));
-    for (const bound of ["retries: 1", "timeoutMs", "preserveShape: true"]) {
-      assert.ok(kpiCall.includes(bound), bound);
+    assert.equal(kpiCalls.length, 2, "the reports-kpi chain, and the reports chain's KPI discovery");
+    for (const raw of kpiCalls) {
+      const kpiCall = raw.slice(0, raw.indexOf("});"));
+      for (const bound of ["retries: 1", "timeoutMs", "preserveShape: true"]) {
+        assert.ok(kpiCall.includes(bound), bound);
+      }
     }
+    // fetchReports is dated and paged like fetchConversions, and bounded the same four ways.
+    const reportCalls = serviceSource.split("adapter.fetchReports(").slice(1);
+    assert.equal(reportCalls.length, 1, "one reports call site: the Trackier chain");
+    const reportCall = reportCalls[0].slice(0, reportCalls[0].indexOf("),\n"));
+    for (const bound of ["singleChunk: true", "singlePage: true", "retries: 1", "timeoutMs"]) {
+      assert.ok(reportCall.includes(bound), bound);
+    }
+    assert.ok(reportCall.includes("TRACKIER_CERTIFICATION_REPORT_PARAMS"), "and the supplier bounds");
   });
 
   it("covers every sampleable Optimise source object", () => {

@@ -858,7 +858,7 @@ describe("read-only, and the other probes unchanged", () => {
     for (const forbidden of ["fetchReports", "fetchPerformance", "relationshipState", "SupplierCommissionRule", "Payment", "Invoice"]) {
       assert.ok(!chain.includes(forbidden), forbidden);
     }
-    for (const notYet of ["tracking", "finance", "reports"]) {
+    for (const notYet of ["finance", "reports", "payments"]) {
       assert.ok(!listProbeSourceObjects("trackier").includes(notYet), notYet);
     }
   });
@@ -918,20 +918,22 @@ describe("read-only, and the other probes unchanged", () => {
       { coupons: [{ id: "zzcouponzz" }] },
       { deals: [{ id: "zzdealzz" }] },
       moreToCome([CONVERSION]),
-      { allowedKpi: [{ name: "zzkpinamezz" }] },
+      { allowedKpi: ["zzkpinamezz"] },
+      { allowedKpi: ["zzkpinamezz"] },
+      { records: [{ zzkpinamezz: 1 }] },
     ]);
     const out = await serviceWith(adapterWith(spy)).certify("trackier");
     assert.deepEqual(
       out.results.map((r) => r.sourceObject),
-      ["profile", "campaigns", "campaign_detail", "coupons", "deals", "conversions", "reports_kpi"],
+      ["profile", "campaigns", "campaign_detail", "coupons", "deals", "conversions", "reports_kpi", "tracking"],
     );
     const conversionCalls = spy.calls.filter((c) => c.path === TRACKIER_CONVERSIONS_PATH);
     assert.equal(conversionCalls.length, 1);
-    assert.equal(spy.calls.length, 8);
+    assert.equal(spy.calls.length, 10);
     assert.ok(out.results.every((r) => r.ok), JSON.stringify(out.results.map((r) => r.statusCategory)));
     const conversions = out.results.find((r) => r.sourceObject === "conversions");
     assert.equal(conversions.windowPreset, "7d");
-    for (const other of out.results.filter((r) => r.sourceObject !== "conversions")) {
+    for (const other of out.results.filter((r) => r.sourceObject !== "conversions" && r.sourceObject !== "tracking")) {
       assert.ok(!Object.hasOwn(other, "windowPreset"), other.sourceObject);
     }
   });

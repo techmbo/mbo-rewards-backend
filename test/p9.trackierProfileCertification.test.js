@@ -139,11 +139,12 @@ describe("Trackier is registered in the certification framework", () => {
       "deals",
       "profile",
       "reports_kpi",
+      "tracking",
     ]);
   });
 
   it("adds no probe for the objects this phase defers", () => {
-    for (const notYet of ["tracking", "finance", "reports"]) {
+    for (const notYet of ["finance", "reports", "payments"]) {
       assert.ok(!listProbeSourceObjects("trackier").includes(notYet), notYet);
     }
   });
@@ -303,7 +304,7 @@ describe("the existing adapter and fetcher are reused", () => {
     // The factory, and the conversions probe's refusal code, both from the one adapter module.
     assert.match(
       codeOf(SERVICE_SRC),
-      /import \{ createTrackierAdapter, TRACKIER_WINDOW_NOT_ONE_CHUNK \} from "\.\.\/\.\.\/adapters\/trackier\.adapter\.js"/,
+      /import \{\s*createTrackierAdapter,\s*TRACKIER_DEFAULT_REPORT_KPIS,\s*TRACKIER_WINDOW_NOT_ONE_CHUNK,?\s*\} from "\.\.\/\.\.\/adapters\/trackier\.adapter\.js"/,
     );
   });
 

@@ -6,7 +6,11 @@ import { createAwinAdapter } from "../../adapters/awin.adapter.js";
 import { createCjAdapter } from "../../adapters/cj.adapter.js";
 import { createAdmitadAdapter } from "../../adapters/admitad.adapter.js";
 import { createRakutenAdapter } from "../../adapters/rakuten.adapter.js";
-import { createTrackierAdapter, TRACKIER_WINDOW_NOT_ONE_CHUNK } from "../../adapters/trackier.adapter.js";
+import {
+  createTrackierAdapter,
+  TRACKIER_DEFAULT_REPORT_KPIS,
+  TRACKIER_WINDOW_NOT_ONE_CHUNK,
+} from "../../adapters/trackier.adapter.js";
 import { resolveOptimiseCredentials } from "../integrations/optimiseCredentials.js";
 import { resolvePartnerizeCertificationCredentials } from "../integrations/partnerizeCredentials.js";
 import { resolveAwinCertificationCredentials } from "../integrations/awinCredentials.js";
@@ -716,6 +720,28 @@ const TRACKIER_PROBES = Object.freeze({
     endpointKey: "GET /v2/publishers/reports-kpi (no parameters)",
     chain: "trackierReportsKpi",
   },
+  // Reports DATA, under the catalog's existing name for GET /v2/publishers/reports: tracking.
+  //
+  // Two requests at most. The first re-reads the KPI metadata so the KPI names sent are the
+  // supplier's own — production's default names are PREFERRED, but only those literally present
+  // in allowedKpi[] are sent, else the first name the supplier lists; none is invented or
+  // normalised. Without any KPI name there is no reports request at all.
+  //
+  // The grouping is production's own default (campaign_name,created), which the sync job has sent
+  // live on every run; nothing is guessed. limit is what production's pager sends on every call,
+  // pinned to 1.
+  //
+  // A REPORT ROW IS AN AGGREGATE OVER THE GROUPING. It is not a conversion row and not a finance
+  // record: clicks are not billable clicks, conversions are not payable conversions, payout is
+  // not settled commission, saleAmount is not a final order value. Field names are reported as
+  // they arrive and none is canonicalised.
+  tracking: {
+    method: "GET",
+    endpointKey:
+      "GET /v2/publishers/reports (startDate/endDate window, kpis from reports-kpi, grouping=campaign_name,created, limit=1, page=1)",
+    chain: "trackierReports",
+    dated: true,
+  },
 });
 
 const PROBE_REGISTRY = Object.freeze({
@@ -950,6 +976,24 @@ export function certificationFailure(base, error, extra = {}, redactValues = [])
  */
 /** The Trackier campaigns bounds: the smallest page the endpoint takes. */
 export const TRACKIER_CERTIFICATION_CAMPAIGN_PARAMS = Object.freeze({ limit: 1, page: 1 });
+
+/** The Trackier reports bounds. Dates and KPI names are added at call time. */
+export const TRACKIER_CERTIFICATION_REPORT_PARAMS = Object.freeze({ limit: 1, page: 1 });
+
+/**
+ * The KPI names the reports certification sends, chosen from the supplier's own allowedKpi[].
+ *
+ * Production's default names are preferred, in production's order, but ONLY those literally
+ * present in the supplier list are kept; if none is, the first name the supplier lists is used
+ * alone. Only string entries count. Nothing is invented, trimmed, re-cased or aliased: a name
+ * either appears in the supplier list exactly as it will be sent, or it is not sent.
+ */
+export function selectTrackierCertificationKpis(container) {
+  const supplied = Array.isArray(container) ? container.filter((k) => typeof k === "string" && k !== "") : [];
+  if (!supplied.length) return [];
+  const preferred = TRACKIER_DEFAULT_REPORT_KPIS.filter((name) => supplied.includes(name));
+  return preferred.length ? preferred : [supplied[0]];
+}
 
 /** Path segment standing in for a KPI-name key in a map-shaped reports-kpi container. */
 export const KPI_MAP_KEY_PLACEHOLDER = "*";
@@ -2923,6 +2967,119 @@ export class NetworkCertificationService {
   }
 
   /**
+   * The Trackier reports chain: KPI discovery, then ONE reports request.
+   *
+   * Both requests reuse production's own fetchers — fetchReportsKpi with preserveShape, one
+   * attempt, the probe's timeout; then fetchReports with singleChunk, singlePage, one attempt,
+   * the probe's timeout, limit=1, page=1, and only KPI names the supplier itself listed. The
+   * window is the SERVICE's, from a frozen preset — never a caller's dates.
+   *
+   * No KPI name in the metadata means no reports request: SKIPPED_NO_KPI_SCOPE. Zero report rows
+   * is OK_NO_ROWS — the window held no activity under this grouping — never an unsupported or
+   * account-state claim.
+   *
+   * Only structure leaves this method. The names selected are not reported (they are supplier
+   * configuration); the field paths of the ONE sampled row are, because that row's shape is what
+   * this probe exists to learn. No campaign name, count, amount, date or identifier can reach the
+   * result.
+   */
+  async certifyTrackierReports({ adapter, key, probe, budgetLeft, sourceObject, window = null }) {
+    const base = {
+      network: key,
+      sourceObject,
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+      windowPreset: window?.preset ?? null,
+      kpiDiscoveryRequestCount: 0,
+      reportsRequestCount: 0,
+    };
+
+    if (!window?.from || !window?.to) {
+      return {
+        ...base,
+        ok: false,
+        statusCategory: "SKIPPED_NO_WINDOW",
+        fieldCount: 0,
+        schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        note: "Reports is a dated object and no bounded window was supplied, so no supplier request was made.",
+      };
+    }
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+    const counts = { kpiDiscoveryRequestCount: 0, reportsRequestCount: 0 };
+
+    try {
+      counts.kpiDiscoveryRequestCount = 1;
+      const { container } = await adapter.fetchReportsKpi({ retries: 1, timeoutMs, preserveShape: true });
+      const kpis = selectTrackierCertificationKpis(container);
+
+      if (!kpis.length) {
+        return {
+          ...base,
+          ...counts,
+          ok: false,
+          statusCategory: "SKIPPED_NO_KPI_SCOPE",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+          note: "The reports-kpi metadata listed no KPI name, so no reports request was made.",
+        };
+      }
+
+      counts.reportsRequestCount = 1;
+      const rows = asRows(
+        await adapter.fetchReports(
+          { startDate: window.from, endDate: window.to, kpis, ...TRACKIER_CERTIFICATION_REPORT_PARAMS },
+          { singleChunk: true, singlePage: true, retries: 1, timeoutMs },
+        ),
+      ).slice(0, 1);
+
+      if (!rows.length) {
+        return {
+          ...base,
+          ...counts,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        };
+      }
+
+      const fieldPaths = summarisePayloads(rows);
+      return {
+        ...base,
+        ...counts,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+        schema: "KNOWN_FROM_LIVE_SAMPLE",
+      };
+    } catch (error) {
+      if (error?.code === TRACKIER_WINDOW_NOT_ONE_CHUNK) {
+        return {
+          ...base,
+          ...counts,
+          reportsRequestCount: 0,
+          ok: false,
+          statusCategory: "SKIPPED_WINDOW_NOT_ONE_CHUNK",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+          note: "The window preset spans more than one supplier date chunk, so no reports request was made.",
+        };
+      }
+      return certificationFailure(
+        base,
+        error,
+        { windowPreset: window?.preset ?? null, ...counts },
+        redactionValuesFor(adapter),
+      );
+    }
+  }
+
+  /**
    * Certifies one network.
    *
    * Probes run in sequence, not in parallel: a burst of concurrent calls against a supplier's API
@@ -3154,6 +3311,21 @@ export class NetworkCertificationService {
       if (probe.chain === "trackierReportsKpi") {
         results.push(
           await this.certifyTrackierReportsKpi({ adapter, key, probe, budgetLeft, sourceObject }),
+        );
+        continue;
+      }
+
+      if (probe.chain === "trackierReports") {
+        results.push(
+          await this.certifyTrackierReports({
+            adapter,
+            key,
+            probe,
+            budgetLeft,
+            sourceObject,
+            // The service's own window, computed from the frozen preset. Never a caller's dates.
+            window: { ...ctx.window, preset: resolvedWindowPreset },
+          }),
         );
         continue;
       }
