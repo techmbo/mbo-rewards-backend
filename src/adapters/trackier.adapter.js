@@ -339,6 +339,10 @@ export const TRACKIER_CAMPAIGN_DETAIL_PATH_PREFIX = "/v2/publisher/campaign/";
 /** The publisher coupons endpoint. Plural "publishers" here, like the profile. */
 export const TRACKIER_COUPONS_PATH = "/v2/publishers/coupons";
 
+/** The publisher deals endpoint. A sibling of coupons on the same page-token pager, and a
+ *  SEPARATE object: a deal is not automatically a coupon code. */
+export const TRACKIER_DEALS_PATH = "/v2/publishers/deals";
+
 function unwrapProfile(responseData) {
   if (responseData?.profile && typeof responseData.profile === "object") {
     return responseData.profile;
@@ -450,8 +454,11 @@ export function createTrackierAdapter({
       });
     },
 
-    fetchDeals(params = {}) {
-      return fetchPageTokenPaginated(httpClient, "/v2/publishers/deals", params, {
+    fetchDeals(params = {}, options = {}) {
+      return fetchPageTokenPaginated(httpClient, TRACKIER_DEALS_PATH, params, {
+        // options first: the extractor and the limiter are the adapter's and cannot be repointed
+        // by a caller, however the call is made. deals reads the deals key, never coupons.
+        ...options,
         collectionKeys: ["deals"],
         rateLimiter: trackierCampaignRateLimiter,
       });

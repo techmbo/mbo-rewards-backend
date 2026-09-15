@@ -310,6 +310,9 @@ const CATALOG = Object.freeze({
       notes: "No Trackier payments endpoint on the live publisher contract.",
     }),
     obj({ sourceObject: "coupons", label: "Coupons", endpoint: "GET /v2/publishers/coupons", live: true, entityType: "coupon" }),
+    // A sibling of coupons, and a SEPARATE object: a deal is not automatically a coupon code. The
+    // sync job already reads it under this name; it simply had no catalog entry.
+    obj({ sourceObject: "deals", label: "Deals", endpoint: "GET /v2/publishers/deals", live: true, entityType: "coupon" }),
   ]),
   boostiny: Object.freeze([
     obj({ sourceObject: "campaigns", label: "Campaigns", endpoint: "GET campaigns", live: true, entityType: "campaign" }),

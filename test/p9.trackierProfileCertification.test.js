@@ -135,12 +135,13 @@ describe("Trackier is registered in the certification framework", () => {
       "campaign_detail",
       "campaigns",
       "coupons",
+      "deals",
       "profile",
     ]);
   });
 
   it("adds no probe for the objects this phase defers", () => {
-    for (const notYet of ["conversions", "tracking", "finance", "deals"]) {
+    for (const notYet of ["conversions", "tracking", "finance"]) {
       assert.ok(!listProbeSourceObjects("trackier").includes(notYet), notYet);
     }
   });

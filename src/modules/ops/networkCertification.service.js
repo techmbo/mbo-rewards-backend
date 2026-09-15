@@ -672,6 +672,22 @@ const TRACKIER_PROBES = Object.freeze({
     endpointKey: "GET /v2/publishers/coupons (one page, no page token)",
     chain: "trackierCoupons",
   },
+  // Deals, certified INDEPENDENTLY of coupons. The two share an endpoint family and a pager, and
+  // they are still different objects — merging them here would certify a shape neither endpoint
+  // actually returns.
+  //
+  // A DEAL ROW IS NOT A COUPON CODE. A deal may carry a code, a coupon or a deal_code field, or
+  // none of them; whichever the supplier sends is reported under its own name, and a title or
+  // description is never promoted into one. No URL becomes a tracking link in this phase.
+  //
+  // Same bounds as coupons, for the same reason: production reaches this endpoint through the
+  // page-TOKEN pager and has never sent a page size here, and none is evidenced for it — so the
+  // request count is the bound, and the cursor is never read, let alone followed.
+  deals: {
+    method: "GET",
+    endpointKey: "GET /v2/publishers/deals (one page, no page token)",
+    chain: "trackierDeals",
+  },
 });
 
 const PROBE_REGISTRY = Object.freeze({
@@ -2617,6 +2633,66 @@ export class NetworkCertificationService {
   }
 
   /**
+   * The Trackier deals chain: exactly ONE request.
+   *
+   * Deliberately its own chain rather than a parameter on the coupons one. Deals and coupons are
+   * separate supplier objects with separate row shapes, and a shared chain would invite exactly
+   * the merge this phase is told not to make.
+   *
+   * It reuses production's own fetchDeals — same client, same X-Api-Key header, same path, same
+   * rate limiter, same deals row extraction — with three bounds production does not set:
+   * singlePage, retries pinned to one attempt where production allows six, and the probe's own
+   * timeout. singlePage breaks before the response is read for a next page token, so the cursor is
+   * never extracted and cannot be followed.
+   *
+   * Zero deals reports OK_NO_ROWS, and says nothing about joined or account state.
+   *
+   * Only structure leaves this method: no code, coupon or deal_code value, campaign id or name,
+   * advertiser, title, description or URL can reach the result.
+   */
+  async certifyTrackierDeals({ adapter, key, probe, budgetLeft, sourceObject }) {
+    const base = {
+      network: key,
+      sourceObject,
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+    };
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      // No supplier-side page size is sent, so this local bound is the only one.
+      const rows = asRows(
+        await adapter.fetchDeals({}, { singlePage: true, retries: 1, timeoutMs }),
+      ).slice(0, 1);
+
+      if (!rows.length) {
+        return {
+          ...base,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        };
+      }
+
+      const fieldPaths = summarisePayloads(rows);
+      return {
+        ...base,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+      };
+    } catch (error) {
+      return certificationFailure(base, error, {}, redactionValuesFor(adapter));
+    }
+  }
+
+  /**
    * Certifies one network.
    *
    * Probes run in sequence, not in parallel: a burst of concurrent calls against a supplier's API
@@ -2819,6 +2895,13 @@ export class NetworkCertificationService {
             // The service's own window, computed from the frozen preset. Never a caller's dates.
             window: { ...ctx.window, preset: resolvedWindowPreset },
           }),
+        );
+        continue;
+      }
+
+      if (probe.chain === "trackierDeals") {
+        results.push(
+          await this.certifyTrackierDeals({ adapter, key, probe, budgetLeft, sourceObject }),
         );
         continue;
       }
