@@ -1,4 +1,5 @@
 import { syncAll, syncPlatformAccount } from "../jobs/sync.job.js";
+import { normalizeBoostinyCanaryOptions } from "../modules/commercial/boostinyCommissionCanary.js";
 import { formatSyncError } from "../jobs/syncErrors.js";
 import { getSyncStatus, runSyncInBackground } from "../jobs/syncState.js";
 import { getSchedulerStatus, triggerScheduledSync } from "../jobs/syncScheduler.js";
@@ -79,6 +80,45 @@ export async function triggerSyncPlatform(req, res, next) {
           fastSync,
           promoteAfter: true,
           sourceObject: sourceObject || undefined,
+        }),
+      res,
+      { trigger: "api" },
+    );
+  } catch (error) {
+    next(formatSyncError(error));
+  }
+}
+
+/**
+ * Admin-only Boostiny commission canary: one account, one supplier campaign, dry run unless
+ * dryRun=false is stated. Runs the ordinary Boostiny account sync restricted to the campaigns
+ * source object with the canary filter applied inside the sync, before any commission write.
+ * The result is read from GET /sync/status as result[accountLabel].canary / .commissionRules.
+ */
+export async function triggerBoostinyCanarySync(req, res, next) {
+  try {
+    const accountLabel = String(req.params?.accountLabel ?? "").trim();
+    if (!accountLabel) {
+      return res.status(400).json({ ok: false, message: "accountLabel is required." });
+    }
+    let canary;
+    try {
+      canary = normalizeBoostinyCanaryOptions({
+        supplierCampaignId: req.body?.supplierCampaignId ?? req.query?.supplierCampaignId,
+        dryRun: req.body?.dryRun ?? req.query?.dryRun,
+      });
+    } catch (error) {
+      return res.status(error.status ?? 400).json({ ok: false, message: error.message });
+    }
+    const jobName = `sync:boostiny:${accountLabel}:canary:${canary.dryRun ? "dry-run" : "live"}`;
+    return startBackgroundSync(
+      jobName,
+      () =>
+        syncPlatformAccount("boostiny", accountLabel, {
+          fastSync: false,
+          promoteAfter: false,
+          sourceObject: "campaigns",
+          canary,
         }),
       res,
       { trigger: "api" },

@@ -287,6 +287,123 @@ export class BoostinyCommissionPersistenceService {
   }
 
   /**
+   * READ-ONLY plan for one campaign row: what a live persist would do, without doing it.
+   *
+   * The same candidates, the same version comparison and the same closure queries as
+   * persistCampaign — but every write is replaced by a count. Nothing here calls the rule service,
+   * update, updateMany or a transaction. Only aggregates leave: no campaign name, payout value,
+   * commission value, condition, coupon or raw fragment.
+   */
+  async planCampaign({ networkSource = "boostiny", sourceAccountLabel = "default", raw, fetchedAt = null }, client = null) {
+    const db = client ?? this.db;
+    const evidenceAt = validDate(fetchedAt) ?? this.now();
+    const sourceCampaignId = boostinyCampaignId(raw);
+    const supplierCampaign = sourceCampaignId
+      ? await this.resolveSupplierCampaign({ networkSource, sourceAccountLabel, sourceCampaignId }, db)
+      : null;
+    const campaignSourceId = supplierCampaign?.campaignSources?.[0]?.id ?? null;
+    const candidates = mapBoostinyPayoutGroupCandidates(raw, {
+      networkSource,
+      sourceAccountLabel,
+      supplierCampaignId: supplierCampaign?.id ?? null,
+      campaignSourceId,
+      fetchedAt: evidenceAt,
+    });
+
+    const plan = { candidates: candidates.length, wouldCreate: 0, wouldReuse: 0, wouldVersion: 0, financeReady: 0, reviewRequired: 0 };
+    for (const candidate of candidates) {
+      if (candidate.mappingStatus === "VERIFIED") plan.financeReady += 1;
+      else plan.reviewRequired += 1;
+      // eslint-disable-next-line no-await-in-loop
+      const versions = await db.supplierCommissionRule.findMany({
+        where: { supplier: "BOOSTINY", sourceAccountLabel, outcomeKey: candidate.outcomeKey },
+        include: { conditions: true },
+      });
+      const open = (versions ?? []).find((row) => row.effectiveUntil == null);
+      if (!open) plan.wouldCreate += 1;
+      else if (sameBoostinyRuleVersion(open, candidate)) plan.wouldReuse += 1;
+      else plan.wouldVersion += 1;
+    }
+
+    let wouldCloseStale = 0;
+    let wouldCloseSummary = 0;
+    if (candidates.length && sourceCampaignId) {
+      const active = new Set(candidates.map((candidate) => candidate.outcomeKey));
+      const openGroupRules = await db.supplierCommissionRule.findMany({
+        where: {
+          supplier: "BOOSTINY",
+          sourceAccountLabel,
+          sourceObject: BOOSTINY_PAYOUT_GROUP_SOURCE_OBJECT,
+          sourcePath: { startsWith: PAYOUT_GROUP_SOURCE_PATH_PREFIX },
+          effectiveUntil: null,
+          outcomeKey: { startsWith: boostinyCampaignOutcomeKeyPrefix(sourceCampaignId) },
+        },
+      });
+      wouldCloseStale = (openGroupRules ?? []).filter((row) => !active.has(row.outcomeKey)).length;
+      const openSummaryRules = await db.supplierCommissionRule.findMany({
+        where: {
+          supplier: "BOOSTINY",
+          sourceAccountLabel,
+          sourceObject: BOOSTINY_PAYOUT_GROUP_SOURCE_OBJECT,
+          sourcePath: BOOSTINY_SUMMARY_FAN_OUT_SOURCE_PATH,
+          effectiveUntil: null,
+          outcomeKey: { startsWith: `${String(sourceCampaignId)}::` },
+          effectiveFrom: { lt: evidenceAt },
+        },
+      });
+      wouldCloseSummary = (openSummaryRules ?? []).length;
+    }
+
+    return {
+      sourceCampaignId,
+      linked: Boolean(campaignSourceId),
+      ...plan,
+      wouldCloseStale,
+      wouldCloseSummary,
+    };
+  }
+
+  /** READ-ONLY plan over campaign rows; the aggregate shape a dry run reports. */
+  async planCampaigns({ networkSource = "boostiny", sourceAccountLabel = "default", campaigns = [], fetchedAt = null }) {
+    const summary = {
+      dryRun: true,
+      campaignsSeen: 0,
+      campaignsWithPayoutGroups: 0,
+      campaignsWithoutPayoutGroups: 0,
+      campaignsUnlinked: 0,
+      candidates: 0,
+      wouldCreate: 0,
+      wouldReuse: 0,
+      wouldVersion: 0,
+      wouldCloseStale: 0,
+      wouldCloseSummary: 0,
+      financeReady: 0,
+      reviewRequired: 0,
+      persistErrors: [],
+    };
+    for (const raw of Array.isArray(campaigns) ? campaigns : []) {
+      if (!raw || typeof raw !== "object") continue;
+      summary.campaignsSeen += 1;
+      if (!campaignHasPayoutGroups(raw)) {
+        summary.campaignsWithoutPayoutGroups += 1;
+        continue;
+      }
+      summary.campaignsWithPayoutGroups += 1;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const plan = await this.planCampaign({ networkSource, sourceAccountLabel, raw, fetchedAt });
+        for (const key of ["candidates", "wouldCreate", "wouldReuse", "wouldVersion", "wouldCloseStale", "wouldCloseSummary", "financeReady", "reviewRequired"]) {
+          summary[key] += plan[key];
+        }
+        if (plan.candidates > 0 && !plan.linked) summary.campaignsUnlinked += 1;
+      } catch (error) {
+        summary.persistErrors.push({ campaignId: boostinyCampaignId(raw), message: error?.message || String(error) });
+      }
+    }
+    return summary;
+  }
+
+  /**
    * Persist every campaign row that carries payout groups. Rows without them are counted and
    * left to the existing campaign-summary behaviour. A failure on one campaign is reported and
    * never blocks the others.

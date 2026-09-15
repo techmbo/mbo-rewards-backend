@@ -53,7 +53,7 @@ import {
   shouldRefreshCoupons,
   updateAccountSyncTimestamps,
 } from "./syncTimestamps.js";
-import { runWithSyncOptions, shouldPromoteAfterSync } from "./syncContext.js";
+import { getSyncOptions, runWithSyncOptions, shouldPromoteAfterSync } from "./syncContext.js";
 import {
   initSyncProgress,
   recordAccountSyncComplete,
@@ -82,6 +82,7 @@ import {
 } from "./optimiseCommissionGroupSync.js";
 import { OptimiseCommissionGroupPersistenceService } from "../modules/commercial/optimiseCommissionGroupPersistence.service.js";
 import { BoostinyCommissionPersistenceService } from "../modules/commercial/boostinyCommissionPersistence.service.js";
+import { resolveBoostinyCanary, selectCanaryCampaigns } from "../modules/commercial/boostinyCommissionCanary.js";
 import {
   fetchOptimiseSourceObject,
   fetchTrackierSourceObject,
@@ -477,12 +478,16 @@ async function syncBoostinyAccount(accountLabel) {
     };
   }
 
+  // Admin canary (one supplier campaign, dry run by default): campaigns only, always fetched,
+  // filtered to the one campaign before any staging or commission write, and never recorded as
+  // an account sync. Absent for every scheduled and ordinary manual sync.
+  const canary = resolveBoostinyCanary(getSyncOptions());
   const timestamps = await getAccountSyncTimestamps("boostiny", accountLabel);
   const { from, to } = getBoostinyReportRange(timestamps?.lastSuccessfulSync);
-  const refreshCampaigns = shouldRefreshCampaigns(timestamps?.lastCampaignSyncAt);
-  const refreshCoupons = shouldRefreshCoupons(timestamps?.lastCouponSyncAt);
+  const refreshCampaigns = canary ? true : shouldRefreshCampaigns(timestamps?.lastCampaignSyncAt);
+  const refreshCoupons = canary ? false : shouldRefreshCoupons(timestamps?.lastCouponSyncAt);
   const networkAccountId = await resolveNetworkAccountId("boostiny", accountLabel);
-  const requested = requestedSourceObject();
+  const requested = canary ? "campaigns" : requestedSourceObject();
   const unavailable = await runUnavailableIfRequested({
     network: "boostiny",
     networkAccountId,
@@ -522,6 +527,19 @@ async function syncBoostinyAccount(accountLabel) {
     });
     sourceObjectRuns.push(summarizeSourceObjectRun(run));
     campaigns = resultRows(run);
+  }
+
+  let canaryReport = null;
+  if (canary) {
+    // The id must come from the supplier's own list: an unlisted id selects nothing.
+    const fetched = campaigns.length;
+    campaigns = selectCanaryCampaigns(campaigns, canary.supplierCampaignId);
+    canaryReport = {
+      mode: canary.dryRun ? "DRY_RUN" : "LIVE",
+      campaignsFetched: fetched,
+      campaignMatched: campaigns.length > 0,
+      campaignsSelected: campaigns.length,
+    };
   }
 
   let performanceRows = [];
@@ -631,8 +649,21 @@ async function syncBoostinyAccount(accountLabel) {
   // Boostiny payout-group persistence below; the campaign-summary fan-out (which flattens the
   // same payouts) is skipped for them so the same supplier payout is never represented twice.
   let commissionRules = null;
-  if (refreshCampaigns && includeSourceObject(requested, "campaigns")) {
-    const boostinyCommissionPersistence = new BoostinyCommissionPersistenceService();
+  const boostinyCommissionPersistence = new BoostinyCommissionPersistenceService();
+  if (canary?.dryRun) {
+    // Dry run: no staging, no rule write, no closure — a read-only plan for the selected campaign.
+    try {
+      const campaignsRun = sourceObjectRuns.find((r) => r?.sourceObject === "campaigns");
+      commissionRules = await boostinyCommissionPersistence.planCampaigns({
+        networkSource: "boostiny",
+        sourceAccountLabel: accountLabel || "default",
+        campaigns: payload.campaigns,
+        fetchedAt: campaignsRun?.finishedAt ?? null,
+      });
+    } catch (error) {
+      commissionRules = { dryRun: true, error: error?.message || String(error) };
+    }
+  } else if (refreshCampaigns && includeSourceObject(requested, "campaigns")) {
     const payoutGroupCampaignIds = boostinyCommissionPersistence.campaignIdsWithPayoutGroups(payload.campaigns);
     await upsertManyRawEntities({
       networkSource: "boostiny",
@@ -754,7 +785,8 @@ async function syncBoostinyAccount(accountLabel) {
     });
   }
 
-  await markAccountSyncSuccess("boostiny", accountLabel, {
+  // A canary is not an account sync: it never advances the account's refresh timestamps.
+  if (!canary) await markAccountSyncSuccess("boostiny", accountLabel, {
     refreshedCampaigns: refreshCampaigns && includeSourceObject(requested, "campaigns"),
     refreshedCoupons: refreshCoupons && includeSourceObject(requested, "coupons"),
     refreshedOrders:
@@ -780,6 +812,7 @@ async function syncBoostinyAccount(accountLabel) {
     linkPerformance: payload.linkPerformance.length,
     coupons: refreshCoupons ? payload.coupons.length : 0,
     commissionRules,
+    canary: canaryReport,
     apiRequestCount: payload.apiRequestCount ?? null,
     usedPerCampaignPerformance: payload.usedPerCampaignPerformance ?? null,
     incrementalFrom: from,
