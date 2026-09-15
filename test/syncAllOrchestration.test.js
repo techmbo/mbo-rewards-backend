@@ -239,6 +239,153 @@ describe("service — run reuse requires compatible execution options", () => {
   });
 });
 
+describe("concurrent enqueue — exactly one active run survives", () => {
+  const serviceFor = (prisma) => new SyncOrchestrationService({ prisma, listAccounts });
+  const activeParents = (rows) => rows.filter((r) => r.jobName === ORCHESTRATION_JOB_NAME && ["PENDING", "RUNNING"].includes(r.status));
+  const unitsOf = (rows, runId) => rows.filter((r) => r.jobName === UNIT_JOB_NAME && r.correlationId === runId);
+
+  it("two instances enqueueing the same work at the same moment produce ONE active parent, and the loser's units do not survive", async () => {
+    const { prisma, rows } = createFakePrisma();
+    // Two service instances over one store: the shape of two Vercel instances on one database.
+    const a = serviceFor(prisma);
+    const b = serviceFor(prisma);
+    const options = { fastSync: false, promoteAfter: true };
+    const [ra, rb] = await Promise.all([
+      a.getOrCreateRun({ kind: "full", trigger: "api", options }),
+      b.getOrCreateRun({ kind: "full", trigger: "scheduler", options }),
+    ]);
+
+    assert.equal(ra.id, rb.id, "both callers are handed the SAME run id");
+    assert.equal(activeParents(rows).length, 1, "exactly one active parent run");
+    assert.equal(activeParents(rows)[0].id, ra.id);
+    // The winner is the EARLIEST created run, the tie-break every racer computes identically.
+    const parentsByAge = rows
+      .filter((r) => r.jobName === ORCHESTRATION_JOB_NAME)
+      .sort((x, y) => new Date(x.createdAt) - new Date(y.createdAt) || (x.id < y.id ? -1 : 1));
+    assert.equal(parentsByAge[0].id, ra.id, "the earliest run is the survivor");
+    assert.equal([ra.created, rb.created].filter(Boolean).length, 1, "exactly one caller created it");
+
+    // The losing attempt leaves nothing runnable behind.
+    const loser = rows.find((r) => r.jobName === ORCHESTRATION_JOB_NAME && r.id !== ra.id);
+    if (loser) {
+      assert.equal(loser.status, "CANCELLED");
+      assert.ok(loser.completedAt);
+      const orphans = unitsOf(rows, loser.id);
+      assert.ok(orphans.length > 0, "the loser really had created units");
+      assert.ok(orphans.every((u) => u.status === "CANCELLED"), "no PENDING unit survives for the loser");
+    }
+    // Exactly one runnable unit set exists.
+    const runnable = rows.filter((r) => r.jobName === UNIT_JOB_NAME && r.status === "PENDING");
+    assert.equal(runnable.length, EXPECTED_UNITS);
+    assert.ok(runnable.every((u) => u.correlationId === ra.id));
+  });
+
+  it("a wider race (five simultaneous callers) still collapses to one active run and one unit set", async () => {
+    const { prisma, rows } = createFakePrisma();
+    const options = { fastSync: true, promoteAfter: true };
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => serviceFor(prisma).getOrCreateRun({ kind: "full", trigger: "api", options })),
+    );
+    assert.equal(new Set(results.map((r) => r.id)).size, 1, "every caller got the same run");
+    assert.equal(activeParents(rows).length, 1);
+    assert.equal(results.filter((r) => r.created).length, 1, "only one creation is reported");
+    const runnable = rows.filter((r) => r.jobName === UNIT_JOB_NAME && r.status === "PENDING");
+    assert.equal(runnable.length, EXPECTED_UNITS);
+    assert.ok(runnable.every((u) => u.correlationId === results[0].id));
+  });
+
+  it("racing INCOMPATIBLE requests each keep their own run — collapsing never merges different work", async () => {
+    const { prisma, rows } = createFakePrisma();
+    const [full, fast, noPromote] = await Promise.all([
+      serviceFor(prisma).getOrCreateRun({ kind: "full", trigger: "api", options: { fastSync: false, promoteAfter: true } }),
+      serviceFor(prisma).getOrCreateRun({ kind: "full", trigger: "api", options: { fastSync: true, promoteAfter: true } }),
+      serviceFor(prisma).getOrCreateRun({ kind: "full", trigger: "api", options: { fastSync: false, promoteAfter: false } }),
+    ]);
+    assert.equal(new Set([full.id, fast.id, noPromote.id]).size, 3);
+    assert.equal(activeParents(rows).length, 3, "three distinct kinds of work stay separate");
+    assert.ok([full, fast, noPromote].every((r) => r.created));
+  });
+
+  it("self-heals a pre-existing duplicate whose units are untouched, and returns the earliest run", async () => {
+    const { prisma, rows } = createFakePrisma();
+    const service = serviceFor(prisma);
+    const options = { fastSync: false, promoteAfter: true };
+    const first = await service.createRun({ kind: "full", trigger: "api", options });
+    const duplicate = await service.createRun({ kind: "full", trigger: "api", options });
+    assert.equal(activeParents(rows).length, 2, "two active duplicates exist before the call");
+
+    const resumed = await service.getOrCreateRun({ kind: "full", trigger: "api", options });
+    assert.equal(resumed.id, first.id, "the earliest run wins");
+    assert.equal(resumed.created, false);
+    assert.equal(activeParents(rows).length, 1, "the duplicate was collapsed");
+    assert.equal(rows.find((r) => r.id === duplicate.id).status, "CANCELLED");
+    assert.ok(unitsOf(rows, duplicate.id).every((u) => u.status === "CANCELLED"));
+    assert.ok(unitsOf(rows, first.id).every((u) => u.status === "PENDING"), "the survivor is untouched");
+  });
+
+  it("collapsing is transactional and refuses a run that is already terminal", async () => {
+    const { prisma, rows, ops } = createFakePrisma();
+    const service = serviceFor(prisma);
+    const options = { fastSync: false, promoteAfter: true };
+    const run = await service.createRun({ kind: "full", trigger: "api", options });
+
+    const before = ops.length;
+    const collapse = await service.collapseDuplicateRun(run.id, { canonicalRunId: "zzotherzz" });
+    assert.equal(collapse.collapsed, true);
+    assert.ok(ops.slice(before).includes("$transaction"), "parent and units are cancelled atomically");
+    assert.equal(rows.find((r) => r.id === run.id).status, "CANCELLED");
+
+    // Re-collapsing is a no-op, and a run that reached a terminal state is never overwritten.
+    const again = await service.collapseDuplicateRun(run.id);
+    assert.equal(again.collapsed, false);
+    assert.equal(again.reason, "already_terminal");
+
+    const finished = await service.createRun({ kind: "full", trigger: "api", options: { fastSync: true, promoteAfter: false } });
+    await prisma.jobRun.update({ where: { id: finished.id }, data: { status: "COMPLETED", completedAt: new Date() } });
+    const refused = await service.collapseDuplicateRun(finished.id);
+    assert.equal(refused.collapsed, false);
+    assert.equal(refused.reason, "already_terminal");
+    assert.equal(rows.find((r) => r.id === finished.id).status, "COMPLETED", "a completed run is never rewritten to CANCELLED");
+  });
+
+  it("a run that becomes terminal BETWEEN the check and the write is not resurrected", async () => {
+    const { prisma, rows } = createFakePrisma();
+    const service = serviceFor(prisma);
+    const run = await service.createRun({ kind: "full", trigger: "api", options: { fastSync: false, promoteAfter: true } });
+
+    // Another instance finishes the run after our snapshot is read but before our write lands.
+    const realFindUnique = prisma.jobRun.findUnique;
+    prisma.jobRun.findUnique = async (args) => {
+      const snapshot = await realFindUnique.call(prisma.jobRun, args);
+      const row = rows.find((r) => r.id === args.where.id);
+      if (row && row.jobName === ORCHESTRATION_JOB_NAME) { row.status = "COMPLETED"; row.completedAt = new Date(); }
+      return snapshot;
+    };
+    const outcome = await service.collapseDuplicateRun(run.id);
+    prisma.jobRun.findUnique = realFindUnique;
+
+    assert.equal(outcome.collapsed, false);
+    assert.equal(outcome.reason, "already_terminal");
+    assert.equal(rows.find((r) => r.id === run.id).status, "COMPLETED", "the finished run keeps its outcome");
+    assert.ok(unitsOf(rows, run.id).every((u) => u.status === "PENDING"), "its units are not cancelled either");
+  });
+
+  it("never collapses a duplicate whose work has already started", async () => {
+    const { prisma, rows } = createFakePrisma();
+    const service = serviceFor(prisma);
+    const options = { fastSync: false, promoteAfter: true };
+    const first = await service.createRun({ kind: "full", trigger: "api", options });
+    const started = await service.createRun({ kind: "full", trigger: "api", options });
+    const unit = await service.nextUnit(started.id);
+    await service.claimUnit(unit.id, { workerId: "zzworkerzz" });
+
+    const resumed = await service.getOrCreateRun({ kind: "full", trigger: "api", options });
+    assert.equal(resumed.id, first.id, "callers are still steered to the earliest run");
+    assert.equal(rows.find((r) => r.id === started.id).status, "RUNNING", "in-flight work is never cancelled underneath a worker");
+    assert.equal(rows.find((r) => r.id === unit.id).status, "RUNNING");
+  });
+});
+
 describe("source guards — enqueue only, and the other routes untouched", () => {
   const handler = handlerOf("triggerSyncAll");
 

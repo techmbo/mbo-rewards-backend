@@ -327,23 +327,110 @@ export class SyncOrchestrationService {
     return { id: parent.id, kind, trigger, totalUnits: planned.length, created: true };
   }
 
+  /** Every active run doing the same work, earliest first. The first is the canonical one. */
+  async listActiveCompatibleRuns({ kind = null, options = null } = {}) {
+    const conditions = [];
+    if (kind) conditions.push({ payload: { path: ["kind"], equals: kind } });
+    if (options) {
+      conditions.push({ payload: { path: ["options", "fastSync"], equals: Boolean(options.fastSync) } });
+      conditions.push({ payload: { path: ["options", "promoteAfter"], equals: options.promoteAfter !== false } });
+    }
+    return this.db.jobRun.findMany({
+      where: {
+        jobName: ORCHESTRATION_JOB_NAME,
+        status: { in: ACTIVE_STATUSES },
+        ...(conditions.length ? { AND: conditions } : {}),
+      },
+      // A TOTAL order every racer computes identically, so they all agree on the same winner.
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+  }
+
+  /**
+   * Cancel a duplicate run and its units — internal race resolution ONLY, never the administrative
+   * cancellation that is still to be designed. A duplicate is collapsible only while NOTHING has
+   * started: if any unit has left PENDING, a worker may be holding an account lock and doing real
+   * work, so the run is left alone and callers are simply steered to the canonical run.
+   */
+  async collapseDuplicateRun(runId, { reason = "duplicate_active_run", canonicalRunId = null } = {}) {
+    const parent = await this.db.jobRun.findUnique({ where: { id: runId } });
+    if (!parent || parent.jobName !== ORCHESTRATION_JOB_NAME || !ACTIVE_STATUSES.includes(parent.status)) {
+      return { collapsed: false, reason: "already_terminal" };
+    }
+    const units = await this.listUnits(runId);
+    if (units.some((unit) => unit.status !== "PENDING")) return { collapsed: false, reason: "work_started" };
+    const cancelledAt = this.now();
+    const cancel = async (tx) => {
+      const { count } = await tx.jobRun.updateMany({
+        where: { id: runId, jobName: ORCHESTRATION_JOB_NAME, status: { in: ACTIVE_STATUSES } },
+        data: { status: "CANCELLED", completedAt: cancelledAt, lastError: reason },
+      });
+      // The row can change between the checks above and this write (another instance finishing or
+      // collapsing it); the status guard makes the cancel a no-op rather than a resurrection.
+      if (count === 0) return { collapsed: false, reason: "already_terminal" };
+      await tx.jobRun.updateMany({
+        where: { jobName: UNIT_JOB_NAME, correlationId: runId, status: "PENDING" },
+        data: { status: "CANCELLED", completedAt: cancelledAt, lastError: reason },
+      });
+      return { collapsed: true, runId, canonicalRunId };
+    };
+    return typeof this.db.$transaction === "function" ? this.db.$transaction(cancel) : cancel(this.db);
+  }
+
+  /** Collapse every active compatible duplicate after the canonical one. Idempotent. */
+  async #collapseDuplicatesOf(canonicalRunId, { kind, options }) {
+    const active = await this.listActiveCompatibleRuns({ kind, options });
+    for (const run of active) {
+      if (run.id === canonicalRunId) continue;
+      // eslint-disable-next-line no-await-in-loop
+      await this.collapseDuplicateRun(run.id, { canonicalRunId });
+    }
+  }
+
+  #reuseView(run, fallbackKind) {
+    return {
+      id: run.id,
+      kind: run.payload?.kind ?? fallbackKind,
+      trigger: run.payload?.trigger ?? null,
+      options: run.payload?.options ?? null,
+      totalUnits: run.payload?.totalUnits ?? null,
+      created: false,
+    };
+  }
+
   /**
    * Resume the active run that does the SAME work, or create one. A reused run reports its own
    * recorded trigger and options, never the caller's, so a resume never misrepresents the run.
+   *
+   * Concurrency: checking then creating is not atomic, so two instances can both find nothing and
+   * both create. Rather than a schema change or a database advisory lock, the race is resolved
+   * OPTIMISTICALLY and durably: each racer creates, then re-reads the active compatible runs in a
+   * total order both compute identically (createdAt, id). The earliest is canonical; any other
+   * racer cancels its own parent and its still-PENDING units and returns the canonical run. The
+   * racer that commits last always sees both rows, so exactly one active run survives. The same
+   * pass also self-heals a duplicate left behind by an earlier crash.
    */
   async getOrCreateRun({ kind = "full", trigger = "api", options = {} } = {}) {
     const existing = await this.findActiveRun({ kind, options });
     if (existing) {
-      return {
-        id: existing.id,
-        kind: existing.payload?.kind ?? kind,
-        trigger: existing.payload?.trigger ?? null,
-        options: existing.payload?.options ?? null,
-        totalUnits: existing.payload?.totalUnits ?? null,
-        created: false,
-      };
+      await this.#collapseDuplicatesOf(existing.id, { kind, options });
+      return this.#reuseView(existing, kind);
     }
+
     const created = await this.createRun({ kind, trigger, options });
+
+    // Resolve a possible concurrent creation. This read happens after our own rows are committed,
+    // so a racer that committed before us is visible here.
+    const canonical = (await this.listActiveCompatibleRuns({ kind, options }))[0] ?? null;
+    if (canonical && canonical.id !== created.id) {
+      const collapse = await this.collapseDuplicateRun(created.id, { canonicalRunId: canonical.id });
+      if (collapse.collapsed) return { ...this.#reuseView(canonical, kind), collapsedRunId: created.id };
+      // Our own run could not be collapsed (a worker already claimed a unit): keep it as its own
+      // run rather than orphaning started work, and report it truthfully as created.
+      return { ...created, options: { fastSync: Boolean(options.fastSync), promoteAfter: options.promoteAfter !== false } };
+    }
+
+    await this.#collapseDuplicatesOf(created.id, { kind, options });
     return { ...created, options: { fastSync: Boolean(options.fastSync), promoteAfter: options.promoteAfter !== false } };
   }
 
