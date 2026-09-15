@@ -138,6 +138,7 @@ describe("Trackier is registered in the certification framework", () => {
       "coupons",
       "deals",
       "profile",
+      "reports_kpi",
     ]);
   });
 

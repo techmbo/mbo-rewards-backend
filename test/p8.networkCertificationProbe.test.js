@@ -791,6 +791,13 @@ describe("bounded sampling — the 300s hang", () => {
     assert.ok(conversionCall.includes("TRACKIER_CERTIFICATION_CONVERSION_PARAMS"), "and the supplier bounds");
     const chainStart = serviceSource.indexOf("async certifyTrackierConversions");
     assert.ok(chainStart >= 0 && serviceSource.indexOf("adapter.fetchConversions(") > chainStart, "inside the Trackier chain");
+    // fetchReportsKpi takes no parameters, so retry and timeout are its only bounds.
+    const kpiCalls = serviceSource.split("adapter.fetchReportsKpi(").slice(1);
+    assert.equal(kpiCalls.length, 1, "one reports-kpi call site: the Trackier chain");
+    const kpiCall = kpiCalls[0].slice(0, kpiCalls[0].indexOf("});"));
+    for (const bound of ["retries: 1", "timeoutMs", "preserveShape: true"]) {
+      assert.ok(kpiCall.includes(bound), bound);
+    }
   });
 
   it("covers every sampleable Optimise source object", () => {

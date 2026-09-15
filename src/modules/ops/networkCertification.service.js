@@ -704,6 +704,18 @@ const TRACKIER_PROBES = Object.freeze({
     chain: "trackierConversions",
     dated: true,
   },
+  // Reports KPI METADATA: which KPIs the reports endpoint may be asked for.
+  //
+  // Metadata, not performance data: no window, no page, no parameter of any kind. Certified
+  // BEFORE the reports data endpoint so its live KPI schema is known before that request is
+  // shaped. KPI names are not interpreted and not mapped to canonical metrics; the supplier's
+  // container shape (array of definitions, list of names, object map, scalar) is reported as
+  // observed, with at most one entry sampled.
+  reports_kpi: {
+    method: "GET",
+    endpointKey: "GET /v2/publishers/reports-kpi (no parameters)",
+    chain: "trackierReportsKpi",
+  },
 });
 
 const PROBE_REGISTRY = Object.freeze({
@@ -938,6 +950,9 @@ export function certificationFailure(base, error, extra = {}, redactValues = [])
  */
 /** The Trackier campaigns bounds: the smallest page the endpoint takes. */
 export const TRACKIER_CERTIFICATION_CAMPAIGN_PARAMS = Object.freeze({ limit: 1, page: 1 });
+
+/** Path segment standing in for a KPI-name key in a map-shaped reports-kpi container. */
+export const KPI_MAP_KEY_PLACEHOLDER = "*";
 
 /** The Trackier conversions bounds. The date pair is added from the service window at call time. */
 export const TRACKIER_CERTIFICATION_CONVERSION_PARAMS = Object.freeze({ limit: 1, page: 1 });
@@ -2803,6 +2818,111 @@ export class NetworkCertificationService {
   }
 
   /**
+   * The Trackier reports-kpi chain: exactly ONE request, no parameters.
+   *
+   * It reuses production's own fetchReportsKpi — same client, same X-Api-Key header, same path,
+   * same report rate limiter, same container lookup — with retries pinned to one attempt, the
+   * probe's own timeout, and preserveShape so the container arrives as the supplier sent it.
+   *
+   * What is reported is the SHAPE, sampled to one entry and wrapped back under the supplier's own
+   * envelope key, so the field dictionary reads exactly as the payload does:
+   *   array of definition objects  -> schema KPI_DEFINITION_ARRAY, paths <key>[], <key>[].<field>
+   *   array of names/values        -> schema KPI_VALUE_ARRAY,      paths <key>, <key>[]
+   *   object map                   -> schema KPI_OBJECT_MAP,       paths <key>.*, <key>.*.<field>
+   *                                   (* stands for one KPI-name key, which is data, not schema)
+   *   scalar                       -> schema KPI_SCALAR,           path <key>
+   *   none of the known keys       -> schema KPI_CONTAINER_NOT_RECOGNISED, top-level envelope
+   *                                   paths only, so the real shape is learned and not hidden
+   * Nothing is fabricated: no object is built around a string, no name is mapped to a metric.
+   *
+   * Zero entries reports OK_NO_ROWS. Only structure leaves this method: no KPI value, account
+   * identifier or configured value can reach the result.
+   */
+  async certifyTrackierReportsKpi({ adapter, key, probe, budgetLeft, sourceObject }) {
+    const base = {
+      network: key,
+      sourceObject,
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+    };
+    const noRows = {
+      ...base,
+      ok: true,
+      statusCategory: "OK_NO_ROWS",
+      fieldCount: 0,
+      schema: "UNKNOWN_NEEDS_LIVE_DATA",
+    };
+    const certified = (sample, schema, extra = {}) => {
+      const fieldPaths = summarisePayloads([sample], extra.summarise ?? {});
+      return {
+        ...base,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: 1,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+        schema,
+        ...(extra.note ? { note: extra.note } : {}),
+      };
+    };
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      const { containerKey, container, envelope } = await adapter.fetchReportsKpi({
+        retries: 1,
+        timeoutMs,
+        preserveShape: true,
+      });
+
+      if (containerKey === null) {
+        // A known key holding null is "200 + empty", not an unrecognised envelope.
+        const envelopeKeys =
+          envelope && typeof envelope === "object" && !Array.isArray(envelope)
+            ? Object.keys(envelope).filter((k) => envelope[k] !== null && envelope[k] !== undefined)
+            : [];
+        if (!envelopeKeys.length) return noRows;
+        // A payload that is not empty but holds none of the keys production reads. Reported at
+        // the top level only, so the real envelope is learned without walking into its values.
+        return certified(envelope, "KPI_CONTAINER_NOT_RECOGNISED", {
+          summarise: { maxDepth: 1 },
+          note: "The payload holds none of the KPI container keys production reads, so production's fetcher would read zero KPIs from it. Top-level envelope paths are reported so the live shape can be learned.",
+        });
+      }
+
+      if (Array.isArray(container)) {
+        if (!container.length) return noRows;
+        const first = container[0];
+        const isDefinition = first !== null && typeof first === "object" && !Array.isArray(first);
+        return certified(
+          { [containerKey]: [first] },
+          isDefinition ? "KPI_DEFINITION_ARRAY" : "KPI_VALUE_ARRAY",
+        );
+      }
+
+      if (container && typeof container === "object") {
+        const entries = Object.entries(container);
+        if (!entries.length) return noRows;
+        // The map's keys ARE the KPI names. One entry's value is sampled under a placeholder
+        // segment so the entry's structure is reported and the name is not.
+        const [, entryValue] = entries[0];
+        return certified({ [containerKey]: { [KPI_MAP_KEY_PLACEHOLDER]: entryValue } }, "KPI_OBJECT_MAP", {
+          note: "The KPI container is an object map, which production's fetcher reads as zero KPIs.",
+        });
+      }
+
+      if (container === "" || container === undefined) return noRows;
+      return certified({ [containerKey]: container }, "KPI_SCALAR", {
+        note: "The KPI container is a scalar, which production's fetcher reads as zero KPIs.",
+      });
+    } catch (error) {
+      return certificationFailure(base, error, {}, redactionValuesFor(adapter));
+    }
+  }
+
+  /**
    * Certifies one network.
    *
    * Probes run in sequence, not in parallel: a burst of concurrent calls against a supplier's API
@@ -3027,6 +3147,13 @@ export class NetworkCertificationService {
       if (probe.chain === "trackierDeals") {
         results.push(
           await this.certifyTrackierDeals({ adapter, key, probe, budgetLeft, sourceObject }),
+        );
+        continue;
+      }
+
+      if (probe.chain === "trackierReportsKpi") {
+        results.push(
+          await this.certifyTrackierReportsKpi({ adapter, key, probe, budgetLeft, sourceObject }),
         );
         continue;
       }

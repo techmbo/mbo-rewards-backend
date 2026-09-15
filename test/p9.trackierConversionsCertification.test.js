@@ -918,18 +918,20 @@ describe("read-only, and the other probes unchanged", () => {
       { coupons: [{ id: "zzcouponzz" }] },
       { deals: [{ id: "zzdealzz" }] },
       moreToCome([CONVERSION]),
+      { allowedKpi: [{ name: "zzkpinamezz" }] },
     ]);
     const out = await serviceWith(adapterWith(spy)).certify("trackier");
     assert.deepEqual(
       out.results.map((r) => r.sourceObject),
-      ["profile", "campaigns", "campaign_detail", "coupons", "deals", "conversions"],
+      ["profile", "campaigns", "campaign_detail", "coupons", "deals", "conversions", "reports_kpi"],
     );
     const conversionCalls = spy.calls.filter((c) => c.path === TRACKIER_CONVERSIONS_PATH);
     assert.equal(conversionCalls.length, 1);
-    assert.equal(spy.calls.length, 7);
+    assert.equal(spy.calls.length, 8);
     assert.ok(out.results.every((r) => r.ok), JSON.stringify(out.results.map((r) => r.statusCategory)));
-    assert.equal(out.results.at(-1).windowPreset, "7d");
-    for (const other of out.results.slice(0, -1)) {
+    const conversions = out.results.find((r) => r.sourceObject === "conversions");
+    assert.equal(conversions.windowPreset, "7d");
+    for (const other of out.results.filter((r) => r.sourceObject !== "conversions")) {
       assert.ok(!Object.hasOwn(other, "windowPreset"), other.sourceObject);
     }
   });

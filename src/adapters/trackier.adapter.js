@@ -370,6 +370,30 @@ export const TRACKIER_CONVERSIONS_PATH = "/v2/publishers/conversions";
  *  request is made, so a caller can tell it from a supplier failure. */
 export const TRACKIER_WINDOW_NOT_ONE_CHUNK = "TRACKIER_WINDOW_NOT_ONE_CHUNK";
 
+/** The reports KPI METADATA endpoint: which KPIs the reports endpoint may be asked for. Not
+ *  performance data. */
+export const TRACKIER_REPORTS_KPI_PATH = "/v2/publishers/reports-kpi";
+
+/** The envelope keys production has always looked under for the KPI container, in order. */
+export const TRACKIER_KPI_CONTAINER_KEYS = Object.freeze(["allowedKpi", "kpis", "kpi"]);
+
+/**
+ * Where the KPI container sits in a reports-kpi payload, and what it is — WITHOUT reshaping it.
+ *
+ * ONE definition, used by production's fetchReportsKpi and by certification alike, so the two can
+ * never disagree about which key is read. Production goes on to keep only an array; certification
+ * keeps whatever shape the supplier sent (array, object map, scalar) and reports that shape.
+ */
+export function locateTrackierKpiContainer(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return { key: null, container: undefined };
+  }
+  for (const key of TRACKIER_KPI_CONTAINER_KEYS) {
+    if (payload[key] !== undefined && payload[key] !== null) return { key, container: payload[key] };
+  }
+  return { key: null, container: undefined };
+}
+
 function unwrapProfile(responseData) {
   if (responseData?.profile && typeof responseData.profile === "object") {
     return responseData.profile;
@@ -576,13 +600,34 @@ export function createTrackierAdapter({
       return rows;
     },
 
-    async fetchReportsKpi() {
-      const response = await requestWithRateLimit(httpClient, trackierReportRateLimiter, () =>
-        httpClient.get("/v2/publishers/reports-kpi"),
+    /**
+     * The reports KPI metadata list.
+     *
+     * options are OPTIONAL and default to production's behaviour, so fetchReportsKpi() — the sync
+     * job's only call shape — is byte-for-byte what it was: one GET, production retries, the KPI
+     * container located by locateTrackierKpiContainer and kept only when it is an array.
+     *
+     * Certification passes retries (one attempt), timeoutMs (its own bound) and preserveShape,
+     * which returns the located container AS THE SUPPLIER SENT IT together with the key it sat
+     * under and the envelope, instead of collapsing a non-array to []. Nothing is fabricated: a
+     * string list stays a string list, an object map stays an object map.
+     */
+    async fetchReportsKpi({ retries, timeoutMs, preserveShape = false } = {}) {
+      const response = await requestWithRateLimit(
+        httpClient,
+        trackierReportRateLimiter,
+        () =>
+          httpClient.get(TRACKIER_REPORTS_KPI_PATH, {
+            ...(timeoutMs ? { timeout: Number(timeoutMs) } : {}),
+          }),
+        retries ? { retries } : {},
       );
       const payload = response.data ?? {};
-      const kpis = payload.allowedKpi ?? payload.kpis ?? payload.kpi ?? [];
-      return Array.isArray(kpis) ? kpis : [];
+      const { key, container } = locateTrackierKpiContainer(payload);
+      if (preserveShape) {
+        return { containerKey: key, container, envelope: payload };
+      }
+      return Array.isArray(container) ? container : [];
     },
 
     async fetchReports(params = {}) {

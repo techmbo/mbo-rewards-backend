@@ -313,6 +313,10 @@ const CATALOG = Object.freeze({
     // A sibling of coupons, and a SEPARATE object: a deal is not automatically a coupon code. The
     // sync job already reads it under this name; it simply had no catalog entry.
     obj({ sourceObject: "deals", label: "Deals", endpoint: "GET /v2/publishers/deals", live: true, entityType: "coupon" }),
+    // Reports KPI METADATA: the KPI names the reports endpoint accepts. Configuration, not
+    // performance data, so it carries no entityType. The sync job already reads it (as
+    // reportsKpi) to learn which KPIs it may request.
+    obj({ sourceObject: "reports_kpi", label: "Reports KPI", endpoint: "GET /v2/publishers/reports-kpi", live: true }),
   ]),
   boostiny: Object.freeze([
     obj({ sourceObject: "campaigns", label: "Campaigns", endpoint: "GET campaigns", live: true, entityType: "campaign" }),
