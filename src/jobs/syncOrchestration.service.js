@@ -50,6 +50,12 @@ export const DEFAULT_LEASE_MS = LOCK_LEASE_MS;
 export const DEFAULT_UNIT_MAX_ATTEMPTS = 3;
 
 /**
+ * Why a unit was terminalised without ever reporting a failure: its worker was killed (a
+ * serverless invocation timeout, a crash, an instance reclaim) and its lease ran out.
+ */
+export const ABANDONED_UNIT_REASON = "worker lease expired before completion";
+
+/**
  * Kinds a worker may execute TODAY. Post-sync stages are planned as non-executable placeholders
  * until their bounded (paged / per-day) implementation exists: the existing global PromotionJob,
  * conversion promotion and 14-day rebuild must never be run as one unit inside an invocation.
@@ -536,6 +542,17 @@ export class SyncOrchestrationService {
     }
     const now = this.now();
     const staleBefore = new Date(now.getTime() - this.leaseMs);
+    const leaseExpired = unit.status === "RUNNING" && unit.startedAt && new Date(unit.startedAt) < staleBefore;
+    // An expired claim IS an abandoned attempt: it was counted when the unit was claimed, and the
+    // worker that took it never reported an outcome. maxAttempts is therefore enforced here as
+    // well as on an explicit failure — otherwise a unit whose worker keeps dying would be
+    // reclaimed for ever and its run could never terminate.
+    if (leaseExpired && (unit.attempt ?? 0) >= (unit.maxAttempts ?? this.maxAttempts)) {
+      const abandoned = await this.abandonStaleUnit(unit.id, { staleBefore });
+      return abandoned.abandoned
+        ? { claimed: false, reason: "abandoned", status: "DEAD_LETTER", unitId, attempt: abandoned.attempt, abandonedReason: ABANDONED_UNIT_REASON }
+        : { claimed: false, reason: "already_claimed" };
+    }
     const previousWorker = unit.status === "RUNNING" ? unit.result?.claim?.workerId ?? null : null;
     const claim = { workerId, claimedAt: now.toISOString(), ...(unit.status === "RUNNING" ? { reclaimedFrom: previousWorker } : {}) };
     const data = { status: "RUNNING", startedAt: now, attempt: { increment: 1 }, result: { ...(unit.result ?? {}), claim } };
@@ -544,6 +561,26 @@ export class SyncOrchestrationService {
     const stale = await this.db.jobRun.updateMany({ where: { id: unitId, status: "RUNNING", startedAt: { lt: staleBefore } }, data });
     if (stale.count === 1) return { claimed: true, reclaimed: true, unitId };
     return { claimed: false, reason: "already_claimed" };
+  }
+
+  /**
+   * Terminalise a unit whose worker died with no attempts left: DEAD_LETTER with a safe reason and
+   * consistent terminal timestamps, then refresh the parent so the existing failure precedence
+   * finalises the run. The transition is conditional on the row still being the same expired
+   * RUNNING claim, so two workers racing on it produce exactly one terminalisation and no extra
+   * attempt. Once terminal the unit is no longer RUNNING, so it no longer holds its account lock.
+   */
+  async abandonStaleUnit(unitId, { staleBefore = null, reason = ABANDONED_UNIT_REASON } = {}) {
+    const cutoff = staleBefore ?? new Date(this.now().getTime() - this.leaseMs);
+    const at = this.now();
+    const { count } = await this.db.jobRun.updateMany({
+      where: { id: unitId, jobName: UNIT_JOB_NAME, status: "RUNNING", startedAt: { lt: cutoff } },
+      data: { status: "DEAD_LETTER", completedAt: at, lastError: reason },
+    });
+    if (count !== 1) return { abandoned: false, reason: "already_terminal" };
+    const unit = await this.db.jobRun.findUnique({ where: { id: unitId } });
+    await this.refreshRun(unit?.correlationId);
+    return { abandoned: true, unitId, attempt: unit?.attempt ?? null, reason };
   }
 
   async completeUnit(unitId, outcome = null) {

@@ -296,31 +296,41 @@ describe("a worker killed mid-unit — what survives, and when it recovers", () 
     resetClock();
   });
 
-  it("GAP: a unit whose worker keeps dying is reclaimed for ever and never dead-letters", async () => {
+  it("a unit whose worker keeps dying dead-letters at maxAttempts instead of being reclaimed for ever", async () => {
     resetClock();
     const h = harness();
     const run = await h.orchestration.createRun({ kind: "full", trigger: "api", options: { promoteAfter: false }, units: [networkUnit("boostiny", "default")] });
     const unit = await claimThenDie(h, run);
 
-    // Five successive timeouts — well past maxAttempts (3).
-    for (let i = 0; i < 5; i += 1) {
+    // Two further timeouts spend the remaining attempts (maxAttempts 3).
+    for (let i = 0; i < 2; i += 1) {
       advance(DEFAULT_LEASE_MS + 1000);
       const reclaim = await h.orchestration.claimUnit(unit.id, { workerId: `killed-${i}` });
-      assert.equal(reclaim.claimed, true, `reclaim ${i} still succeeds`);
+      assert.equal(reclaim.claimed, true, `reclaim ${i} still succeeds while attempts remain`);
     }
+    assert.equal(h.rows.find((r) => r.id === unit.id).attempt, 3, "attempts are spent");
+
+    // The next expiry has no attempt left: an abandoned claim is an abandoned attempt.
+    advance(DEFAULT_LEASE_MS + 1000);
+    const refused = await h.orchestration.claimUnit(unit.id, { workerId: "killed-again" });
+    assert.equal(refused.claimed, false);
+    assert.equal(refused.reason, "abandoned");
+
     const row = h.rows.find((r) => r.id === unit.id);
-    assert.equal(row.attempt, 6, "attempts keep climbing");
-    assert.ok(row.attempt > row.maxAttempts, "past maxAttempts…");
-    assert.equal(row.status, "RUNNING", "…yet the unit is still RUNNING, never DEAD_LETTER");
-    assert.equal(h.rows.find((r) => r.id === run.id).status, "RUNNING", "so the parent never terminates either");
-    // maxAttempts is only enforced on an EXPLICIT failure, which a killed invocation never reports.
+    assert.equal(row.attempt, 3, "terminalising does not spend another attempt");
+    assert.equal(row.status, "DEAD_LETTER");
+    assert.ok(row.completedAt, "terminal timestamp set");
+    assert.equal(h.rows.find((r) => r.id === run.id).status, "FAILED", "the parent terminates too");
+
     const status = await h.status();
-    assert.equal(status.body.run.failedUnits, 0);
-    assert.equal(status.body.run.status, "running");
+    assert.equal(status.body.run.failedUnits, 1);
+    assert.equal(status.body.run.status, "failed");
+    assert.equal(status.body.units[0].status, "DEAD_LETTER");
+    assert.equal(status.body.units[0].staleClaim, false, "a terminal unit holds no lease");
     resetClock();
   });
 
-  it("an explicitly failing unit still dead-letters normally — the gap is specific to silent death", async () => {
+  it("an explicitly failing unit still dead-letters on its own error, unchanged", async () => {
     resetClock();
     const h = harness();
     const run = await h.orchestration.createRun({ kind: "full", trigger: "api", options: { promoteAfter: false }, units: [networkUnit("boostiny", "default")] });

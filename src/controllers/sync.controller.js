@@ -333,6 +333,21 @@ export async function triggerSyncWorker(req, res, next) {
 
     const workerId = `worker:${process.env.VERCEL_DEPLOYMENT_ID || process.pid}:${Date.now()}`;
     const claim = await orchestration.claimUnit(unit.id, { workerId });
+    if (!claim.claimed && claim.reason === "abandoned") {
+      // Its previous worker was killed and it had no attempts left: the unit is now terminal and
+      // no supplier work runs for it. The next invocation picks up the following unit.
+      const syncStatus = await orchestration.describeRun(run.id);
+      return res.status(200).json({
+        ok: false,
+        worked: false,
+        status: "unit_abandoned",
+        message: "The next unit had no attempts left after its worker was lost; it is now terminal.",
+        reason: claim.abandonedReason ?? null,
+        runId: run.id,
+        unit: { unitId: unit.id, sequence: descriptor.sequence ?? null, kind: descriptor.kind ?? null, platform: descriptor.platform ?? null, accountLabel: descriptor.accountLabel ?? null, sourceObject: descriptor.sourceObject ?? null, status: "DEAD_LETTER", attempt: claim.attempt ?? null },
+        syncStatus,
+      });
+    }
     if (!claim.claimed) {
       return res.status(409).json({
         ok: false,
