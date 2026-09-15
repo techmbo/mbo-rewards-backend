@@ -273,8 +273,25 @@ async function fetchPageNumberPaginated(httpClient, endpoint, baseParams = {}, o
   return rows;
 }
 
+/**
+ * The page-TOKEN pager, shared by coupons and deals.
+ *
+ * singlePage, retries and timeoutMs are OPTIONAL and default to production's behaviour, so a call
+ * that passes none is byte-for-byte what it was.
+ *
+ * singlePage breaks BEFORE the response is read for a next token, not after. That ordering is the
+ * point: the instruction is not merely "stop after one page" but "do not follow the page token at
+ * all", and a probe that extracted the token first would have read a cursor it has no business
+ * holding. Nothing here can walk to a second page.
+ */
 async function fetchPageTokenPaginated(httpClient, endpoint, baseParams = {}, options = {}) {
-  const { rateLimiter = trackierCampaignRateLimiter, collectionKeys = [] } = options;
+  const {
+    rateLimiter = trackierCampaignRateLimiter,
+    collectionKeys = [],
+    singlePage = false,
+    retries,
+    timeoutMs,
+  } = options;
 
   const rows = [];
   let pageToken = baseParams.pageToken ?? null;
@@ -285,12 +302,21 @@ async function fetchPageTokenPaginated(httpClient, endpoint, baseParams = {}, op
     const params = { ...staticParams };
     if (pageToken) params.pageToken = pageToken;
 
-    const response = await requestWithRateLimit(httpClient, rateLimiter, () =>
-      httpClient.get(endpoint, { params }),
+    const response = await requestWithRateLimit(
+      httpClient,
+      rateLimiter,
+      () =>
+        httpClient.get(endpoint, {
+          params,
+          ...(timeoutMs ? { timeout: Number(timeoutMs) } : {}),
+        }),
+      retries ? { retries } : {},
     );
 
     const pageRows = extractRows(response.data, collectionKeys);
     rows.push(...pageRows);
+
+    if (singlePage) break;
 
     const nextToken = extractPageToken(response.data);
     if (!nextToken || nextToken === pageToken || pageRows.length === 0) break;
@@ -309,6 +335,9 @@ export const TRACKIER_CAMPAIGNS_PATH = "/v2/publisher/campaigns";
 
 /** One campaign's detail, by id. The id is appended; the prefix is the whole of the constant. */
 export const TRACKIER_CAMPAIGN_DETAIL_PATH_PREFIX = "/v2/publisher/campaign/";
+
+/** The publisher coupons endpoint. Plural "publishers" here, like the profile. */
+export const TRACKIER_COUPONS_PATH = "/v2/publishers/coupons";
 
 function unwrapProfile(responseData) {
   if (responseData?.profile && typeof responseData.profile === "object") {
@@ -411,8 +440,11 @@ export function createTrackierAdapter({
       ).then((res) => getResponseBody(res.data));
     },
 
-    fetchCoupons(params = {}) {
-      return fetchPageTokenPaginated(httpClient, "/v2/publishers/coupons", params, {
+    fetchCoupons(params = {}, options = {}) {
+      return fetchPageTokenPaginated(httpClient, TRACKIER_COUPONS_PATH, params, {
+        // options first: the extractor and the limiter are the adapter's and cannot be repointed
+        // by a caller, however the call is made.
+        ...options,
         collectionKeys: ["coupons"],
         rateLimiter: trackierCampaignRateLimiter,
       });

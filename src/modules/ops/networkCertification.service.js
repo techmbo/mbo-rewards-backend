@@ -656,6 +656,22 @@ const TRACKIER_PROBES = Object.freeze({
     endpointKey: "GET /v2/publisher/campaign/{discovered-id}",
     chain: "trackierCampaignDetail",
   },
+  // The coupons list, one page and no page token.
+  //
+  // NO PAGE-SIZE PARAMETER IS SENT. Production reaches this endpoint through the page-TOKEN pager
+  // and has never sent a limit here, and no documented page-size bound for it is evidenced in this
+  // repo — so inventing one would be sending a parameter the endpoint may not publish. The hard
+  // bound is the request count: one, with the page token never read, let alone followed.
+  //
+  // COUPON_ROW IS NOT COUPON_CODE_PRESENT. A promotional row is valid with no code at all — a code
+  // appears only where the advertiser requires one, and it may sit nested under coupons[].code
+  // rather than on the row. Certification reports the row's SHAPE and never a code, campaign id or
+  // name, advertiser, URL or description.
+  coupons: {
+    method: "GET",
+    endpointKey: "GET /v2/publishers/coupons (one page, no page token)",
+    chain: "trackierCoupons",
+  },
 });
 
 const PROBE_REGISTRY = Object.freeze({
@@ -2540,6 +2556,67 @@ export class NetworkCertificationService {
   }
 
   /**
+   * The Trackier coupons chain: exactly ONE request.
+   *
+   * It reuses production's own fetchCoupons — same client, same X-Api-Key header, same path, same
+   * rate limiter, same coupons row extraction — with three bounds production does not set:
+   * singlePage, retries pinned to one attempt where production allows six, and the probe's own
+   * timeout.
+   *
+   * singlePage breaks before the response is read for a next page token, so the cursor is never
+   * extracted and cannot be followed. No page-size parameter is sent, because none is evidenced
+   * for this endpoint; the request count is the bound.
+   *
+   * Zero coupons reports OK_NO_ROWS. It is not evidence of a relationship or account-state
+   * blocker, and this phase does not revisit relationship state at all.
+   *
+   * Only structure leaves this method: no coupon code, campaign id or name, advertiser, URL or
+   * description text can reach the result.
+   */
+  async certifyTrackierCoupons({ adapter, key, probe, budgetLeft, sourceObject }) {
+    const base = {
+      network: key,
+      sourceObject,
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+    };
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      // One row is all a field dictionary needs. No supplier-side limit is sent, so this local
+      // bound is the only one — which is why it is applied to whatever the page returned.
+      const rows = asRows(
+        await adapter.fetchCoupons({}, { singlePage: true, retries: 1, timeoutMs }),
+      ).slice(0, 1);
+
+      if (!rows.length) {
+        return {
+          ...base,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        };
+      }
+
+      const fieldPaths = summarisePayloads(rows);
+      return {
+        ...base,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+      };
+    } catch (error) {
+      return certificationFailure(base, error, {}, redactionValuesFor(adapter));
+    }
+  }
+
+  /**
    * Certifies one network.
    *
    * Probes run in sequence, not in parallel: a burst of concurrent calls against a supplier's API
@@ -2742,6 +2819,13 @@ export class NetworkCertificationService {
             // The service's own window, computed from the frozen preset. Never a caller's dates.
             window: { ...ctx.window, preset: resolvedWindowPreset },
           }),
+        );
+        continue;
+      }
+
+      if (probe.chain === "trackierCoupons") {
+        results.push(
+          await this.certifyTrackierCoupons({ adapter, key, probe, budgetLeft, sourceObject }),
         );
         continue;
       }
