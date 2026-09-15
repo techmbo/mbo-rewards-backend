@@ -205,6 +205,30 @@ function qualifierValues(list) {
 const BOOSTINY_OPERATION_MAP = Object.freeze({ contains: "EQ", in: "EQ", equals: "EQ", eq: "EQ", "=": "EQ" });
 
 /**
+ * Certified Boostiny condition semantics. Certified on the production Bloomingdales payload
+ * (supplier campaign 61): `dimension: "country"` with `contains` over a list, or `equals` over one
+ * value, means "the transaction's country is one of the listed values" — exactly what the matcher
+ * evaluates for same-dimension COUNTRY / EQ alternatives. Nothing else is certified: any other
+ * dimension (business-category included) or operation stays unverified and gates the rule.
+ */
+const BOOSTINY_CERTIFIED_DIMENSIONS = new Set(["country"]);
+const BOOSTINY_CERTIFIED_OPERATIONS = new Set(["contains", "in", "equals", "eq", "="]);
+const BOOSTINY_COUNTRY_CERTIFICATION = "boostiny_country_semantics_certified";
+
+/**
+ * Whether ONE normalized row from a Boostiny group condition has certified semantics: it must be a
+ * canonical COUNTRY row produced from the certified dimension, with a certified operation that
+ * normalized to EQ, from the Boostiny { dimension, operation, value } shape. Anything else — an
+ * unmapped dimension, an unknown operation, a generic-shaped condition — is not certified.
+ */
+function boostinyConditionCertified(condition, { original, sourceDimension, sourceOperation }) {
+  if (!original || typeof original !== "object") return false;
+  if (!sourceDimension || !BOOSTINY_CERTIFIED_DIMENSIONS.has(sourceDimension.toLowerCase())) return false;
+  if (!sourceOperation || !BOOSTINY_CERTIFIED_OPERATIONS.has(sourceOperation.toLowerCase())) return false;
+  return condition?.conditionType === "COUNTRY" && condition?.operator === "EQ";
+}
+
+/**
  * Adapt ONE Boostiny group condition — { dimension, operation, value } — to the key names the
  * shared normalizer reads (type / operator / value). `dimension` becomes the source dimension, so
  * "country" reaches the canonical COUNTRY map while an unmapped dimension such as
@@ -234,19 +258,32 @@ export function boostinyGroupConditions(group = {}) {
         // Adapt the Boostiny { dimension, operation, value } shape for the shared normalizer, then
         // re-attach the ORIGINAL supplier object as the evidence — never the adapted one.
         const adapted = adaptBoostinyCondition(original);
-        return conditionsFromSourceEntry({ conditions: [adapted] }).map((condition) => ({
-          ...condition,
-          sourceConditionValue: original,
-          metadata: {
-            ...(condition.metadata ?? {}),
-            sourceCondition: original,
-            sourceConditionIndex,
-            sourceDimension: typeof original === "object" ? text(original.dimension) : null,
-            sourceOperation: typeof original === "object" ? text(original.operation) : null,
-            matcherReady: false,
-            reason: "boostiny_condition_semantics_not_verified_live",
-          },
-        }));
+        const sourceDimension = typeof original === "object" ? text(original.dimension) : null;
+        const sourceOperation = typeof original === "object" ? text(original.operation) : null;
+        const lineage = { sourceCondition: original, sourceConditionIndex, sourceDimension, sourceOperation };
+        const rows = conditionsFromSourceEntry({ conditions: [adapted] });
+        if (rows.length === 0) {
+          // A condition that yields no value (e.g. an empty list) must not vanish into an
+          // unconditioned rule: keep it as an unverified source condition so the rule fails closed.
+          return [{
+            conditionType: "OTHER_SOURCE_CONDITION",
+            operator: typeof adapted === "object" && adapted?.operator ? adapted.operator : "EQ",
+            value: canonicalJson(original),
+            sourceConditionType: sourceDimension ?? "conditions",
+            sourceConditionValue: original,
+            metadata: { ...lineage, emptyValue: true, matcherReady: false, reason: "boostiny_condition_semantics_not_verified_live" },
+          }];
+        }
+        return rows.map((condition) => {
+          const certified = boostinyConditionCertified(condition, { original, sourceDimension, sourceOperation });
+          return {
+            ...condition,
+            sourceConditionValue: original,
+            metadata: certified
+              ? { ...(condition.metadata ?? {}), ...lineage, matcherReady: true, semanticsVerified: true, verifiedBy: BOOSTINY_COUNTRY_CERTIFICATION }
+              : { ...(condition.metadata ?? {}), ...lineage, matcherReady: false, reason: "boostiny_condition_semantics_not_verified_live" },
+          };
+        });
       })
     : conditionsFromSourceEntry({ conditions: group.conditions ?? null }).map((condition) => ({
         ...condition,
@@ -355,7 +392,8 @@ export function mapBoostinyPayoutGroupCandidates(raw = {}, context = {}) {
       if (kind === "UNKNOWN") reviewReasons.push(groupType ? "group_type_semantics_unknown" : "group_type_missing");
       if (value == null) reviewReasons.push("group_value_missing");
       if (kind === "FIXED" && !currency) reviewReasons.push("fixed_payout_currency_missing");
-      if (!isEmpty(group.conditions)) reviewReasons.push("boostiny_condition_semantics_not_verified_live");
+      if (conditions.some((condition) => condition.metadata?.reason === "boostiny_condition_semantics_not_verified_live"))
+        reviewReasons.push("boostiny_condition_semantics_not_verified_live");
       if (!isEmpty(group.product_categories)) reviewReasons.push("boostiny_product_category_semantics_not_verified_live");
       if (!isEmpty(group.coupons)) reviewReasons.push("boostiny_coupon_qualifier_semantics_not_verified_live");
       if (!isEmpty(group.capping)) reviewReasons.push("boostiny_capping_semantics_not_verified_live");
