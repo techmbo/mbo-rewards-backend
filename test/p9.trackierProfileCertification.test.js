@@ -130,12 +130,12 @@ describe("Trackier is registered in the certification framework", () => {
     assert.ok(listProbeNetworks().includes("trackier"));
   });
 
-  it("exposes profile, and nothing else yet", () => {
-    assert.deepEqual(listProbeSourceObjects("trackier"), ["profile"]);
+  it("exposes profile alongside the objects certified after it", () => {
+    assert.deepEqual(listProbeSourceObjects("trackier").sort(), ["campaigns", "profile"]);
   });
 
   it("adds no probe for the objects this phase defers", () => {
-    for (const notYet of ["campaigns", "conversions", "tracking", "finance", "coupons"]) {
+    for (const notYet of ["conversions", "tracking", "finance", "coupons"]) {
       assert.ok(!listProbeSourceObjects("trackier").includes(notYet), notYet);
     }
   });

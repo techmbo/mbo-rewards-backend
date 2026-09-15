@@ -284,8 +284,14 @@ describe("Partnerize certification — the request the sampler actually makes", 
     ]) {
       assert.ok(!body.includes(sync), `sampler must not call ${sync}`);
     }
-    // And the service only ever asks for the certification sampler.
-    assert.ok(!serviceSource.includes("fetchCampaigns("), "service must not call a sync fetcher");
+    // And the service asks Partnerize only through its certification sampler. It does call
+    // Trackier's production fetchCampaigns — deliberately, to avoid a parallel client — but never
+    // unbounded, and never for Partnerize.
+    const partnerizeChain = serviceSource
+      .split("async certifyPartnerizeCampaigns")[1]
+      .split("async certifyPartnerizeDatedSample")[0];
+    assert.ok(!partnerizeChain.includes("fetchCampaigns("), "Partnerize must use its sampler");
+    assert.equal(serviceSource.split("adapter.fetchCampaigns(").length - 1, 1, "one call site");
   });
 
   it("9 — no fan-out: one status, one publisher, one request", () => {

@@ -755,10 +755,22 @@ describe("bounded sampling — the 300s hang", () => {
       "src/modules/ops/networkCertification.service.js",
       "utf8",
     );
-    for (const sync of ["fetchCampaigns(", "fetchVoucherCodes(", "fetchConversions(", "fetchPayments(", "fetchInvoices(", "fetchProductFeeds(", "fetchAll("]) {
+    for (const sync of ["fetchVoucherCodes(", "fetchConversions(", "fetchPayments(", "fetchInvoices(", "fetchProductFeeds(", "fetchAll("]) {
       assert.ok(!serviceSource.includes(sync), `service must not call ${sync}`);
     }
     assert.ok(serviceSource.includes("fetchCertificationSample"));
+
+    // fetchCampaigns is the one exception, and only because Trackier's probe reuses production's
+    // fetcher rather than adding a parallel client. The rule it must still obey is the one the
+    // blanket ban stood for: certification never runs an UNBOUNDED production fetcher. Every call
+    // the service makes therefore carries all three bounds.
+    const campaignCalls = serviceSource.split("adapter.fetchCampaigns(").slice(1);
+    assert.equal(campaignCalls.length, 1, "only the Trackier chain may call it");
+    const call = campaignCalls[0].slice(0, campaignCalls[0].indexOf("),\n"));
+    for (const bound of ["singlePage: true", "retries: 1", "timeoutMs"]) {
+      assert.ok(call.includes(bound), bound);
+    }
+    assert.ok(call.includes("TRACKIER_CERTIFICATION_CAMPAIGN_PARAMS"), "and the supplier bounds");
   });
 
   it("covers every sampleable Optimise source object", () => {

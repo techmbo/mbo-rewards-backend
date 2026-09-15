@@ -617,6 +617,26 @@ const TRACKIER_PROBES = Object.freeze({
     endpointKey: "GET /v2/publishers/profile",
     chain: "trackierProfile",
   },
+  // The campaigns list, at the smallest page the endpoint takes.
+  //
+  // Production PAGES this endpoint, and at limit=1 the pager's own stop condition would not fire:
+  // a one-row page IS a full page, so rowsCount >= pageSize keeps it asking for page 2, 3, 4. The
+  // probe therefore stops after the first response rather than trusting the loop to stop.
+  //
+  // TWO STATUSES, NOT ONE. A Trackier campaign row can carry both the supplier's campaign status
+  // and this publisher's application/relationship status. CAMPAIGN_STATUS is not
+  // PUBLISHER_APPLICATION_STATUS, and CAMPAIGN_AVAILABLE is not CAMPAIGN_JOINED — so this phase
+  // reports the supplier's field NAMES as they arrive and invents no joined, approved, available
+  // or rejected value that is not in the row. The row structure comes first; relationship mapping
+  // comes after it is known.
+  //
+  // Certification reports the row's SHAPE and never a campaign id or name, advertiser or merchant
+  // name, tracking, landing or logo URL, commission value or application identifier.
+  campaigns: {
+    method: "GET",
+    endpointKey: "GET /v2/publisher/campaigns (limit=1, page=1)",
+    chain: "trackierCampaigns",
+  },
 });
 
 const PROBE_REGISTRY = Object.freeze({
@@ -849,6 +869,9 @@ export function certificationFailure(base, error, extra = {}, redactValues = [])
  * contract is pinned in the first place. Ninety days is the ceiling because a wider lookback is a
  * bigger ask of the supplier for no extra certification value: the probe reads one row either way.
  */
+/** The Trackier campaigns bounds: the smallest page the endpoint takes. */
+export const TRACKIER_CERTIFICATION_CAMPAIGN_PARAMS = Object.freeze({ limit: 1, page: 1 });
+
 export const WINDOW_PRESETS = Object.freeze({ "7d": 7, "30d": 30, "90d": 90 });
 export const DEFAULT_WINDOW_PRESET = "7d";
 
@@ -2276,6 +2299,71 @@ export class NetworkCertificationService {
   }
 
   /**
+   * The Trackier campaigns chain: exactly ONE request.
+   *
+   * It reuses production's own fetchCampaigns — same client, same X-Api-Key header, same path,
+   * same rate limiter, same row extraction — with three bounds that production does not set:
+   * singlePage, so the pager cannot enter a second iteration; retries pinned to one attempt where
+   * production allows six; and the probe's own timeout.
+   *
+   * singlePage is load-bearing rather than merely tidy. At limit=1 a one-row page is a FULL page,
+   * so the pager's own heuristic would conclude there is more and ask for page 2 — a bounded probe
+   * cannot rely on the loop choosing to stop.
+   *
+   * Zero campaigns reports OK_NO_ROWS. It is not evidence of an account-state blocker: this probe
+   * asks for one row of whatever the endpoint lists, and an empty list is an empty list.
+   *
+   * Only structure leaves this method. summarisePayloads reports paths, types and categories and
+   * never a value, so no campaign id or name, merchant name, URL, commission or application
+   * identifier can reach the result.
+   */
+  async certifyTrackierCampaigns({ adapter, key, probe, budgetLeft, sourceObject }) {
+    const base = {
+      network: key,
+      sourceObject,
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+    };
+
+    const timeoutMs = Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    try {
+      // One row is all a field dictionary needs. The supplier bound is limit=1; this is the
+      // second, independent bound, in case the supplier ignores it.
+      const rows = asRows(
+        await adapter.fetchCampaigns(
+          { ...TRACKIER_CERTIFICATION_CAMPAIGN_PARAMS },
+          { singlePage: true, retries: 1, timeoutMs },
+        ),
+      ).slice(0, 1);
+
+      if (!rows.length) {
+        return {
+          ...base,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        };
+      }
+
+      const fieldPaths = summarisePayloads(rows);
+      return {
+        ...base,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+      };
+    } catch (error) {
+      return certificationFailure(base, error, {}, redactionValuesFor(adapter));
+    }
+  }
+
+  /**
    * Certifies one network.
    *
    * Probes run in sequence, not in parallel: a burst of concurrent calls against a supplier's API
@@ -2478,6 +2566,13 @@ export class NetworkCertificationService {
             // The service's own window, computed from the frozen preset. Never a caller's dates.
             window: { ...ctx.window, preset: resolvedWindowPreset },
           }),
+        );
+        continue;
+      }
+
+      if (probe.chain === "trackierCampaigns") {
+        results.push(
+          await this.certifyTrackierCampaigns({ adapter, key, probe, budgetLeft, sourceObject }),
         );
         continue;
       }

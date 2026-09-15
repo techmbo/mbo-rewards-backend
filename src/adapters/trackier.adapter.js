@@ -174,7 +174,30 @@ async function requestWithRateLimit(httpClient, rateLimiter, requestFn, retryOpt
   }
 }
 
-async function fetchCampaignPages(httpClient, endpoint, baseParams = {}) {
+/**
+ * The campaign pager.
+ *
+ * All three options are OPTIONAL and default to production's behaviour, so a call that passes none
+ * is byte-for-byte what it was:
+ *
+ *   singlePage  stops after the FIRST response, before hasMoreCampaignPages is consulted at all.
+ *               That matters more here than a "one page" flag usually would: at limit=1 a one-row
+ *               page IS a full page, so the normal heuristic (rowsCount >= pageSize) would keep
+ *               asking for page 2, 3, 4... A bounded probe cannot rely on the loop deciding to
+ *               stop; it must not enter a second iteration at all.
+ *   retries     pins the attempt count. Production allows six.
+ *   timeoutMs   bounds the one request inside the caller's own budget.
+ *
+ * Everything else — the endpoint, the X-Api-Key header on the shared client, the rate limiter and
+ * the campaigns row extraction — stays here, in production's one place, rather than being
+ * duplicated into a parallel client.
+ */
+async function fetchCampaignPages(
+  httpClient,
+  endpoint,
+  baseParams = {},
+  { singlePage = false, retries, timeoutMs } = {},
+) {
   const rows = [];
   let page = Number(baseParams.page ?? 1);
   const limit = Number(baseParams.limit ?? TRACKIER_PAGE_LIMIT);
@@ -183,18 +206,25 @@ async function fetchCampaignPages(httpClient, endpoint, baseParams = {}) {
   delete staticParams.limit;
 
   for (;;) {
-    const response = await requestWithRateLimit(httpClient, trackierCampaignRateLimiter, () =>
-      httpClient.get(endpoint, {
-        params: {
-          ...staticParams,
-          page,
-          limit,
-        },
-      }),
+    const response = await requestWithRateLimit(
+      httpClient,
+      trackierCampaignRateLimiter,
+      () =>
+        httpClient.get(endpoint, {
+          params: {
+            ...staticParams,
+            page,
+            limit,
+          },
+          ...(timeoutMs ? { timeout: Number(timeoutMs) } : {}),
+        }),
+      retries ? { retries } : {},
     );
 
     const pageRows = extractRows(response.data, ["campaigns"]);
     rows.push(...pageRows);
+
+    if (singlePage) break;
 
     if (!hasMoreCampaignPages(response.data, page, limit, pageRows.length)) {
       break;
@@ -273,6 +303,10 @@ async function fetchPageTokenPaginated(httpClient, endpoint, baseParams = {}, op
 /** The publisher profile endpoint. One constant, so the probe and production cannot drift. */
 export const TRACKIER_PROFILE_PATH = "/v2/publishers/profile";
 
+/** The publisher campaigns list endpoint. Note the SINGULAR "publisher" here, against the plural
+ *  "publishers" the profile uses — Trackier's own spelling, on both. */
+export const TRACKIER_CAMPAIGNS_PATH = "/v2/publisher/campaigns";
+
 function unwrapProfile(responseData) {
   if (responseData?.profile && typeof responseData.profile === "object") {
     return responseData.profile;
@@ -345,12 +379,12 @@ export function createTrackierAdapter({
       ).then((res) => getResponseBody(res.data));
     },
 
-    fetchCampaigns(params = {}) {
+    fetchCampaigns(params = {}, options = {}) {
       const query = {
         limit: TRACKIER_PAGE_LIMIT,
         ...params,
       };
-      return fetchCampaignPages(httpClient, "/v2/publisher/campaigns", query);
+      return fetchCampaignPages(httpClient, TRACKIER_CAMPAIGNS_PATH, query, options);
     },
 
     fetchCampaignDetail(campaignId) {
