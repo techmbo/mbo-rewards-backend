@@ -40,6 +40,34 @@ function startBackgroundSync(jobName, syncFn, res, { trigger = "api" } = {}) {
   });
 }
 
+/**
+ * Run a sync to completion inside the request and answer only when it has finished. On serverless
+ * hosting an un-awaited promise does not survive the HTTP response (the instance is frozen once
+ * the response is sent), so a manual per-network sync must be awaited. Same slot and status
+ * bookkeeping as every other sync (runExclusiveSync); 200 on success/partial, 409 when the
+ * exclusive slot is already held, 500 with the sync's own error message when the run fails.
+ */
+export async function respondWithExclusiveSync({ jobName, syncFn, res, trigger = "api" }) {
+  const run = await runExclusiveSync(jobName, syncFn, { trigger });
+  if (!run.started) {
+    return res.status(409).json({ ok: false, status: "running", message: run.reason, syncStatus: run.status });
+  }
+  if (run.error) {
+    return res.status(500).json({
+      ok: false,
+      status: run.status?.status ?? "failed",
+      message: getSyncErrorMessage(run.error),
+      syncStatus: run.status,
+    });
+  }
+  return res.status(200).json({
+    ok: true,
+    status: run.status?.status ?? "success",
+    message: "Sync completed.",
+    syncStatus: run.status,
+  });
+}
+
 export function getSyncStatusHandler(_req, res) {
   res.set("Cache-Control", "no-store");
   res.json({
@@ -73,17 +101,18 @@ export async function triggerSyncPlatform(req, res, next) {
     const jobName = accountLabel
       ? `sync:${platform}:${accountLabel}${sourceObject ? `:${sourceObject}` : ""}`
       : `sync:${platform}${sourceObject ? `:${sourceObject}` : ""}`;
-    return startBackgroundSync(
+    // Awaited: the manual per-network sync finishes before the response (see respondWithExclusiveSync).
+    return respondWithExclusiveSync({
       jobName,
-      () =>
+      syncFn: () =>
         syncPlatformAccount(platform, accountLabel || undefined, {
           fastSync,
           promoteAfter: true,
           sourceObject: sourceObject || undefined,
         }),
       res,
-      { trigger: "api" },
-    );
+      trigger: "api",
+    });
   } catch (error) {
     next(formatSyncError(error));
   }

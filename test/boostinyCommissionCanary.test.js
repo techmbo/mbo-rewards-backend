@@ -453,9 +453,10 @@ describe("admin-only entrypoint", () => {
     assert.match(handler, /message: getSyncErrorMessage\(run\.error\),/);
     assert.match(handler, /return res\.status\(200\)\.json\(\{\s*ok: true,/);
     assert.match(handler, /syncStatus: run\.status,/);
-    const others = controller.replace(handler, "");
-    assert.ok(!others.includes("runExclusiveSync("), "every other sync route keeps its background launcher");
-    assert.match(others, /function startBackgroundSync\(/);
+    // The full-sync route keeps its background launcher; the canary's own awaited block is intact.
+    const all = controller.split("export async function triggerSyncAll")[1].split("\nexport ")[0];
+    assert.match(all, /return startBackgroundSync\(/);
+    assert.match(controller, /function startBackgroundSync\(/);
     for (const forbidden of ["rawData", "req.body?.campaigns", "req.body?.payouts", "prisma"]) assert.ok(!handler.includes(forbidden), forbidden);
   });
 });
