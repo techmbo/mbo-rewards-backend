@@ -307,6 +307,9 @@ export const TRACKIER_PROFILE_PATH = "/v2/publishers/profile";
  *  "publishers" the profile uses — Trackier's own spelling, on both. */
 export const TRACKIER_CAMPAIGNS_PATH = "/v2/publisher/campaigns";
 
+/** One campaign's detail, by id. The id is appended; the prefix is the whole of the constant. */
+export const TRACKIER_CAMPAIGN_DETAIL_PATH_PREFIX = "/v2/publisher/campaign/";
+
 function unwrapProfile(responseData) {
   if (responseData?.profile && typeof responseData.profile === "object") {
     return responseData.profile;
@@ -387,9 +390,24 @@ export function createTrackierAdapter({
       return fetchCampaignPages(httpClient, TRACKIER_CAMPAIGNS_PATH, query, options);
     },
 
-    fetchCampaignDetail(campaignId) {
-      return requestWithRateLimit(httpClient, trackierCampaignRateLimiter, () =>
-        httpClient.get(`/v2/publisher/campaign/${campaignId}`),
+    /**
+     * One campaign's detail.
+     *
+     * retries and timeoutMs are OPTIONAL and default to production's behaviour, so
+     * fetchCampaignDetail(id) — production's only call shape — is byte-for-byte what it was.
+     * Certification pins retries to a single attempt where production allows six, and bounds the
+     * request inside its own budget.
+     */
+    fetchCampaignDetail(campaignId, { retries, timeoutMs } = {}) {
+      return requestWithRateLimit(
+        httpClient,
+        trackierCampaignRateLimiter,
+        () =>
+          httpClient.get(
+            `${TRACKIER_CAMPAIGN_DETAIL_PATH_PREFIX}${campaignId}`,
+            timeoutMs ? { timeout: Number(timeoutMs) } : {},
+          ),
+        retries ? { retries } : {},
       ).then((res) => getResponseBody(res.data));
     },
 

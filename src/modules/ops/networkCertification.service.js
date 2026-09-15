@@ -637,6 +637,25 @@ const TRACKIER_PROBES = Object.freeze({
     endpointKey: "GET /v2/publisher/campaigns (limit=1, page=1)",
     chain: "trackierCampaigns",
   },
+  // One campaign's detail, reached through a DISCOVERED id.
+  //
+  // The endpoint is campaign-scoped, so it needs an id, and that id is read out of one bounded
+  // campaigns sample — never accepted from a caller. A caller-supplied campaign, app or advertiser
+  // id would let the probe be pointed at a resource this publisher was never offered.
+  //
+  // TWO requests at most, and often one: with no campaign row, or a row carrying no usable id,
+  // the chain reports SKIPPED_NO_CAMPAIGN_SCOPE and makes NO second request.
+  //
+  // WHY IT EXISTS. The live campaigns list showed 53 fields and none of them a relationship state
+  // — no application_status, no applicationStatus, no status. Detail is where that evidence would
+  // be if Trackier exposes it at all. CAMPAIGN_STATUS is not PUBLISHER_RELATIONSHIP_STATUS, and
+  // app_id/app_name are neither, so nothing is classified joined, available, pending or rejected
+  // without a supplier field saying so.
+  campaign_detail: {
+    method: "GET",
+    endpointKey: "GET /v2/publisher/campaign/{discovered-id}",
+    chain: "trackierCampaignDetail",
+  },
 });
 
 const PROBE_REGISTRY = Object.freeze({
@@ -933,6 +952,47 @@ function firstUsableId(row, keys) {
   }
   return null;
 }
+
+/**
+ * The campaign id a Trackier campaign row carries, for the detail request.
+ *
+ * DELIBERATELY NOT app_id. app_id and app_name identify the ADVERTISER'S APP, not the campaign,
+ * and they are not relationship state either — a row carrying them says nothing about whether this
+ * publisher has joined anything. Reading one here would point the detail request at the wrong
+ * resource and quietly dress it up as a campaign.
+ *
+ * firstUsableId also refuses any value carrying path or query syntax, which matters here because
+ * the id is interpolated into a path segment.
+ */
+export function trackierCampaignIdOf(row = {}) {
+  return firstUsableId(row, ["id", "_id", "campaignId", "campaign_id"]);
+}
+
+/**
+ * The paths that would COUNT as direct supplier evidence of a publisher relationship state.
+ *
+ * A SEARCH LIST, never a mapping. Nothing here is renamed, aliased or turned into a canonical
+ * joined/available/pending/rejected value; the list exists only so "the detail response contains
+ * no relationship field" is a claim with a definition behind it rather than an impression. A match
+ * reports PRESENT_NEEDS_MAPPING — that the evidence exists and has not been interpreted — and no
+ * match reports UNKNOWN_FROM_CURRENT_API_SHAPE.
+ *
+ * app_id and app_name are deliberately absent: CAMPAIGN_STATUS is not
+ * PUBLISHER_RELATIONSHIP_STATUS, and an app identifier is neither.
+ */
+export const TRACKIER_RELATIONSHIP_EVIDENCE_PATHS = Object.freeze([
+  "application_status",
+  "applicationStatus",
+  "approval_status",
+  "approvalStatus",
+  "publisher_status",
+  "publisherStatus",
+  "publisherApproval",
+  "approved",
+  "isApproved",
+  "joined",
+  "status",
+]);
 
 /** GET /campaigns/{productId} — campaign detail. Never id, never campaignId. */
 export function campaignDetailIdOf(row = {}) {
@@ -2364,6 +2424,122 @@ export class NetworkCertificationService {
   }
 
   /**
+   * The Trackier campaign-detail chain: at most TWO requests, and often one.
+   *
+   * The endpoint is campaign-scoped, so it needs an id. That id is DISCOVERED — one bounded
+   * campaigns sample, one row, and the id read out of it by trackierCampaignIdOf. It is never
+   * accepted from a caller: a caller-supplied campaign, app or advertiser id would let the probe
+   * be pointed at a resource this publisher was never offered, which is exactly what this chain
+   * exists to certify the shape of without reading.
+   *
+   * No campaign row, or a row carrying no usable id, is a SCOPE outcome rather than a supplier
+   * failure: it reports SKIPPED_NO_CAMPAIGN_SCOPE and makes NO second request.
+   *
+   * RELATIONSHIP STATE IS REPORTED, NEVER DECIDED. The observed paths are checked against
+   * TRACKIER_RELATIONSHIP_EVIDENCE_PATHS — a search list, not a mapping — and the result is either
+   * PRESENT_NEEDS_MAPPING or UNKNOWN_FROM_CURRENT_API_SHAPE. Nothing is classified joined,
+   * available, pending or rejected here.
+   *
+   * Only structure leaves this method. The discovered id is used and discarded, and no campaign or
+   * advertiser name, app id, tracking or landing URL, payout or commission value can reach the
+   * result.
+   */
+  async certifyTrackierCampaignDetail({ adapter, key, probe, budgetLeft, sourceObject }) {
+    const base = {
+      network: key,
+      sourceObject,
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+      discoveryRequestCount: 0,
+      detailRequestCount: 0,
+    };
+
+    const timeoutMs = () => Math.max(1000, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+
+    let campaignRows = [];
+    try {
+      campaignRows = asRows(
+        await adapter.fetchCampaigns(
+          { ...TRACKIER_CERTIFICATION_CAMPAIGN_PARAMS },
+          { singlePage: true, retries: 1, timeoutMs: timeoutMs() },
+        ),
+      ).slice(0, 1);
+    } catch (error) {
+      return certificationFailure(
+        { ...base, discoveryRequestCount: 1 },
+        error,
+        {},
+        redactionValuesFor(adapter),
+      );
+    }
+
+    const discovery = { ...base, discoveryRequestCount: 1 };
+    const campaignId = campaignRows.length ? trackierCampaignIdOf(campaignRows[0]) : null;
+
+    if (!campaignId) {
+      return {
+        ...discovery,
+        ok: false,
+        statusCategory: "SKIPPED_NO_CAMPAIGN_SCOPE",
+        fieldCount: 0,
+        schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        note: campaignRows.length
+          ? "A campaign row was returned but carried no usable campaign id, so no detail request was made."
+          : "The bounded campaigns sample returned no row, so there was no campaign to ask for detail about and no detail request was made.",
+      };
+    }
+
+    try {
+      const detail = await adapter.fetchCampaignDetail(campaignId, {
+        retries: 1,
+        timeoutMs: timeoutMs(),
+      });
+      const rows = asRows(detail).slice(0, 1);
+      const withDetail = { ...discovery, detailRequestCount: 1 };
+
+      if (!rows.length || !Object.keys(rows[0] ?? {}).length) {
+        return {
+          ...withDetail,
+          ok: true,
+          statusCategory: "OK_NO_ROWS",
+          fieldCount: 0,
+          schema: "UNKNOWN_NEEDS_LIVE_DATA",
+          relationshipState: "UNKNOWN_FROM_CURRENT_API_SHAPE",
+        };
+      }
+
+      const fieldPaths = summarisePayloads(rows);
+      const observed = new Set(fieldPaths.map((field) => field.path));
+      const relationshipEvidence = TRACKIER_RELATIONSHIP_EVIDENCE_PATHS.filter((path) =>
+        observed.has(path),
+      );
+
+      return {
+        ...withDetail,
+        ok: true,
+        statusCategory: "OK",
+        sampleCount: rows.length,
+        fieldCount: fieldPaths.length,
+        fieldPaths,
+        // Which of the searched-for paths appeared, and nothing about what they hold.
+        relationshipEvidencePaths: relationshipEvidence,
+        relationshipState: relationshipEvidence.length
+          ? "PRESENT_NEEDS_MAPPING"
+          : "UNKNOWN_FROM_CURRENT_API_SHAPE",
+      };
+    } catch (error) {
+      return certificationFailure(
+        { ...discovery, detailRequestCount: 1 },
+        error,
+        {},
+        redactionValuesFor(adapter),
+      );
+    }
+  }
+
+  /**
    * Certifies one network.
    *
    * Probes run in sequence, not in parallel: a burst of concurrent calls against a supplier's API
@@ -2565,6 +2741,19 @@ export class NetworkCertificationService {
             sourceObject,
             // The service's own window, computed from the frozen preset. Never a caller's dates.
             window: { ...ctx.window, preset: resolvedWindowPreset },
+          }),
+        );
+        continue;
+      }
+
+      if (probe.chain === "trackierCampaignDetail") {
+        results.push(
+          await this.certifyTrackierCampaignDetail({
+            adapter,
+            key,
+            probe,
+            budgetLeft,
+            sourceObject,
           }),
         );
         continue;

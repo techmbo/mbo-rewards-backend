@@ -131,7 +131,11 @@ describe("Trackier is registered in the certification framework", () => {
   });
 
   it("exposes profile alongside the objects certified after it", () => {
-    assert.deepEqual(listProbeSourceObjects("trackier").sort(), ["campaigns", "profile"]);
+    assert.deepEqual(listProbeSourceObjects("trackier").sort(), [
+      "campaign_detail",
+      "campaigns",
+      "profile",
+    ]);
   });
 
   it("adds no probe for the objects this phase defers", () => {

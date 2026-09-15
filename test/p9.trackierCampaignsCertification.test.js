@@ -606,7 +606,9 @@ describe("read-only, and nothing beyond a bounded read is implemented", () => {
     ]) {
       assert.ok(!chain.includes(forbidden), forbidden);
     }
-    for (const notYet of ["campaign_detail", "campaignsCount", "coupons"]) {
+    // campaign_detail became its own probe later, on its own chain. What matters here is that the
+    // LIST chain still makes no detail request of its own.
+    for (const notYet of ["campaignsCount", "coupons", "conversions"]) {
       assert.ok(!listProbeSourceObjects("trackier").includes(notYet), notYet);
     }
   });
