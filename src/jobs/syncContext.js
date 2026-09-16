@@ -27,3 +27,45 @@ export function shouldPromoteAfterSync() {
   if (typeof options.promoteAfter === "boolean") return options.promoteAfter;
   return null;
 }
+
+/**
+ * The explicit date window a bounded orchestration unit was planned with, as inclusive ISO days,
+ * or null when the caller did not supply one (manual routes, the scheduler, the canary).
+ *
+ * Fail-closed on purpose: a half-supplied window is a planning bug, and quietly falling back to
+ * the network's own 180-day lookback would silently widen a unit that was supposed to be bounded.
+ */
+export function explicitSyncWindow() {
+  const { windowStart, windowEnd } = getSyncOptions();
+  const start = normalizeWindowDay(windowStart);
+  const end = normalizeWindowDay(windowEnd);
+  if (!start && !end) return null;
+  if (!start || !end) {
+    throw new Error("Bounded sync window requires both windowStart and windowEnd");
+  }
+  if (start > end) {
+    throw new Error("Bounded sync window ends before it starts");
+  }
+  return { start, end };
+}
+
+function normalizeWindowDay(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const date = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(date.getTime())) {
+    throw new Error("Bounded sync window carries an unparseable date");
+  }
+  return date.toISOString().slice(0, 10);
+}
+
+/**
+ * Source objects that ride along with the requested one because they are DERIVED from the same
+ * fetch (Impact `reports` from actions, Partnerize `analytics` from conversions). Supplied only by
+ * the bounded planner; a manual `?sourceObject=` request never sets it, so its behaviour is
+ * unchanged.
+ */
+export function sourceObjectCompanions() {
+  const value = getSyncOptions().sourceObjectCompanions;
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => String(item || "").trim().toLowerCase()).filter(Boolean);
+}

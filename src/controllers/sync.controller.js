@@ -344,7 +344,7 @@ export async function triggerSyncWorker(req, res, next) {
         message: "The next unit had no attempts left after its worker was lost; it is now terminal.",
         reason: claim.abandonedReason ?? null,
         runId: run.id,
-        unit: { unitId: unit.id, sequence: descriptor.sequence ?? null, kind: descriptor.kind ?? null, platform: descriptor.platform ?? null, accountLabel: descriptor.accountLabel ?? null, sourceObject: descriptor.sourceObject ?? null, status: "DEAD_LETTER", attempt: claim.attempt ?? null },
+        unit: { unitId: unit.id, sequence: descriptor.sequence ?? null, kind: descriptor.kind ?? null, platform: descriptor.platform ?? null, accountLabel: descriptor.accountLabel ?? null, sourceObject: descriptor.sourceObject ?? null, window: descriptor.windowStart && descriptor.windowEnd ? { start: descriptor.windowStart, end: descriptor.windowEnd } : null, status: "DEAD_LETTER", attempt: claim.attempt ?? null },
         syncStatus,
       });
     }
@@ -368,6 +368,10 @@ export async function triggerSyncWorker(req, res, next) {
       platform: descriptor.platform ?? null,
       accountLabel: descriptor.accountLabel ?? null,
       sourceObject: descriptor.sourceObject ?? null,
+      window:
+        descriptor.windowStart && descriptor.windowEnd
+          ? { start: descriptor.windowStart, end: descriptor.windowEnd }
+          : null,
     };
 
     let result;
@@ -378,7 +382,15 @@ export async function triggerSyncWorker(req, res, next) {
         // …except promotion, which a unit NEVER runs: the global post-sync stages do not fit an
         // invocation and are their own (not yet executable) units.
         promoteAfter: false,
+        // The unit's bounded scope, forwarded verbatim. A pre-Phase-5 unit carries neither, and
+        // then the account sync behaves exactly as it always did.
         sourceObject: descriptor.sourceObject || undefined,
+        ...(descriptor.windowStart && descriptor.windowEnd
+          ? { windowStart: descriptor.windowStart, windowEnd: descriptor.windowEnd }
+          : {}),
+        ...(Array.isArray(descriptor.sourceObjectCompanions) && descriptor.sourceObjectCompanions.length
+          ? { sourceObjectCompanions: [...descriptor.sourceObjectCompanions] }
+          : {}),
       });
     } catch (error) {
       const failed = await orchestration.failUnit(unit.id, error);

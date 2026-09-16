@@ -101,14 +101,22 @@ const accounts = {
 const listAccounts = async (platform) => accounts[platform] ?? ["default"];
 let clock = new Date("2026-09-15T12:00:00.000Z");
 const now = () => clock;
-const serviceFor = (prisma, extra = {}) => new SyncOrchestrationService({ prisma, now, listAccounts, ...extra });
+// Phase 5: the plan's size depends on each account's outstanding span, so the tests pin the span
+// instead of a magic unit count. A never-synced account plans its full initial lookback.
+const loadAccountState = async () => ({ lastSuccessfulSync: null });
+const serviceFor = (prisma, extra = {}) =>
+  new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState, ...extra });
+const planFor = (opts = {}) => buildSyncPlan({ listAccounts, loadAccountState, now: clock, ...opts });
+const planSize = async (opts = {}) => (await planFor(opts)).units.length;
 
 describe("plan — one bounded, ordered unit per network account, then the post-sync stages", () => {
   it("enumerates connected accounts per platform in the established syncAll order", async () => {
-    const plan = await buildSyncPlan({ kind: "full", fastSync: false, promoteAfter: true, listAccounts });
+    const plan = (await planFor({ kind: "full", fastSync: false, promoteAfter: true })).units;
     const networkUnits = plan.filter((u) => u.kind === UNIT_KINDS.NETWORK);
+    // Phase 5: an account is several bounded units, so the ACCOUNT order is the distinct sequence
+    // of platform/account, and every account's units form one contiguous block.
     assert.deepEqual(
-      networkUnits.map((u) => `${u.platform}/${u.accountLabel}`),
+      [...new Set(networkUnits.map((u) => `${u.platform}/${u.accountLabel}`))],
       [
         "boostiny/default",
         "optimise_sea/default", "optimise_sea/second",
@@ -116,6 +124,12 @@ describe("plan — one bounded, ordered unit per network account, then the post-
         "trackier/default",
         "impact/default", "partnerize/default", "awin/default", "admitad/default", "rakuten/default", "cj/default",
       ],
+    );
+    const blocks = networkUnits.map((u) => `${u.platform}/${u.accountLabel}`);
+    assert.equal(
+      blocks.filter((key, i) => i === 0 || blocks[i - 1] !== key).length,
+      new Set(blocks).size,
+      "each account's units are contiguous — an account is never revisited later in the plan",
     );
     assert.ok(!networkUnits.some((u) => u.platform === "optimise_mena"), "no unit for a region with no connected account");
     assert.deepEqual(plan.map((u) => u.sequence), plan.map((_, i) => i + 1), "sequence is contiguous and ordered");
@@ -133,13 +147,13 @@ describe("plan — one bounded, ordered unit per network account, then the post-
 
   it("plans NO post-sync stage units by default, even with promoteAfter: true", async () => {
     for (const promoteAfter of [true, false]) {
-      const plan = await buildSyncPlan({ kind: "full", promoteAfter, listAccounts });
+      const plan = (await planFor({ kind: "full", promoteAfter })).units;
       assert.ok(plan.every((u) => u.kind === UNIT_KINDS.NETWORK), `promoteAfter=${promoteAfter}`);
     }
   });
 
   it("materialises post-sync stages only on explicit request, and then as non-executable placeholders", async () => {
-    const plan = await buildSyncPlan({ kind: "full", promoteAfter: true, includePostSyncUnits: true, listAccounts });
+    const plan = (await planFor({ kind: "full", promoteAfter: true, includePostSyncUnits: true })).units;
     const tail = plan.slice(-3);
     assert.deepEqual(tail.map((u) => u.kind), [UNIT_KINDS.PROMOTION, UNIT_KINDS.CONVERSION_PROMOTION, UNIT_KINDS.AGGREGATION]);
     assert.equal(tail.at(-1).lockKey, "aggregation");
@@ -150,7 +164,7 @@ describe("plan — one bounded, ordered unit per network account, then the post-
       assert.throws(() => assertUnitExecutable(unit), (error) => error.code === "unit_not_executable");
     }
     // Requesting placeholders without promotion still plans none.
-    const none = await buildSyncPlan({ kind: "full", promoteAfter: false, includePostSyncUnits: true, listAccounts });
+    const none = (await planFor({ kind: "full", promoteAfter: false, includePostSyncUnits: true })).units;
     assert.ok(none.every((u) => u.kind === UNIT_KINDS.NETWORK));
   });
 
@@ -168,7 +182,7 @@ describe("plan — one bounded, ordered unit per network account, then the post-
   });
 
   it("an incremental plan marks every network unit fastSync", async () => {
-    const plan = await buildSyncPlan({ kind: "incremental", fastSync: true, promoteAfter: true, listAccounts });
+    const plan = (await planFor({ kind: "incremental", fastSync: true, promoteAfter: true })).units;
     assert.ok(plan.filter((u) => u.kind === UNIT_KINDS.NETWORK).every((u) => u.options.fastSync === true));
   });
 });
@@ -186,12 +200,12 @@ describe("run lifecycle — durable parent + child JobRun rows, no module memory
     assert.equal(parent.correlationId, parent.id);
     assert.equal(parent.payload.postSyncStages, "deferred", "explicit: the global stages are not part of this run");
     const units = rows.filter((r) => r.jobName === UNIT_JOB_NAME && r.correlationId === run.id);
-    assert.equal(units.length, 11, "network units only");
+    assert.equal(units.length, await planSize({ kind: "full", fastSync: false, promoteAfter: true }), "one row per planned unit");
     assert.ok(units.every((u) => u.status === "PENDING"));
     assert.deepEqual(units.map((u) => u.priority), units.map((_, i) => i + 1));
     assert.equal(units[0].payload.platform, "boostiny");
     assert.equal(units[0].payload.parentRunId, run.id);
-    assert.equal(run.totalUnits, 11);
+    assert.equal(run.totalUnits, units.length);
   });
 
   it("getOrCreateRun returns the existing active run of the same kind instead of a duplicate", async () => {
@@ -284,12 +298,13 @@ describe("a run that requested promotion never finalises while that work is outs
 
     // 2 — the plan is network units only, and the deferral is recorded on the parent.
     const units = rows.filter((r) => r.jobName === UNIT_JOB_NAME && r.correlationId === run.id);
-    assert.equal(units.length, 11);
+    const TOTAL = await planSize({ kind: "full", promoteAfter: true });
+    assert.equal(units.length, TOTAL);
     assert.ok(units.every((u) => u.payload.kind === UNIT_KINDS.NETWORK));
     assert.equal(rows.find((r) => r.id === run.id).payload.postSyncStages, "deferred");
 
     // 3 — complete every network unit.
-    assert.equal(await drain(service, run.id), 11);
+    assert.equal(await drain(service, run.id), TOTAL);
 
     // 4 — the parent is still non-terminal.
     const parent = rows.find((r) => r.id === run.id);
@@ -303,8 +318,8 @@ describe("a run that requested promotion never finalises while that work is outs
     assert.equal(status.postSyncStages, "deferred");
     assert.equal(status.postSyncPending, true);
     assert.equal(status.finishedAt, null);
-    assert.equal(status.completedUnits, 11);
-    assert.equal(status.totalUnits, 11);
+    assert.equal(status.completedUnits, TOTAL);
+    assert.equal(status.totalUnits, TOTAL);
     assert.equal(status.failedUnits, 0);
     // Truthful progress: the units that EXIST are all done, but the run's total work is not yet
     // knowable, so no overall percentage is invented — it is explicitly unknown.
@@ -322,10 +337,11 @@ describe("a run that requested promotion never finalises while that work is outs
     await s2.claimUnit(firstUnit.id, { workerId: "w" });
     await s2.completeUnit(firstUnit.id, { ok: true });
     const midway = await s2.describeRun(partRun.id);
+    const onePercent = Math.round((1 / TOTAL) * 100);
     assert.equal(midway.percentComplete, null);
-    assert.equal(midway.unitsPercentComplete, 9);
+    assert.equal(midway.unitsPercentComplete, onePercent);
     assert.equal(midway.status, "running");
-    assert.equal(r2.find((r) => r.id === partRun.id).progress, 9, "the Int progress column stays a number");
+    assert.equal(r2.find((r) => r.id === partRun.id).progress, onePercent, "the Int progress column stays a number");
 
     // The run is genuinely unfinished, so it is still the active run of its kind.
     const reused = await service.getOrCreateRun({ kind: "full", trigger: "scheduler", options: {} });
@@ -338,7 +354,7 @@ describe("a run that requested promotion never finalises while that work is outs
     const service = serviceFor(prisma);
     const run = await service.createRun({ kind: "full", trigger: "api", options: { promoteAfter: false } });
     assert.equal(rows.find((r) => r.id === run.id).payload.postSyncStages, "none");
-    assert.equal(await drain(service, run.id), 11);
+    assert.equal(await drain(service, run.id), await planSize({ kind: "full", promoteAfter: false }));
 
     const parent = rows.find((r) => r.id === run.id);
     assert.equal(parent.status, "COMPLETED");
@@ -548,13 +564,15 @@ describe("outcomes — retryable failure, dead letter, parent projection", () =>
     assert.equal(row.progress, 100);
     assert.deepEqual(row.result.outcome, { conversions: 3, warnings: ["zzwarnzz"] });
     const status = await service.describeRun(run.id);
+    const TOTAL = await planSize({ kind: "full", promoteAfter: false });
+    const onePercent = Math.round((1 / TOTAL) * 100);
     assert.equal(status.completedUnits, 1);
-    assert.equal(status.totalUnits, 11);
+    assert.equal(status.totalUnits, TOTAL);
     assert.equal(status.blockedUnits, 0);
-    assert.equal(status.percentComplete, 9);
+    assert.equal(status.percentComplete, onePercent);
     assert.equal(status.status, "running");
     assert.equal(status.latestWarning, "zzwarnzz");
-    assert.equal(rows.find((r) => r.id === run.id).progress, 9);
+    assert.equal(rows.find((r) => r.id === run.id).progress, onePercent);
   });
 
   it("failUnit returns the unit to PENDING while attempts remain (no sleeping), then DEAD_LETTER", async () => {

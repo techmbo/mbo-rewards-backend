@@ -53,7 +53,7 @@ import {
   shouldRefreshCoupons,
   updateAccountSyncTimestamps,
 } from "./syncTimestamps.js";
-import { getSyncOptions, runWithSyncOptions, shouldPromoteAfterSync } from "./syncContext.js";
+import { explicitSyncWindow, getSyncOptions, runWithSyncOptions, shouldPromoteAfterSync } from "./syncContext.js";
 import {
   initSyncProgress,
   recordAccountSyncComplete,
@@ -141,7 +141,11 @@ export function incrementalFromDate(lastSuccessfulSync, overlapDays = SYNC_OVERL
 /**
  * Phase 1 — incremental date window when lastSuccessfulSync exists; explicit env vars override.
  */
-function getBoostinyReportRange(lastSuccessfulSync) {
+export function getBoostinyReportRange(lastSuccessfulSync) {
+  // A bounded orchestration unit carries its own window and it wins outright: env overrides and
+  // the incremental fallback would both widen a unit that was planned to fit one invocation.
+  const bounded = explicitSyncWindow();
+  if (bounded) return { from: bounded.start, to: bounded.end };
   const toEnv = String(process.env.BOOSTINY_REPORT_TO || "").trim();
   const fromEnv = String(process.env.BOOSTINY_REPORT_FROM || "").trim();
   const daysBack = Number(process.env.BOOSTINY_REPORT_DAYS_BACK || DEFAULT_DAYS_BACK);
@@ -160,12 +164,19 @@ function getBoostinyReportRange(lastSuccessfulSync) {
   return { from, to };
 }
 
-function getOptimiseDateRange(lastSuccessfulSync) {
+export function getOptimiseDateRange(lastSuccessfulSync) {
   const toEnv = String(process.env.OPTIMISE_CONVERSIONS_TO || "").trim();
   const fromEnv = String(process.env.OPTIMISE_CONVERSIONS_FROM || "").trim();
   const daysBack = Number(process.env.OPTIMISE_CONVERSIONS_DAYS_BACK || DEFAULT_DAYS_BACK);
   const dateField = String(process.env.OPTIMISE_CONVERSIONS_DATE_FIELD || "conversion").trim();
   const targetCurrencyCode = String(process.env.OPTIMISE_TARGET_CURRENCY_CODE || "USD").trim();
+
+  // A bounded unit's window wins over env overrides and the incremental fallback alike; the
+  // date field and target currency are untouched by windowing.
+  const bounded = explicitSyncWindow();
+  if (bounded) {
+    return { fromDate: bounded.start, toDate: bounded.end, dateField, targetCurrencyCode };
+  }
 
   const toDate = toEnv || toISODate(new Date());
 
@@ -209,7 +220,9 @@ function getOptimisePaymentsRange(lastSuccessfulSync) {
   };
 }
 
-function getTrackierDateRange(lastSuccessfulSync) {
+export function getTrackierDateRange(lastSuccessfulSync) {
+  const bounded = explicitSyncWindow();
+  if (bounded) return { start: bounded.start, end: bounded.end };
   const toEnv = String(process.env.TRACKIER_SYNC_TO || "").trim();
   const fromEnv = String(process.env.TRACKIER_SYNC_FROM || "").trim();
   const daysBack = Number(process.env.TRACKIER_SYNC_DAYS_BACK || DEFAULT_DAYS_BACK);

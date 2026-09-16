@@ -11,6 +11,7 @@ import {
   updateAccountSyncTimestamps,
 } from "./syncTimestamps.js";
 import { DEFAULT_DAYS_BACK, SYNC_OVERLAP_DAYS } from "./syncConfig.js";
+import { explicitSyncWindow } from "./syncContext.js";
 import {
   includeSourceObject,
   requestedSourceObject,
@@ -130,6 +131,10 @@ export async function syncAdmitadAccount(accountLabel = "default") {
   const timestamps = await getAccountSyncTimestamps("admitad", accountLabel);
   const refreshCampaigns = shouldRefreshCampaigns(timestamps?.lastCampaignSyncAt);
   const refreshCoupons = shouldRefreshCoupons(timestamps?.lastCouponSyncAt);
+  // A bounded orchestration unit's window travels as the explicit status_updated range the
+  // builder already supports — nothing new is invented. It is applied LAST so an env override
+  // cannot widen a unit that was planned to fit one invocation.
+  const admitadWindow = explicitSyncWindow();
   const actionParams = buildAdmitadIncrementalActionParams({
     lastSuccessfulSync: timestamps?.lastSuccessfulSync,
     explicit: {
@@ -138,6 +143,9 @@ export async function syncAdmitadAccount(accountLabel = "default") {
         : {}),
       ...(process.env.ADMITAD_STATUS_UPDATED_END
         ? { status_updated_end: process.env.ADMITAD_STATUS_UPDATED_END }
+        : {}),
+      ...(admitadWindow
+        ? { status_updated_start: admitadWindow.start, status_updated_end: admitadWindow.end }
         : {}),
     },
   });

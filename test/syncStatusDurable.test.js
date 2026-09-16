@@ -22,6 +22,10 @@ import {
 } from "../src/jobs/syncOrchestration.service.js";
 import { SyncAccountLockService, accountLockKey } from "../src/jobs/syncAccountLock.service.js";
 
+// Never let a plan reach the real database from a unit test: the account state the planner
+// measures its window span from is injected.
+const loadAccountState = async () => ({ lastSuccessfulSync: null });
+
 const CONTROLLER_SRC = readFileSync(new URL("../src/controllers/sync.controller.js", import.meta.url), "utf8");
 const handlerOf = (name) => CONTROLLER_SRC.split(`export async function ${name}`)[1].split("\nexport ")[0];
 
@@ -91,7 +95,7 @@ const advance = (ms) => { clock = new Date(clock.getTime() + ms); };
 
 function harness({ prisma: injected } = {}) {
   const store = injected ? { prisma: injected, rows: [], ops: [] } : createStore();
-  const orchestration = new SyncOrchestrationService({ prisma: store.prisma, now, listAccounts: async () => ["default"] });
+  const orchestration = new SyncOrchestrationService({ prisma: store.prisma, now, listAccounts: async () => ["default"], loadAccountState });
   const locks = new SyncAccountLockService({ prisma: store.prisma, now });
   const status = async (query = {}) => {
     const res = { statusCode: 200, body: null, headers: {} };
@@ -111,7 +115,7 @@ describe("durable status — read from JobRun, never module memory", () => {
     resetClock();
     const h = harness();
     // A different instance created the run and completed its first unit.
-    const writer = new SyncOrchestrationService({ prisma: h.prisma, now, listAccounts: async () => ["default"] });
+    const writer = new SyncOrchestrationService({ prisma: h.prisma, now, listAccounts: async () => ["default"], loadAccountState });
     const run = await writer.createRun({ kind: "full", trigger: "api", options: { promoteAfter: true }, units: [
       networkUnit("boostiny", "default"),
       networkUnit("optimise_sea", "default", { sourceObject: "campaigns" }),

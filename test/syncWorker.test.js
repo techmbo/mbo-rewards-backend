@@ -19,6 +19,10 @@ import {
 } from "../src/jobs/syncOrchestration.service.js";
 import { DEFAULT_LEASE_MS, SyncAccountLockService, accountLockKey } from "../src/jobs/syncAccountLock.service.js";
 
+// Never let a plan reach the real database from a unit test: the account state the planner
+// measures its window span from is injected.
+const loadAccountState = async () => ({ lastSuccessfulSync: null });
+
 const CONTROLLER_SRC = readFileSync(new URL("../src/controllers/sync.controller.js", import.meta.url), "utf8");
 const ROUTES_SRC = readFileSync(new URL("../src/routes/index.js", import.meta.url), "utf8");
 const handlerOf = (name) => CONTROLLER_SRC.split(`export async function ${name}`)[1].split("\nexport ")[0];
@@ -90,7 +94,7 @@ const advance = (ms) => { clock = new Date(clock.getTime() + ms); };
 /** One app: one store, one orchestration service, one lock vocabulary, one stubbed account sync. */
 function app({ syncImpl } = {}) {
   const { rows, prisma } = createStore();
-  const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts: async () => ["default"] });
+  const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts: async () => ["default"], loadAccountState });
   const locks = new SyncAccountLockService({ prisma, now });
   const calls = [];
   const syncPlatformAccount = async (platform, accountLabel, options) => {

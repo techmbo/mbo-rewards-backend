@@ -13,6 +13,7 @@ import {
   promotePerformanceRowsToFacts,
 } from "../modules/networkPortal/networkPerformanceFact.ingestion.js";
 import { updateAccountSyncTimestamps } from "./syncTimestamps.js";
+import { explicitSyncWindow } from "./syncContext.js";
 import { CREDENTIAL_HEALTH } from "../modules/networkOps/networkAccount.contract.js";
 import {
   includeSourceObject,
@@ -186,14 +187,19 @@ export async function syncImpactAccount(accountLabel = "default") {
   const runCtx = { network: "impact", networkAccountId };
   const sourceObjectRuns = [];
 
+  // A bounded orchestration unit supplies its own window; otherwise the existing fixed trailing
+  // lookback is unchanged.
+  const impactWindow = explicitSyncWindow();
   const impactDaysBack = Number(process.env.IMPACT_SYNC_DAYS_BACK || 90);
   const impactTo = new Date();
   const impactFrom = new Date(impactTo);
   impactFrom.setUTCDate(impactFrom.getUTCDate() - impactDaysBack);
-  const impactDateParams = {
-    StartDate: impactFrom.toISOString().slice(0, 10),
-    EndDate: impactTo.toISOString().slice(0, 10),
-  };
+  const impactDateParams = impactWindow
+    ? { StartDate: impactWindow.start, EndDate: impactWindow.end }
+    : {
+        StartDate: impactFrom.toISOString().slice(0, 10),
+        EndDate: impactTo.toISOString().slice(0, 10),
+      };
 
   let campaigns = [];
   if (includeSourceObject(requested, "programs")) {
@@ -352,14 +358,17 @@ export async function syncPartnerizeAccount(accountLabel = "default") {
   const runCtx = { network: "partnerize", networkAccountId };
   const sourceObjectRuns = [];
 
+  const partnerizeWindow = explicitSyncWindow();
   const partnerizeDaysBack = Number(process.env.PARTNERIZE_SYNC_DAYS_BACK || 90);
   const partnerizeTo = new Date();
   const partnerizeFrom = new Date(partnerizeTo);
   partnerizeFrom.setUTCDate(partnerizeFrom.getUTCDate() - partnerizeDaysBack);
-  const partnerizeDateParams = {
-    start_date: partnerizeFrom.toISOString().slice(0, 10),
-    end_date: partnerizeTo.toISOString().slice(0, 10),
-  };
+  const partnerizeDateParams = partnerizeWindow
+    ? { start_date: partnerizeWindow.start, end_date: partnerizeWindow.end }
+    : {
+        start_date: partnerizeFrom.toISOString().slice(0, 10),
+        end_date: partnerizeTo.toISOString().slice(0, 10),
+      };
 
   let campaigns = [];
   if (includeSourceObject(requested, "campaigns")) {
@@ -506,6 +515,14 @@ export async function syncPartnerizeAccount(accountLabel = "default") {
   };
 }
 
+/** Awin refuses a transactions range wider than 31 days; never widen past the supplier cap. */
+export function clampAwinWindowStart({ start, end }) {
+  const earliest = new Date(`${end}T00:00:00.000Z`);
+  earliest.setUTCDate(earliest.getUTCDate() - 30);
+  const earliestIso = earliest.toISOString().slice(0, 10);
+  return start < earliestIso ? earliestIso : start;
+}
+
 export async function syncAwinAccount(accountLabel = "default") {
   const flags = await getNetworkAccountSyncFlags("awin", accountLabel);
   if (flags.exists && flags.syncEnabled === false) {
@@ -538,14 +555,19 @@ export async function syncAwinAccount(accountLabel = "default") {
   const runCtx = { network: "awin", networkAccountId };
   const sourceObjectRuns = [];
 
+  // Awin caps the transactions range at 31 days, so a supplied window is clamped to that cap
+  // rather than forwarded blindly.
+  const awinWindow = explicitSyncWindow();
   const awinDaysBack = Math.min(Number(process.env.AWIN_SYNC_DAYS_BACK || 30), 31);
   const awinTo = new Date();
   const awinFrom = new Date(awinTo);
   awinFrom.setUTCDate(awinFrom.getUTCDate() - awinDaysBack);
-  const awinDateParams = {
-    startDate: awinFrom.toISOString().slice(0, 10),
-    endDate: awinTo.toISOString().slice(0, 10),
-  };
+  const awinDateParams = awinWindow
+    ? { startDate: clampAwinWindowStart(awinWindow), endDate: awinWindow.end }
+    : {
+        startDate: awinFrom.toISOString().slice(0, 10),
+        endDate: awinTo.toISOString().slice(0, 10),
+      };
 
   let campaigns = [];
   if (includeSourceObject(requested, "programmes")) {

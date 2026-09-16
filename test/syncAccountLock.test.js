@@ -17,6 +17,10 @@ import {
 } from "../src/jobs/syncAccountLock.service.js";
 import { SyncOrchestrationService, UNIT_KINDS, UNIT_JOB_NAME } from "../src/jobs/syncOrchestration.service.js";
 
+// Never let a plan reach the real database from a unit test: the account state the planner
+// measures its window span from is injected.
+const loadAccountState = async () => ({ lastSuccessfulSync: null });
+
 /** One shared store, many service instances — the cross-instance case. */
 function createStore() {
   const rows = [];
@@ -211,7 +215,7 @@ describe("one vocabulary — orchestration units and explicit lock rows exclude 
   it("an orchestration unit holding an account blocks any other path taking the same account lock", async () => {
     reset();
     const { prisma } = createStore();
-    const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts });
+    const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState });
     const manualInstance = new SyncAccountLockService({ prisma, now });
 
     const run = await orchestration.createRun({ kind: "full", trigger: "scheduler", options: { promoteAfter: false }, units: [{ kind: UNIT_KINDS.NETWORK, platform: "boostiny", accountLabel: "default", options: {} }] });
@@ -232,7 +236,7 @@ describe("one vocabulary — orchestration units and explicit lock rows exclude 
   it("an explicit lock held by another path blocks the orchestration worker from claiming that account", async () => {
     reset();
     const { prisma } = createStore();
-    const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts });
+    const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState });
     const manualInstance = new SyncAccountLockService({ prisma, now });
 
     const manual = await manualInstance.acquire(BOOSTINY_DEFAULT, { holderId: "manual:campaigns" });
@@ -252,7 +256,7 @@ describe("one vocabulary — orchestration units and explicit lock rows exclude 
   it("the orchestrator and the lock service agree on the lease, so neither can steal a live claim", async () => {
     reset();
     const { prisma } = createStore();
-    const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts });
+    const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState });
     const locks = new SyncAccountLockService({ prisma, now });
     const run = await orchestration.createRun({ kind: "full", trigger: "api", options: { promoteAfter: false }, units: [{ kind: UNIT_KINDS.NETWORK, platform: "boostiny", accountLabel: "default", options: {} }] });
     const unit = await orchestration.nextUnit(run.id);

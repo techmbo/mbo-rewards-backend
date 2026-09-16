@@ -11,7 +11,7 @@ import {
   sourceObjectSync,
 } from "../modules/networkOps/sourceObjectSync.service.js";
 import { getSourceObject } from "../modules/networkOps/sourceObjects.catalog.js";
-import { getSyncOptions } from "./syncContext.js";
+import { getSyncOptions, sourceObjectCompanions } from "./syncContext.js";
 import { fetchOptimiseResource } from "./optimiseResourceSync.js";
 import { fetchTrackierResource } from "./trackierResourceSync.js";
 
@@ -42,7 +42,12 @@ export function requestedSourceObject(explicit) {
 
 export function includeSourceObject(requested, sourceObject) {
   if (!requested) return true;
-  return requested === String(sourceObject || "").toLowerCase();
+  const key = String(sourceObject || "").toLowerCase();
+  if (requested === key) return true;
+  // A DERIVED object computed from the requested one's rows (Impact reports, Partnerize
+  // analytics) cannot be its own bounded unit — it travels with its parent. Only the bounded
+  // planner sets companions, so a manual ?sourceObject= request is unaffected.
+  return sourceObjectCompanions().includes(key);
 }
 
 export function summarizeSourceObjectRun(run) {

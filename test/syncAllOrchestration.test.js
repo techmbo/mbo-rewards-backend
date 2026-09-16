@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { triggerSyncAll } from "../src/controllers/sync.controller.js";
 import {
+  buildSyncPlan,
   ORCHESTRATION_JOB_NAME,
   UNIT_JOB_NAME,
   UNIT_KINDS,
@@ -79,12 +80,17 @@ function createFakePrisma() {
 
 const ACCOUNTS = { boostiny: ["default"], optimise_sea: ["default"], optimise_mena: [], optimise_uk: [], trackier: ["default"] };
 const listAccounts = async (platform) => ACCOUNTS[platform] ?? ["default"];
-/** boostiny + optimise_sea + trackier + the 6 single-account platforms */
-const EXPECTED_UNITS = 3 + 6;
+// Phase 5 units are platform + account + source object [+ window], so the expected count comes
+// from the planner itself rather than from a number that window tuning would invalidate.
+const loadAccountState = async () => ({ lastSuccessfulSync: null });
+const NOW = new Date("2026-09-15T12:00:00.000Z");
+const now = () => NOW;
+const plannedUnits = async (options = {}) =>
+  (await buildSyncPlan({ kind: "full", promoteAfter: true, listAccounts, loadAccountState, now: NOW, ...options })).units.length;
 
 function harness() {
   const { rows, ops, prisma } = createFakePrisma();
-  const orchestration = new SyncOrchestrationService({ prisma, listAccounts });
+  const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState });
   const call = async (query = {}) => {
     const res = { statusCode: null, body: null };
     res.status = (code) => { res.statusCode = code; return res; };
@@ -121,6 +127,7 @@ describe("POST /sync/all — durable enqueue", () => {
     assert.equal(parent.payload.postSyncStages, "deferred");
 
     const units = h.unitsOf(parent.id);
+    const EXPECTED_UNITS = await plannedUnits();
     assert.equal(units.length, EXPECTED_UNITS);
     assert.ok(units.every((u) => u.payload.kind === UNIT_KINDS.NETWORK && u.status === "PENDING"));
     assert.ok(units.every((u) => u.payload.options.promoteAfter === false), "a unit never runs the global stages");
@@ -154,7 +161,7 @@ describe("POST /sync/all — durable enqueue", () => {
     assert.equal(second.body.created, false, "reused, not created");
     assert.match(second.body.message, /already/i);
     assert.equal(h.parents().length, 1, "no duplicate parent");
-    assert.equal(h.unitsOf(first.body.runId).length, EXPECTED_UNITS, "no duplicate units");
+    assert.equal(h.unitsOf(first.body.runId).length, await plannedUnits(), "no duplicate units");
   });
 
   it("an INCOMPATIBLE request is never silently folded into the active run", async () => {
@@ -200,7 +207,7 @@ describe("POST /sync/all — durable enqueue", () => {
 });
 
 describe("service — run reuse requires compatible execution options", () => {
-  const serviceFor = (prisma) => new SyncOrchestrationService({ prisma, listAccounts });
+  const serviceFor = (prisma) => new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState });
 
   it("findActiveRun matches kind AND the execution options that change the work", async () => {
     const { prisma } = createFakePrisma();
@@ -240,7 +247,7 @@ describe("service — run reuse requires compatible execution options", () => {
 });
 
 describe("concurrent enqueue — exactly one active run survives", () => {
-  const serviceFor = (prisma) => new SyncOrchestrationService({ prisma, listAccounts });
+  const serviceFor = (prisma) => new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState });
   const activeParents = (rows) => rows.filter((r) => r.jobName === ORCHESTRATION_JOB_NAME && ["PENDING", "RUNNING"].includes(r.status));
   const unitsOf = (rows, runId) => rows.filter((r) => r.jobName === UNIT_JOB_NAME && r.correlationId === runId);
 
@@ -276,7 +283,7 @@ describe("concurrent enqueue — exactly one active run survives", () => {
     }
     // Exactly one runnable unit set exists.
     const runnable = rows.filter((r) => r.jobName === UNIT_JOB_NAME && r.status === "PENDING");
-    assert.equal(runnable.length, EXPECTED_UNITS);
+    assert.equal(runnable.length, await plannedUnits({ fastSync: true }));
     assert.ok(runnable.every((u) => u.correlationId === ra.id));
   });
 
@@ -290,7 +297,7 @@ describe("concurrent enqueue — exactly one active run survives", () => {
     assert.equal(activeParents(rows).length, 1);
     assert.equal(results.filter((r) => r.created).length, 1, "only one creation is reported");
     const runnable = rows.filter((r) => r.jobName === UNIT_JOB_NAME && r.status === "PENDING");
-    assert.equal(runnable.length, EXPECTED_UNITS);
+    assert.equal(runnable.length, await plannedUnits({ fastSync: true }));
     assert.ok(runnable.every((u) => u.correlationId === results[0].id));
   });
 

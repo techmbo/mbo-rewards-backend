@@ -24,6 +24,10 @@ import {
 } from "../src/jobs/syncOrchestration.service.js";
 import { SyncAccountLockService, accountLockKey } from "../src/jobs/syncAccountLock.service.js";
 
+// Never let a plan reach the real database from a unit test: the account state the planner
+// measures its window span from is injected.
+const loadAccountState = async () => ({ lastSuccessfulSync: null });
+
 const SERVICE_SRC = readFileSync(new URL("../src/jobs/syncOrchestration.service.js", import.meta.url), "utf8");
 
 function createStore() {
@@ -95,7 +99,7 @@ const OPTIMISE_KEY = accountLockKey({ platform: "optimise_sea", accountLabel: "d
 async function productionShape({ syncImpl } = {}) {
   resetClock();
   const { rows, prisma } = createStore();
-  const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts: async () => ["default"] });
+  const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts: async () => ["default"], loadAccountState });
   const locks = new SyncAccountLockService({ prisma, now });
   const calls = [];
   const locals = {

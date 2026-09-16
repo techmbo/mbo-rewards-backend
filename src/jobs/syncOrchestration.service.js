@@ -24,6 +24,8 @@
 
 import { prisma as defaultPrisma } from "../database/prisma.js";
 import { listMarketplaceAccounts } from "../modules/integrations/oauth.service.js";
+import { getAccountSyncTimestamps } from "./syncTimestamps.js";
+import { planAccountUnits, planSourcesFor } from "./syncSourcePlan.js";
 import {
   DEFAULT_LEASE_MS as LOCK_LEASE_MS,
   SyncAccountLockService,
@@ -106,16 +108,65 @@ export function assertUnitExecutable(unit = {}) {
   throw error;
 }
 
+/**
+ * Connected accounts of a platform, each with the timestamp the plan's span is measured from.
+ * The rows are returned in a STABLE order (accountLabel ascending) rather than in connection
+ * order, so two `/sync/all` requests and a retry all plan the same sequence numbers.
+ */
 async function defaultListAccounts(platform) {
   const accounts = await listMarketplaceAccounts(platform);
-  return [...new Set(accounts.map((acc) => acc.accountLabel).filter(Boolean))];
+  const seen = new Map();
+  for (const account of accounts) {
+    const label = account?.accountLabel;
+    if (!label || seen.has(label)) continue;
+    seen.set(label, { accountLabel: label, lastSuccessfulSync: account?.lastSuccessfulSync ?? null });
+  }
+  return [...seen.values()];
+}
+
+async function defaultLoadAccountState(platform, accountLabel) {
+  try {
+    const row = await getAccountSyncTimestamps(platform, accountLabel);
+    return { lastSuccessfulSync: row?.lastSuccessfulSync ?? null };
+  } catch {
+    // A missing MarketplaceAccount row (env-credential networks) is not an error: the plan simply
+    // falls back to the network's own initial lookback.
+    return { lastSuccessfulSync: null };
+  }
+}
+
+/**
+ * Accept both account shapes: the rich rows this module produces and the bare labels older
+ * callers and tests supply. Sorted by label so the plan order never depends on the DB's order.
+ */
+function normalizeAccountEntries(entries) {
+  const list = (entries ?? []).map((entry) =>
+    typeof entry === "string"
+      ? { accountLabel: entry, lastSuccessfulSync: undefined }
+      : { accountLabel: entry?.accountLabel ?? null, lastSuccessfulSync: entry?.lastSuccessfulSync },
+  );
+  return list
+    .filter((entry) => entry.accountLabel)
+    .sort((a, b) => (a.accountLabel < b.accountLabel ? -1 : a.accountLabel > b.accountLabel ? 1 : 0));
 }
 
 /**
  * Plan the bounded units of one run, in execution order:
- *   every connected account of every platform (syncAll order) → promotion → conversion-promotion
- *   → aggregation. Network units NEVER run the global post-sync stages themselves
- *   (promoteAfter:false); those are their own units, present only when the run asks for them.
+ *
+ *   platform (the established syncAll order)
+ *     → account (label ascending, so retries and duplicate requests agree)
+ *       → source object (the audited per-network order)
+ *         → date window (chronological, contiguous, no overlap and no gap)
+ *
+ * A unit is therefore platform + accountLabel + sourceObject [+ windowStart..windowEnd], small
+ * enough to finish inside one invocation. Network units NEVER run the global post-sync stages
+ * themselves (promoteAfter:false); those are their own units, present only when asked for.
+ *
+ * A source object the audit could not bound (Optimise commission groups: one request per
+ * campaign, no date filter) produces no unit. It is returned as an EXCLUSION, recorded on the run
+ * and shown in status, rather than silently widened back into an unbounded pull.
+ *
+ * Returns { units, exclusions }.
  */
 export async function buildSyncPlan({
   kind = "full",
@@ -123,15 +174,40 @@ export async function buildSyncPlan({
   promoteAfter = true,
   includePostSyncUnits = false,
   listAccounts = defaultListAccounts,
+  loadAccountState = defaultLoadAccountState,
+  now = new Date(),
 } = {}) {
   const units = [];
+  const exclusions = [];
   const networkOptions = { fastSync: kind === "incremental" ? true : Boolean(fastSync), promoteAfter: false };
+  const planAccount = async (platform, entry) => {
+    const lastSuccessfulSync =
+      entry.lastSuccessfulSync === undefined
+        ? (await loadAccountState(platform, entry.accountLabel))?.lastSuccessfulSync ?? null
+        : entry.lastSuccessfulSync;
+    const planned = planAccountUnits({
+      platform,
+      accountLabel: entry.accountLabel,
+      lastSuccessfulSync,
+      now,
+      networkOptions,
+    });
+    exclusions.push(...planned.exclusions);
+    // A platform with no audited source objects keeps the pre-Phase-5 shape: one account-wide
+    // unit. Nothing is dropped because the audit does not cover it yet.
+    if (!planned.units.length && !planned.exclusions.length) {
+      units.push({ kind: UNIT_KINDS.NETWORK, platform, accountLabel: entry.accountLabel, options: { ...networkOptions } });
+      return;
+    }
+    for (const unit of planned.units) units.push({ kind: UNIT_KINDS.NETWORK, ...unit });
+  };
+
   for (const platform of ACCOUNT_LABELLED_PLATFORMS) {
-    const labels = await listAccounts(platform);
-    for (const accountLabel of labels) units.push({ kind: UNIT_KINDS.NETWORK, platform, accountLabel, options: { ...networkOptions } });
+    const entries = normalizeAccountEntries(await listAccounts(platform));
+    for (const entry of entries) await planAccount(platform, entry);
   }
   for (const platform of SINGLE_ACCOUNT_PLATFORMS) {
-    units.push({ kind: UNIT_KINDS.NETWORK, platform, accountLabel: "default", options: { ...networkOptions } });
+    await planAccount(platform, { accountLabel: "default", lastSuccessfulSync: undefined });
   }
   // Post-sync stages are NOT planned by default. The existing promotion, conversion-promotion and
   // 14-day rebuild are unbounded; until they are generated as bounded units they may only be
@@ -141,8 +217,13 @@ export async function buildSyncPlan({
       units.push({ kind: kindName, options: {}, executable: false, blockedReason: UNIT_BLOCKED_REASON });
     }
   }
-  return units.map((unit, index) => ({ ...unit, sequence: index + 1, lockKey: unitLockKey(unit) }));
+  return {
+    units: units.map((unit, index) => ({ ...unit, sequence: index + 1, lockKey: unitLockKey(unit) })),
+    exclusions,
+  };
 }
+
+export { planSourcesFor };
 
 /**
  * Project the run from its units. `postSyncStages` is the PARENT's record of what was requested:
@@ -221,6 +302,13 @@ function summarizeUnits(units, { postSyncStages = "none" } = {}) {
   };
 }
 
+/** The inclusive day boundaries a unit was planned with, or null when it is not date-bounded. */
+function unitWindow(descriptor = {}) {
+  const start = descriptor?.windowStart ?? null;
+  const end = descriptor?.windowEnd ?? null;
+  return start && end ? { start, end } : null;
+}
+
 function unitView(unit) {
   if (!unit) return null;
   const p = unit.payload ?? {};
@@ -231,6 +319,9 @@ function unitView(unit) {
     platform: p.platform ?? null,
     accountLabel: p.accountLabel ?? null,
     sourceObject: p.sourceObject ?? null,
+    // The unit's bounded scope, or null for a catalog object that carries no date filter and for
+    // a pre-Phase-5 account-wide unit.
+    window: unitWindow(p),
     lockKey: p.lockKey ?? null,
     status: unit.status,
     attempt: unit.attempt ?? 0,
@@ -293,12 +384,13 @@ export function summariseSyncUnitOutcome(result, { accountLabel = null } = {}) {
 }
 
 export class SyncOrchestrationService {
-  constructor({ prisma = defaultPrisma, now = () => new Date(), leaseMs = DEFAULT_LEASE_MS, maxAttempts = DEFAULT_UNIT_MAX_ATTEMPTS, listAccounts = defaultListAccounts, locks = null } = {}) {
+  constructor({ prisma = defaultPrisma, now = () => new Date(), leaseMs = DEFAULT_LEASE_MS, maxAttempts = DEFAULT_UNIT_MAX_ATTEMPTS, listAccounts = defaultListAccounts, loadAccountState = defaultLoadAccountState, locks = null } = {}) {
     this.db = prisma;
     this.now = now;
     this.leaseMs = leaseMs;
     this.maxAttempts = maxAttempts;
     this.listAccounts = listAccounts;
+    this.loadAccountState = loadAccountState;
     // One shared durable lock vocabulary for orchestration units AND (later) the manual route.
     this.locks = locks ?? new SyncAccountLockService({ prisma, now, leaseMs });
   }
@@ -331,15 +423,21 @@ export class SyncOrchestrationService {
    * single manual unit); otherwise the plan is built from connected accounts.
    */
   async createRun({ kind = "full", trigger = "api", options = {}, units = null } = {}) {
-    const planned = units
-      ? units.map((unit, index) => ({ ...unit, sequence: index + 1, lockKey: unitLockKey(unit) }))
+    const plan = units
+      ? { units: units.map((unit, index) => ({ ...unit, sequence: index + 1, lockKey: unitLockKey(unit) })), exclusions: [] }
       : await buildSyncPlan({
           kind,
           fastSync: options.fastSync,
           promoteAfter: options.promoteAfter !== false,
           includePostSyncUnits: options.includePostSyncUnits === true,
           listAccounts: this.listAccounts,
+          loadAccountState: this.loadAccountState,
+          // One clock for the whole plan: every window of every account is measured from the same
+          // instant, so a plan built across a midnight boundary cannot leave a one-day hole.
+          now: this.now(),
         });
+    const planned = plan.units;
+    const exclusions = plan.exclusions;
     const startedAt = this.now();
     const run = async (tx) => {
       const parent = await tx.jobRun.create({
@@ -355,13 +453,19 @@ export class SyncOrchestrationService {
             options: { fastSync: Boolean(options.fastSync), promoteAfter: options.promoteAfter !== false },
             // Explicit, never silent: "none" when promotion was not requested, "blocked" when
             // placeholders exist, "deferred" when promotion was asked for but has no bounded units.
+            // "blocked" is about POST-SYNC stages only: a non-executable NETWORK source object
+            // (an unbounded per-campaign fan-out) says nothing about whether promotion was
+            // materialised, and conflating the two would misreport every run that plans one.
             postSyncStages:
               options.promoteAfter === false
                 ? "none"
-                : planned.some((unit) => unit.executable === false)
+                : planned.some((unit) => unit.kind !== UNIT_KINDS.NETWORK && unit.executable === false)
                   ? "blocked"
                   : "deferred",
             totalUnits: planned.length,
+            // Source objects the bounded planner deliberately did NOT plan, with the reason.
+            // Recorded on the run so an operator can see what a run does not cover.
+            ...(exclusions.length ? { excludedSources: exclusions } : {}),
           },
           result: { totalUnits: planned.length, completedUnits: 0, failedUnits: 0, pendingUnits: planned.length, runningUnits: 0, percentComplete: 0 },
         },
@@ -382,7 +486,7 @@ export class SyncOrchestrationService {
       return parent;
     };
     const parent = typeof this.db.$transaction === "function" ? await this.db.$transaction(run) : await run(this.db);
-    return { id: parent.id, kind, trigger, totalUnits: planned.length, created: true };
+    return { id: parent.id, kind, trigger, totalUnits: planned.length, excludedSources: exclusions, created: true };
   }
 
   /** Every active run doing the same work, earliest first. The first is the canonical one. */
@@ -452,6 +556,7 @@ export class SyncOrchestrationService {
       trigger: run.payload?.trigger ?? null,
       options: run.payload?.options ?? null,
       totalUnits: run.payload?.totalUnits ?? null,
+      excludedSources: run.payload?.excludedSources ?? [],
       created: false,
     };
   }
@@ -663,6 +768,7 @@ export class SyncOrchestrationService {
       platform: p.platform ?? null,
       accountLabel: p.accountLabel ?? null,
       sourceObject: p.sourceObject ?? null,
+      window: unitWindow(p),
       lockKey: p.lockKey ?? null,
       status: unit?.status ?? null,
       attempt: unit?.attempt ?? 0,
@@ -749,6 +855,8 @@ export class SyncOrchestrationService {
       runningUnits: summary.runningUnits,
       blockedUnits: summary.blockedUnits,
       postSyncStages,
+      // What this run does NOT cover, and why. Empty for a run with nothing excluded.
+      excludedSources: parent.payload?.excludedSources ?? [],
       // Post-sync work that still has to happen: requested (deferred) or materialised but not
       // runnable (blocked), on a run that has not been finalised. A run finalised by an
       // unrecoverable failure is waiting for nothing, so it reports false.

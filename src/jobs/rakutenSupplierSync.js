@@ -13,6 +13,7 @@ import {
   updateAccountSyncTimestamps,
 } from "./syncTimestamps.js";
 import { DEFAULT_DAYS_BACK, SYNC_OVERLAP_DAYS } from "./syncConfig.js";
+import { explicitSyncWindow } from "./syncContext.js";
 import {
   includeSourceObject,
   requestedSourceObject,
@@ -58,16 +59,22 @@ export function buildRakutenEventWindow({
   now = new Date(),
   overlapDays = SYNC_OVERLAP_DAYS,
   initialDaysBack = Number(process.env.RAKUTEN_EVENTS_DAYS_BACK) || 14,
+  // A bounded orchestration unit's window, when one was planned. Still subject to the supplier's
+  // 30-day process-date limit below: a window is honoured, never widened past what Rakuten keeps.
+  window = null,
 } = {}) {
-  const end = validDate(now) || new Date();
-  const previous = validDate(lastSuccessfulSync);
-  const start = previous ? new Date(previous) : new Date(end);
+  const end = window ? new Date(`${window.end}T00:00:00.000Z`) : validDate(now) || new Date();
+  const previous = window ? null : validDate(lastSuccessfulSync);
+  const start = window ? new Date(`${window.start}T00:00:00.000Z`) : previous ? new Date(previous) : new Date(end);
 
-  if (previous) {
-    start.setUTCDate(start.getUTCDate() - Math.max(0, Number(overlapDays) || 0));
-  } else {
-    start.setUTCDate(start.getUTCDate() - clampPositiveInt(initialDaysBack, 14, 30));
+  if (!window) {
+    if (previous) {
+      start.setUTCDate(start.getUTCDate() - Math.max(0, Number(overlapDays) || 0));
+    } else {
+      start.setUTCDate(start.getUTCDate() - clampPositiveInt(initialDaysBack, 14, 30));
+    }
   }
+  // A supplied window skips the fallbacks above but not the supplier limit below.
 
   const earliestAllowed = new Date(end);
   earliestAllowed.setUTCDate(earliestAllowed.getUTCDate() - 30);
@@ -82,7 +89,14 @@ export function buildRakutenEventWindow({
 export function buildRakutenPaymentHistoryWindow({
   now = new Date(),
   daysBack = Number(process.env.RAKUTEN_PAYMENT_DAYS_BACK) || DEFAULT_DAYS_BACK,
+  window = null,
 } = {}) {
+  if (window) {
+    return {
+      bdate: yyyymmdd(new Date(`${window.start}T00:00:00.000Z`)),
+      edate: yyyymmdd(new Date(`${window.end}T00:00:00.000Z`)),
+    };
+  }
   const end = validDate(now) || new Date();
   const start = new Date(end);
   start.setUTCDate(start.getUTCDate() - clampPositiveInt(daysBack, DEFAULT_DAYS_BACK, 3650));
@@ -209,8 +223,12 @@ export async function syncRakutenAccount(accountLabel = "default") {
 
   const timestamps = await getAccountSyncTimestamps("rakuten", accountLabel);
   const refreshCampaigns = shouldRefreshCampaigns(timestamps?.lastCampaignSyncAt);
-  const eventWindow = buildRakutenEventWindow({ lastSuccessfulSync: timestamps?.lastSuccessfulSync });
-  const paymentWindow = buildRakutenPaymentHistoryWindow();
+  const boundedWindow = explicitSyncWindow();
+  const eventWindow = buildRakutenEventWindow({
+    lastSuccessfulSync: timestamps?.lastSuccessfulSync,
+    window: boundedWindow,
+  });
+  const paymentWindow = buildRakutenPaymentHistoryWindow({ window: boundedWindow });
 
   const adapter = createSupplierAdapter("RAKUTEN", {
     accessToken: creds.accessToken,
