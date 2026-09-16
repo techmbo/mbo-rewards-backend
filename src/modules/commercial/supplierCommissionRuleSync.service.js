@@ -20,12 +20,60 @@ import { runWithConcurrency } from "../../core/concurrency.js";
  * rows, so persisting different outcomes concurrently cannot change any of them. Rules that share
  * an outcomeKey ARE each other's version history and stay strictly ordered.
  *
- * The bound is deliberately small: every in-flight transaction holds a pooled connection.
+ * The bound is small because each in-flight transaction holds one pooled connection for its whole
+ * span — a findMany plus one or two writes — and production runs a connection limit of 5. The
+ * ceiling leaves headroom for the work that shares that pool during a sync: JobRun orchestration
+ * writes, raw payload and entity persistence, account timestamp and lock queries, and logging.
  */
-export const SUPPLIER_COMMISSION_RULE_CONCURRENCY = Math.max(
-  1,
-  Number(process.env.SUPPLIER_COMMISSION_RULE_CONCURRENCY || 8),
+const RULE_CONCURRENCY_DEFAULT = 3;
+const RULE_CONCURRENCY_CEILING = 4;
+
+/**
+ * Resolve a requested concurrency to a pool-safe one. An unset or unparseable value falls back to
+ * the default, so the safe behaviour needs no environment variable; anything above the ceiling is
+ * clamped rather than honoured, and anything below one becomes one.
+ */
+export function resolveRuleConcurrency(requested) {
+  if (requested === undefined || requested === null || requested === "") {
+    return RULE_CONCURRENCY_DEFAULT;
+  }
+  const value = Number(requested);
+  if (!Number.isFinite(value)) return RULE_CONCURRENCY_DEFAULT;
+  return Math.min(Math.max(Math.floor(value), 1), RULE_CONCURRENCY_CEILING);
+}
+
+export const SUPPLIER_COMMISSION_RULE_CONCURRENCY = resolveRuleConcurrency(
+  process.env.SUPPLIER_COMMISSION_RULE_CONCURRENCY,
 );
+
+/**
+ * A fixed number of permits, handed straight to the next waiter on release.
+ *
+ * A per-call limit would not bound the pool: a full sync runs three Optimise regions at once and
+ * up to SYNC_ACCOUNT_CONCURRENCY accounts inside each, so several fan-outs can be in flight
+ * together. The permits are module state, so the cap is what the whole process may hold at once.
+ */
+export function createPermitPool(size) {
+  let available = Math.max(1, Math.floor(size));
+  const waiting = [];
+  return {
+    async acquire() {
+      if (available > 0) {
+        available -= 1;
+        return;
+      }
+      await new Promise((resolve) => waiting.push(resolve));
+    },
+    release() {
+      const next = waiting.shift();
+      if (next) next();
+      else available += 1;
+    },
+    available: () => available,
+  };
+}
+
+const rulePermits = createPermitPool(SUPPLIER_COMMISSION_RULE_CONCURRENCY);
 
 /** Group rules by outcomeKey, preserving the order rules were fanned out in. */
 export function groupRulesByOutcomeKey(rules) {
@@ -223,14 +271,21 @@ export async function upsertCommissionRulesForPreparedCampaigns(
     upserted += 1;
   };
 
-  // Independent outcomes run side by side; one outcome's versions stay in order.
+  // Independent outcomes run side by side; one outcome's versions stay in order. The permit pool
+  // is what actually bounds pooled connections, because it is shared by every concurrent fan-out.
+  const permits = deps.permits ?? rulePermits;
   await runWithConcurrency(
     groupRulesByOutcomeKey(embedded),
-    deps.concurrency ?? SUPPLIER_COMMISSION_RULE_CONCURRENCY,
+    resolveRuleConcurrency(deps.concurrency),
     async (group) => {
-      for (const rule of group) {
-        // eslint-disable-next-line no-await-in-loop
-        await persistRule(rule);
+      await permits.acquire();
+      try {
+        for (const rule of group) {
+          // eslint-disable-next-line no-await-in-loop
+          await persistRule(rule);
+        }
+      } finally {
+        permits.release();
       }
     },
   );

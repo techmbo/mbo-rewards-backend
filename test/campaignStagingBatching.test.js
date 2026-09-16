@@ -703,3 +703,174 @@ test("raw staging hands the linkage guard the payload's real entity id", async (
     "entity linkage must go through the batched helper",
   );
 });
+
+// ---------------------------------------------------------------------------
+// Pool safety. Each upsertNormalizedFact holds ONE pooled connection for the
+// whole span of its interactive transaction, so the cap on concurrent groups is
+// a cap on connections. Production runs a connection limit of 5.
+// ---------------------------------------------------------------------------
+
+const { createPermitPool, resolveRuleConcurrency } = await import(
+  "../src/modules/commercial/supplierCommissionRuleSync.service.js"
+);
+
+test("the shipped default is pool-safe and needs no environment variable", () => {
+  assert.equal(resolveRuleConcurrency(undefined), 3, "an unset variable must give the safe default");
+  assert.equal(resolveRuleConcurrency(null), 3);
+  assert.equal(resolveRuleConcurrency(""), 3);
+  assert.equal(SUPPLIER_COMMISSION_RULE_CONCURRENCY, 3);
+  assert.ok(SUPPLIER_COMMISSION_RULE_CONCURRENCY <= 4, "must leave headroom in a pool of 5");
+});
+
+test("an unsafe configured concurrency is clamped, not honoured", () => {
+  assert.equal(resolveRuleConcurrency("8"), 4, "the old default must clamp to the ceiling");
+  assert.equal(resolveRuleConcurrency(64), 4);
+  assert.equal(resolveRuleConcurrency(Number.MAX_SAFE_INTEGER), 4);
+  assert.equal(resolveRuleConcurrency(Infinity), 3, "a non-finite value falls back to the default");
+});
+
+test("a nonsensical concurrency cannot disable or invert the bound", () => {
+  assert.equal(resolveRuleConcurrency("0"), 1);
+  assert.equal(resolveRuleConcurrency(-5), 1);
+  assert.equal(resolveRuleConcurrency("not-a-number"), 3);
+  assert.equal(resolveRuleConcurrency(2.9), 2, "a fraction rounds down, never up");
+});
+
+test("a permit pool never hands out more permits than it has", async () => {
+  const pool = createPermitPool(3);
+  let live = 0;
+  let peak = 0;
+  await Promise.all(
+    Array.from({ length: 40 }, async () => {
+      await pool.acquire();
+      live += 1;
+      peak = Math.max(peak, live);
+      try {
+        await new Promise((r) => setTimeout(r, 2));
+      } finally {
+        live -= 1;
+        pool.release();
+      }
+    }),
+  );
+  assert.equal(peak, 3, "the pool must saturate at exactly its size");
+  assert.equal(pool.available(), 3, "every permit must come back");
+});
+
+test("a permit pool releases waiters even when the work throws", async () => {
+  const pool = createPermitPool(1);
+  await assert.rejects(async () => {
+    await pool.acquire();
+    try {
+      throw new Error("boom");
+    } finally {
+      pool.release();
+    }
+  });
+  assert.equal(pool.available(), 1, "a thrown task must not leak its permit");
+});
+
+test("concurrent fan-outs share one cap, so several regions cannot multiply it", async () => {
+  // A full sync runs three Optimise regions at once, each with its own accounts. A per-call limit
+  // would let that become regions * accounts * limit simultaneous transactions.
+  const shared = createPermitPool(3);
+  let live = 0;
+  let peak = 0;
+  const probeService = {
+    async upsertNormalizedFact() {
+      live += 1;
+      peak = Math.max(peak, live);
+      try {
+        await new Promise((r) => setTimeout(r, 1));
+        return { id: "x" };
+      } finally {
+        live -= 1;
+      }
+    },
+  };
+
+  const region = () =>
+    upsertCommissionRulesForPreparedCampaigns(
+      { networkSource: NETWORK, preparedRecords: campaignRecords(40), sourceAccountKey: ACCOUNT },
+      { prisma: NO_DB, ruleService: probeService, permits: shared },
+    );
+
+  await Promise.all([region(), region(), region()]);
+
+  assert.ok(peak > 1, "independent outcomes must still overlap");
+  assert.ok(peak <= 3, `three concurrent fan-outs peaked at ${peak}; the shared cap is 3`);
+  assert.equal(shared.available(), 3, "every permit must be returned");
+});
+
+test("the fan-out holds at most one connection per concurrent group", async () => {
+  // Nothing in persistRule touches the database outside upsertNormalizedFact's own transaction,
+  // so simultaneous transactions is the connection count.
+  let live = 0;
+  let peak = 0;
+  let campaignLookups = 0;
+  const db = {
+    supplierCampaign: {
+      findMany: async () => {
+        campaignLookups += 1;
+        return [];
+      },
+    },
+  };
+  const service = {
+    async upsertNormalizedFact() {
+      live += 1;
+      peak = Math.max(peak, live);
+      try {
+        await new Promise((r) => setTimeout(r, 1));
+        return { id: "x" };
+      } finally {
+        live -= 1;
+      }
+    },
+  };
+  await upsertCommissionRulesForPreparedCampaigns(
+    { networkSource: NETWORK, preparedRecords: campaignRecords(60), sourceAccountKey: ACCOUNT },
+    { prisma: db, ruleService: service },
+  );
+  assert.equal(campaignLookups, 1, "the only query outside a transaction is the batched lookup");
+  assert.ok(peak <= SUPPLIER_COMMISSION_RULE_CONCURRENCY, `peaked at ${peak}`);
+});
+
+test("the fan-out does not queue hundreds of tasks against the permit pool", async () => {
+  // The permit pool is what bounds connections, but scheduling 267 group tasks that all block on
+  // acquire() is wasted work. The call site clamps the scheduler too, so tasks are started at the
+  // rate permits become free rather than all at once.
+  let waiting = 0;
+  let peakWaiting = 0;
+  const inner = createPermitPool(SUPPLIER_COMMISSION_RULE_CONCURRENCY);
+  const permits = {
+    async acquire() {
+      waiting += 1;
+      peakWaiting = Math.max(peakWaiting, waiting);
+      try {
+        await inner.acquire();
+      } finally {
+        waiting -= 1;
+      }
+    },
+    release: () => inner.release(),
+    available: () => inner.available(),
+  };
+  const service = {
+    async upsertNormalizedFact() {
+      await new Promise((r) => setTimeout(r, 1));
+      return { id: "x" };
+    },
+  };
+
+  await upsertCommissionRulesForPreparedCampaigns(
+    { networkSource: NETWORK, preparedRecords: campaignRecords(267), sourceAccountKey: ACCOUNT },
+    { prisma: NO_DB, ruleService: service, permits },
+  );
+
+  assert.ok(
+    peakWaiting <= SUPPLIER_COMMISSION_RULE_CONCURRENCY,
+    `at most ${SUPPLIER_COMMISSION_RULE_CONCURRENCY} tasks may contend for a permit, saw ${peakWaiting}`,
+  );
+  assert.equal(inner.available(), SUPPLIER_COMMISSION_RULE_CONCURRENCY, "every permit returned");
+});
