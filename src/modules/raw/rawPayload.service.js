@@ -9,6 +9,7 @@ import {
   resolvePayloadForObservation,
 } from "../../field-system/sourceSchemaObserver.service.js";
 import { runWithConcurrency } from "../../core/concurrency.js";
+import { DB_WORK_CONCURRENCY_CEILING } from "../../core/dbPermits.js";
 
 /**
  * Deterministic canonical JSON serialization for hashing.
@@ -398,8 +399,14 @@ export async function persistRawPayloadsForPreparedRecords(
   { metadata = null, required = false, evidence = null, observeSchema = true, db = null } = {},
 ) {
   const client = db ?? prisma;
-  const results = [];
-  for (const record of preparedRecords) {
+  // One row at a time made this Theta(rows) SERIAL round trips: a catalog of a few thousand rows
+  // spent the whole invocation here. The per-row work is unchanged and rows are independent, so it
+  // runs at the pool-safe width instead. Two rows resolving to the same payload key still settle
+  // correctly: persistRawPayload turns the losing create's P2002 into the duplicate outcome the
+  // serial order would have produced.
+  const results = new Array(preparedRecords.length);
+  let requiredFailure = null;
+  await runWithConcurrency(preparedRecords, DB_WORK_CONCURRENCY_CEILING, async (record, index) => {
     try {
       const outcome = await persistRawPayload(
         {
@@ -420,12 +427,18 @@ export async function persistRawPayloadsForPreparedRecords(
         err.outcome = outcome;
         throw err;
       }
-      results.push(outcome);
+      // Index-assigned, never pushed: entity linkage pairs these with preparedRecords by position.
+      results[index] = outcome;
     } catch (error) {
-      if (required) throw error;
-      results.push({ record: null, created: false, failed: true, error });
+      if (required) {
+        requiredFailure = requiredFailure ?? error;
+        results[index] = { record: null, created: false, failed: true, error };
+        return;
+      }
+      results[index] = { record: null, created: false, failed: true, error };
     }
-  }
+  });
+  if (required && requiredFailure) throw requiredFailure;
   if (observeSchema) await observeBatchSchema(results, client);
   return results;
 }
@@ -438,7 +451,10 @@ export async function persistRawPayloadsForPreparedRecords(
  * never repoint immutable lineage. The ids come from the batch's own outcomes, so no lookup is
  * repeated, and the updates are independent rows, safe to run with bounded concurrency.
  */
-export async function linkRawPayloadsToEntities(links, { concurrency = 8, db = prisma } = {}) {
+export async function linkRawPayloadsToEntities(
+  links,
+  { concurrency = DB_WORK_CONCURRENCY_CEILING, db = prisma } = {},
+) {
   const pending = links.filter((link) => link?.id && link?.entityId && !link?.currentEntityId);
   if (!pending.length) return 0;
   let updated = 0;
