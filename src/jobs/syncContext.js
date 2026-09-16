@@ -69,3 +69,15 @@ export function sourceObjectCompanions() {
   if (!Array.isArray(value)) return [];
   return value.map((item) => String(item || "").trim().toLowerCase()).filter(Boolean);
 }
+
+/**
+ * The campaign ids a bounded commission-group unit was planned with, or null when the caller
+ * supplied none (manual routes, the scheduler, an old account-wide unit). A unit that carries
+ * ids fetches exactly those campaigns and no others.
+ */
+export function boundedCampaignIds() {
+  const value = getSyncOptions().campaignIds;
+  if (!Array.isArray(value)) return null;
+  const ids = value.map((id) => String(id ?? "").trim()).filter(Boolean);
+  return ids.length ? ids : null;
+}

@@ -372,6 +372,15 @@ export async function triggerSyncWorker(req, res, next) {
         descriptor.windowStart && descriptor.windowEnd
           ? { start: descriptor.windowStart, end: descriptor.windowEnd }
           : null,
+      // Position and size only: the campaign identifiers stay in the unit payload.
+      campaignChunk:
+        descriptor.campaignChunkIndex === null || descriptor.campaignChunkIndex === undefined
+          ? null
+          : {
+              index: descriptor.campaignChunkIndex,
+              of: descriptor.campaignChunkCount ?? null,
+              campaignCount: Array.isArray(descriptor.campaignIds) ? descriptor.campaignIds.length : null,
+            },
     };
 
     let result;
@@ -391,6 +400,10 @@ export async function triggerSyncWorker(req, res, next) {
         ...(Array.isArray(descriptor.sourceObjectCompanions) && descriptor.sourceObjectCompanions.length
           ? { sourceObjectCompanions: [...descriptor.sourceObjectCompanions] }
           : {}),
+        // A commission-group unit's own campaign slice: this chunk's campaigns and no others.
+        ...(Array.isArray(descriptor.campaignIds) && descriptor.campaignIds.length
+          ? { campaignIds: [...descriptor.campaignIds] }
+          : {}),
       });
     } catch (error) {
       const failed = await orchestration.failUnit(unit.id, error);
@@ -407,6 +420,10 @@ export async function triggerSyncWorker(req, res, next) {
     }
 
     await orchestration.completeUnit(unit.id, summariseSyncUnitOutcome(result, { accountLabel: descriptor.accountLabel }));
+    // Some work can only be scoped once another unit has run — an Optimise account's commission
+    // groups are one request per campaign, and the campaign list is what this unit just staged.
+    // Materialising here keeps that work in the same run instead of dropping it.
+    const followOn = await orchestration.materialiseFollowOnUnits(run.id, descriptor);
     const syncStatus = await orchestration.describeRun(run.id);
     return res.status(200).json({
       ok: true,
@@ -415,6 +432,7 @@ export async function triggerSyncWorker(req, res, next) {
       message: "One sync unit completed.",
       runId: run.id,
       unit: { ...unitView, status: "COMPLETED" },
+      ...(followOn?.appended ? { unitsMaterialised: followOn.appended } : {}),
       syncStatus,
     });
   } catch (error) {

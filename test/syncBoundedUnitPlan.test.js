@@ -110,12 +110,14 @@ function createStore() {
     async findUnique({ where }) { const row = rows.find((r) => r.id === where.id); return row ? clone(row) : null; },
     async findFirst({ where, orderBy }) { const list = sort(rows.filter((r) => match(r, where)), orderBy); return list.length ? clone(list[0]) : null; },
     async findMany({ where, orderBy }) { return sort(rows.filter((r) => match(r, where ?? {})), orderBy).map(clone); },
+    async createMany({ data }) { createManyCalls.push(data.length); for (const row of data) await jobRun.create({ data: row }); return { count: data.length }; },
   };
-  return { rows, prisma: { jobRun, async $transaction(fn) { return fn({ jobRun }); } } };
+  const createManyCalls = [];
+  return { rows, createManyCalls, prisma: { jobRun, async $transaction(fn) { return fn({ jobRun }); } } };
 }
 
 function harness({ units = null, syncImpl = null } = {}) {
-  const { rows, prisma } = createStore();
+  const { rows, prisma, createManyCalls } = createStore();
   const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState });
   const calls = [];
   const locals = {
@@ -131,7 +133,7 @@ function harness({ units = null, syncImpl = null } = {}) {
     await triggerSyncWorker({ app: { locals } }, res, (error) => { throw error; });
     return res;
   };
-  return { rows, prisma, orchestration, calls, worker, units, unitsOf: (runId) => rows.filter((r) => r.jobName === UNIT_JOB_NAME && r.correlationId === runId) };
+  return { rows, prisma, createManyCalls, orchestration, calls, worker, units, unitsOf: (runId) => rows.filter((r) => r.jobName === UNIT_JOB_NAME && r.correlationId === runId) };
 }
 
 const unitsOfAccount = (plan, platform, accountLabel) =>
@@ -337,6 +339,24 @@ describe("duplicate enqueue", () => {
   });
 });
 
+describe("enqueue stays bounded", () => {
+  it("writes the whole plan in one statement inside one transaction", async () => {
+    const h = harness();
+    const run = await h.orchestration.getOrCreateRun({ kind: "full", trigger: "api", options: {} });
+    const units = h.unitsOf(run.id);
+    assert.ok(units.length > 100, "a cold plan really is hundreds of units");
+    // One createMany for the units, not one round trip each: the enqueue transaction holds a
+    // fixed number of statements however big the plan gets.
+    assert.deepEqual(h.createManyCalls, [units.length]);
+    assert.ok(units.every((u) => u.status === "PENDING" && u.correlationId === run.id));
+    assert.deepEqual(
+      units.map((u) => u.priority).sort((a, b) => a - b),
+      units.map((_, i) => i + 1),
+      "sequences are contiguous across the batch",
+    );
+  });
+});
+
 describe("the worker forwards the bounded scope and still does exactly one unit", () => {
   it("passes sourceObject, window and companions verbatim, with promotion off", async () => {
     const h = harness();
@@ -416,30 +436,36 @@ describe("the worker forwards the bounded scope and still does exactly one unit"
 });
 
 describe("nothing is silently widened", () => {
-  it("a source object that cannot be bounded is excluded and named, never planned as a unit", async () => {
-    const { units, exclusions } = await planFor();
-    assert.ok(!units.some((u) => u.sourceObject === "commission_groups"), "not handed to a worker");
-    const optimise = exclusions.filter((e) => e.platform === "optimise_sea" && e.accountLabel === "default");
-    assert.equal(optimise.length, 1);
-    assert.equal(optimise[0].sourceObject, "commission_groups");
-    assert.equal(optimise[0].reason, UNBOUNDED_FANOUT_REASON);
-    assert.equal(optimise[0].accountLabel, "default");
-    assert.ok(exclusions.some((e) => e.accountLabel === "second"), "recorded per account, not per network");
-    // Excluded, not silently widened into a 180-day unbounded pull.
+  it("commission groups are deferred for later materialisation, never excluded", async () => {
+    const { units, exclusions, deferred } = await planFor();
+    // Not planned at enqueue time — the campaign slice is not knowable yet…
+    assert.ok(!units.some((u) => u.sourceObject === "commission_groups"));
+    // …and NOT dropped: nothing about this run is excluded at all any more.
+    assert.deepEqual(exclusions, []);
+    const optimise = deferred.filter((d) => d.platform === "optimise_sea" && d.accountLabel === "default");
+    assert.deepEqual(optimise, [
+      { platform: "optimise_sea", accountLabel: "default", sourceObject: "commission_groups", after: "campaigns" },
+    ]);
+    // One deferral per Optimise ACCOUNT, and none for any other network.
+    assert.equal(deferred.length, 2, "one per connected Optimise account: sea/default and sea/second");
+    assert.ok(deferred.every((d) => d.platform.startsWith("optimise")));
+    // No account is left with an unbounded account-wide unit in its place.
     assert.ok(!units.some((u) => u.platform.startsWith("optimise") && !u.sourceObject));
   });
 
-  it("the run records what it does not cover, and status reports it", async () => {
+  it("the run records the work it has not planned yet, and status reports it", async () => {
     const h = harness();
     const run = await h.orchestration.getOrCreateRun({ kind: "full", trigger: "api", options: {} });
     const parent = h.rows.find((r) => r.id === run.id);
-    assert.ok(parent.payload.excludedSources.length > 0);
-    assert.ok(parent.payload.excludedSources.every((e) => e.reason === UNBOUNDED_FANOUT_REASON));
+    assert.equal(parent.payload.excludedSources, undefined, "nothing is excluded");
+    assert.ok(parent.payload.deferredSources.length > 0);
+    assert.ok(parent.payload.deferredSources.every((d) => d.sourceObject === "commission_groups" && d.after === "campaigns"));
     const status = await h.orchestration.describeRun(run.id);
-    assert.deepEqual(status.excludedSources, parent.payload.excludedSources);
-    // An excluded source is NOT a blocked unit: it must not hold the run open for ever.
+    assert.deepEqual(status.excludedSources, []);
+    assert.deepEqual(status.deferredSources, parent.payload.deferredSources);
+    // Deferred work is not a blocked unit: it must not hold the run open for ever.
     assert.equal(status.blockedUnits, 0);
-    assert.equal(parent.payload.postSyncStages, "deferred", "post-sync deferral is unaffected by an excluded source");
+    assert.equal(parent.payload.postSyncStages, "deferred", "post-sync deferral is a separate thing");
   });
 
   it("a half-supplied window is refused rather than widened to the default lookback", async () => {

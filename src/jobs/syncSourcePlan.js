@@ -37,6 +37,10 @@ function source({
   // advanced reports pull a fixed payment history, not the events window).
   spanDaysBack = null,
   spanIncremental = null,
+  // A source object whose unit scope is only knowable after another source object of the same
+  // account has run. It is not planned at enqueue time and is NOT an exclusion: the named unit's
+  // completion materialises it.
+  materialisedAfter = null,
 }) {
   return Object.freeze({
     sourceObject,
@@ -49,6 +53,7 @@ function source({
     notes,
     spanDaysBack,
     spanIncremental,
+    materialisedAfter,
   });
 }
 
@@ -96,14 +101,14 @@ const FAMILY_SOURCES = Object.freeze({
     source({ sourceObject: "reporting", windowed: true, windowDays: 7, notes: "POST /reporting/ (fromDate/toDate); the invoice-date variant shares this identity." }),
     source({ sourceObject: "payment_overview", windowed: true, windowDays: 30, notes: "GET /payments (startDate/endDate), low volume." }),
     source({ sourceObject: "invoices", windowed: true, windowDays: 30, notes: "GET /invoices (startDate/endDate), low volume." }),
-    // NOT bounded and deliberately not pretended to be: one GET per applicable campaign, up to
-    // OPTIMISE_COMMISSION_GROUPS_MAX_CAMPAIGNS (200) requests at 12.5s each ≈ 2500s. No date
-    // filter exists for it. Bounding it needs campaign-chunked units, which is its own change.
+    // Bounded by CAMPAIGN SUBSET, not by date: one GET per applicable campaign at the 12.5s
+    // limiter. The campaign slice is only knowable once this account's campaigns unit has staged
+    // its rows, so the chunks are materialised then rather than at enqueue time — see
+    // `materialisedAfter`. They are never excluded: these rules feed SupplierCommissionRule.
     source({
       sourceObject: "commission_groups",
-      executable: false,
-      blockedReason: UNBOUNDED_FANOUT_REASON,
-      notes: "GET /campaigns/{campaignId}/commission-groups — one request per campaign, up to 200, at the 12.5s limiter. Cannot fit one invocation and has no date filter.",
+      materialisedAfter: "campaigns",
+      notes: "GET /campaigns/{campaignId}/commission-groups — one request per campaign. Planned as fixed-size campaign chunks once the campaigns unit has staged the campaign list.",
     }),
   ]),
   // Limiters 200ms (campaigns) / 300ms (reports).
@@ -262,10 +267,22 @@ export function planAccountUnits({
   overlapDays = SYNC_OVERLAP_DAYS,
 } = {}) {
   const sources = planSourcesFor(platform);
-  if (!sources.length) return { units: [], exclusions: [] };
+  if (!sources.length) return { units: [], exclusions: [], deferred: [] };
   const units = [];
   const exclusions = [];
+  const deferred = [];
   for (const source of sources) {
+    if (source.materialisedAfter) {
+      // Planned later, by the completion of the unit it depends on. Deliberately not a unit here
+      // and deliberately not an exclusion: nothing about it is dropped.
+      deferred.push({
+        platform,
+        accountLabel,
+        sourceObject: source.sourceObject,
+        after: source.materialisedAfter,
+      });
+      continue;
+    }
     if (source.executable === false) {
       exclusions.push({
         platform,
@@ -293,7 +310,18 @@ export function planAccountUnits({
       units.push({ ...base, windowStart: window.windowStart, windowEnd: window.windowEnd });
     }
   }
-  return { units, exclusions };
+  return { units, exclusions, deferred };
+}
+
+/**
+ * Source objects of a platform that are materialised once `sourceObject` completes for the same
+ * account. Empty for every platform with no deferred source.
+ */
+export function sourcesMaterialisedAfter(platform, sourceObject) {
+  const key = String(sourceObject || "").toLowerCase();
+  return planSourcesFor(platform)
+    .filter((source) => source.materialisedAfter === key)
+    .map((source) => source.sourceObject);
 }
 
 /** Diagnostics for the audit report and the tests: how big a plan is, without building it. */

@@ -40,6 +40,10 @@ export function optimiseCommissionGroupSyncConfig(env = process.env) {
  * identifier. This is request selection only — persisted campaign identity
  * (resolveOptimiseCampaignId / SupplierCampaign.supplierCampaignId) is untouched.
  */
+export function optimiseCommissionGroupCampaignId(raw = {}) {
+  return commissionGroupCampaignIdOf(raw);
+}
+
 function commissionGroupCampaignIdOf(raw = {}) {
   for (const value of [raw?.campaignId, raw?.campaign_id]) {
     if (value === undefined || value === null) continue;
@@ -247,4 +251,90 @@ export async function fetchOptimiseCommissionGroupSourceObject({
     byCampaign: result.skipped || result.error ? new Map() : fetched?.byCampaign ?? new Map(),
     campaignScope: result.skipped ? { ...campaignScope, skipped: true } : campaignScope,
   };
+}
+
+/**
+ * Campaigns per bounded commission-group unit.
+ *
+ * GET /campaigns/{campaignId}/commission-groups is one request per campaign, and the Optimise
+ * client limiter holds requests 12.5 s apart (OPTIMISE_MIN_INTERVAL_MS). Eight campaigns is
+ * therefore ~100 s of supplier time before the unit's own persistence work, comfortably inside a
+ * serverless invocation with room for a slow response and the rule writes. Ten would be ~125 s and
+ * still fit, but leaves less margin for the per-campaign SupplierCommissionRule persistence that
+ * follows each fetch, so the conservative end of the range is used.
+ */
+export const OPTIMISE_COMMISSION_GROUP_CHUNK_SIZE = 8;
+
+/**
+ * Narrow campaign rows to the slice a bounded commission-group unit names.
+ *
+ * Identity comes from the SAME extractor the request path uses, so a chunk cannot select a
+ * campaign under a foreign identifier, and a row whose id is not in the slice is dropped outright
+ * — that is what keeps two chunks of one account from requesting the same campaign twice.
+ */
+export function filterCampaignRowsToChunk(campaignRows = [], campaignIds = null) {
+  if (!Array.isArray(campaignIds) || !campaignIds.length) return Array.isArray(campaignRows) ? campaignRows : [];
+  const wanted = new Set(campaignIds.map((id) => String(id ?? "").trim()).filter(Boolean));
+  return (Array.isArray(campaignRows) ? campaignRows : []).filter((row) =>
+    wanted.has(String(commissionGroupCampaignIdOf(row) ?? "")),
+  );
+}
+
+/** Split ids into fixed-size chunks, in order. No id is dropped and none appears twice. */
+export function chunkCommissionGroupCampaignIds(campaignIds = [], size = OPTIMISE_COMMISSION_GROUP_CHUNK_SIZE) {
+  const step = Math.max(1, Math.floor(Number(size) || OPTIMISE_COMMISSION_GROUP_CHUNK_SIZE));
+  const chunks = [];
+  for (let index = 0; index < campaignIds.length; index += step) {
+    chunks.push(campaignIds.slice(index, index + step));
+  }
+  return chunks;
+}
+
+/**
+ * The campaign ids a commission-group run would request, in a STABLE order.
+ *
+ * Rows are ordered by campaign id BEFORE selection, so the `maxCampaigns` cap and the resulting
+ * chunk boundaries do not depend on the order the staging table happens to return. Selection
+ * itself is the existing one — same scope rule, same cap, same id extraction — so a chunked run
+ * covers exactly the campaigns a single account-wide run would have covered.
+ */
+export function orderedCommissionGroupCampaignIds(campaignRows = [], config = optimiseCommissionGroupSyncConfig()) {
+  const rows = (Array.isArray(campaignRows) ? [...campaignRows] : []).sort((a, b) => {
+    const left = commissionGroupCampaignIdOf(a) ?? "";
+    const right = commissionGroupCampaignIdOf(b) ?? "";
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
+  const selection = selectOptimiseCommissionGroupCampaigns(rows, config);
+  return {
+    campaignIds: selection.campaigns.map((campaign) => campaign.campaignId),
+    campaignsInspected: selection.campaignsInspected,
+    skippedByCap: selection.skippedByCap,
+  };
+}
+
+/**
+ * Bounded commission-group units for one Optimise account, from the campaigns ALREADY STAGED by
+ * this run's campaigns unit. Discovery is therefore a single indexed read of rows the run has
+ * just written — never a supplier fan-out — which is why the chunks can only be planned once the
+ * campaigns unit has completed.
+ */
+export async function planOptimiseCommissionGroupChunks({
+  platform,
+  accountLabel = "default",
+  db = prisma,
+  config = optimiseCommissionGroupSyncConfig(),
+  chunkSize = OPTIMISE_COMMISSION_GROUP_CHUNK_SIZE,
+} = {}) {
+  if (!config.enabled) return { chunks: [], campaignIds: [], chunkSize, reason: "disabled" };
+  const rows = await loadStagedOptimiseCampaignRows({
+    networkSource: platform,
+    sourceAccountKey: accountLabel,
+    db,
+  });
+  const { campaignIds, campaignsInspected, skippedByCap } = orderedCommissionGroupCampaignIds(rows, config);
+  const chunks = chunkCommissionGroupCampaignIds(campaignIds, chunkSize).map((ids, index) => ({
+    index,
+    campaignIds: ids,
+  }));
+  return { chunks, campaignIds, campaignsInspected, skippedByCap, chunkSize };
 }

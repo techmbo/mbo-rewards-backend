@@ -25,7 +25,11 @@
 import { prisma as defaultPrisma } from "../database/prisma.js";
 import { listMarketplaceAccounts } from "../modules/integrations/oauth.service.js";
 import { getAccountSyncTimestamps } from "./syncTimestamps.js";
-import { planAccountUnits, planSourcesFor } from "./syncSourcePlan.js";
+import { planAccountUnits, planSourcesFor, sourcesMaterialisedAfter } from "./syncSourcePlan.js";
+import {
+  OPTIMISE_COMMISSION_GROUP_CHUNK_SIZE,
+  planOptimiseCommissionGroupChunks,
+} from "./optimiseCommissionGroupSync.js";
 import {
   DEFAULT_LEASE_MS as LOCK_LEASE_MS,
   SyncAccountLockService,
@@ -179,6 +183,7 @@ export async function buildSyncPlan({
 } = {}) {
   const units = [];
   const exclusions = [];
+  const deferred = [];
   const networkOptions = { fastSync: kind === "incremental" ? true : Boolean(fastSync), promoteAfter: false };
   const planAccount = async (platform, entry) => {
     const lastSuccessfulSync =
@@ -193,6 +198,7 @@ export async function buildSyncPlan({
       networkOptions,
     });
     exclusions.push(...planned.exclusions);
+    deferred.push(...planned.deferred);
     // A platform with no audited source objects keeps the pre-Phase-5 shape: one account-wide
     // unit. Nothing is dropped because the audit does not cover it yet.
     if (!planned.units.length && !planned.exclusions.length) {
@@ -220,6 +226,7 @@ export async function buildSyncPlan({
   return {
     units: units.map((unit, index) => ({ ...unit, sequence: index + 1, lockKey: unitLockKey(unit) })),
     exclusions,
+    deferred,
   };
 }
 
@@ -302,6 +309,40 @@ function summarizeUnits(units, { postSyncStages = "none" } = {}) {
   };
 }
 
+export const OPTIMISE_COMMISSION_GROUPS_SOURCE = "commission_groups";
+export { OPTIMISE_COMMISSION_GROUP_CHUNK_SIZE };
+
+/**
+ * What makes two unit descriptors the same piece of work. Used to keep an appended unit from
+ * being planned twice when a completion is replayed.
+ */
+function unitIdentity(descriptor = {}) {
+  return [
+    descriptor.kind ?? "",
+    descriptor.platform ?? "",
+    descriptor.accountLabel ?? "",
+    descriptor.sourceObject ?? "",
+    descriptor.windowStart ?? "",
+    descriptor.windowEnd ?? "",
+    descriptor.campaignChunkIndex ?? "",
+  ].join("|");
+}
+
+/**
+ * Safe chunk metadata: WHICH slice of an account's campaigns this unit covers and how big it is.
+ * Deliberately counts and positions only — the campaign identifiers themselves are supplier data
+ * and never leave the unit payload.
+ */
+function unitCampaignChunk(descriptor = {}) {
+  const index = descriptor?.campaignChunkIndex;
+  if (index === null || index === undefined) return null;
+  return {
+    index,
+    of: descriptor?.campaignChunkCount ?? null,
+    campaignCount: Array.isArray(descriptor?.campaignIds) ? descriptor.campaignIds.length : null,
+  };
+}
+
 /** The inclusive day boundaries a unit was planned with, or null when it is not date-bounded. */
 function unitWindow(descriptor = {}) {
   const start = descriptor?.windowStart ?? null;
@@ -322,6 +363,7 @@ function unitView(unit) {
     // The unit's bounded scope, or null for a catalog object that carries no date filter and for
     // a pre-Phase-5 account-wide unit.
     window: unitWindow(p),
+    campaignChunk: unitCampaignChunk(p),
     lockKey: p.lockKey ?? null,
     status: unit.status,
     attempt: unit.attempt ?? 0,
@@ -384,13 +426,16 @@ export function summariseSyncUnitOutcome(result, { accountLabel = null } = {}) {
 }
 
 export class SyncOrchestrationService {
-  constructor({ prisma = defaultPrisma, now = () => new Date(), leaseMs = DEFAULT_LEASE_MS, maxAttempts = DEFAULT_UNIT_MAX_ATTEMPTS, listAccounts = defaultListAccounts, loadAccountState = defaultLoadAccountState, locks = null } = {}) {
+  constructor({ prisma = defaultPrisma, now = () => new Date(), leaseMs = DEFAULT_LEASE_MS, maxAttempts = DEFAULT_UNIT_MAX_ATTEMPTS, listAccounts = defaultListAccounts, loadAccountState = defaultLoadAccountState, planCommissionGroupChunks = planOptimiseCommissionGroupChunks, locks = null } = {}) {
     this.db = prisma;
     this.now = now;
     this.leaseMs = leaseMs;
     this.maxAttempts = maxAttempts;
     this.listAccounts = listAccounts;
     this.loadAccountState = loadAccountState;
+    // Injected so a unit test never reaches the staging tables, and so the discovery step stays
+    // where it belongs: with the module that owns Optimise campaign selection.
+    this.planCommissionGroupChunks = planCommissionGroupChunks;
     // One shared durable lock vocabulary for orchestration units AND (later) the manual route.
     this.locks = locks ?? new SyncAccountLockService({ prisma, now, leaseMs });
   }
@@ -438,6 +483,7 @@ export class SyncOrchestrationService {
         });
     const planned = plan.units;
     const exclusions = plan.exclusions;
+    const deferredSources = plan.deferred ?? [];
     const startedAt = this.now();
     const run = async (tx) => {
       const parent = await tx.jobRun.create({
@@ -466,27 +512,39 @@ export class SyncOrchestrationService {
             // Source objects the bounded planner deliberately did NOT plan, with the reason.
             // Recorded on the run so an operator can see what a run does not cover.
             ...(exclusions.length ? { excludedSources: exclusions } : {}),
+            // Source objects whose units are materialised later in this run, once the unit they
+            // depend on has completed. Present so a run states up front that this work is
+            // coming, not that it was dropped.
+            ...(deferredSources.length ? { deferredSources } : {}),
           },
           result: { totalUnits: planned.length, completedUnits: 0, failedUnits: 0, pendingUnits: planned.length, runningUnits: 0, percentComplete: 0 },
         },
       });
       await tx.jobRun.update({ where: { id: parent.id }, data: { correlationId: parent.id } });
-      for (const unit of planned) {
-        await tx.jobRun.create({
-          data: {
-            jobName: UNIT_JOB_NAME,
-            status: "PENDING",
-            priority: unit.sequence,
-            maxAttempts: this.maxAttempts,
-            correlationId: parent.id,
-            payload: { parentRunId: parent.id, ...unit },
-          },
-        });
+      const unitRows = planned.map((unit) => ({
+        jobName: UNIT_JOB_NAME,
+        status: "PENDING",
+        priority: unit.sequence,
+        maxAttempts: this.maxAttempts,
+        correlationId: parent.id,
+        payload: { parentRunId: parent.id, ...unit },
+      }));
+      // One statement for the whole plan. A bounded plan is hundreds of units, and one INSERT
+      // round trip each would put the enqueue transaction — and the request that holds it — at the
+      // mercy of network latency, well past the interactive-transaction timeout. The per-row
+      // fallback keeps clients without createMany working unchanged.
+      if (typeof tx.jobRun.createMany === "function") {
+        await tx.jobRun.createMany({ data: unitRows });
+      } else {
+        for (const data of unitRows) {
+          // eslint-disable-next-line no-await-in-loop
+          await tx.jobRun.create({ data });
+        }
       }
       return parent;
     };
     const parent = typeof this.db.$transaction === "function" ? await this.db.$transaction(run) : await run(this.db);
-    return { id: parent.id, kind, trigger, totalUnits: planned.length, excludedSources: exclusions, created: true };
+    return { id: parent.id, kind, trigger, totalUnits: planned.length, excludedSources: exclusions, deferredSources, created: true };
   }
 
   /** Every active run doing the same work, earliest first. The first is the canonical one. */
@@ -557,6 +615,7 @@ export class SyncOrchestrationService {
       options: run.payload?.options ?? null,
       totalUnits: run.payload?.totalUnits ?? null,
       excludedSources: run.payload?.excludedSources ?? [],
+      deferredSources: run.payload?.deferredSources ?? [],
       created: false,
     };
   }
@@ -595,6 +654,94 @@ export class SyncOrchestrationService {
 
     await this.#collapseDuplicatesOf(created.id, { kind, options });
     return { ...created, options: { fastSync: Boolean(options.fastSync), promoteAfter: options.promoteAfter !== false } };
+  }
+
+  /**
+   * Append units to a run that is already in flight, after the units it exists for.
+   *
+   * Used by the follow-on materialisation below: a unit whose scope is only knowable once another
+   * unit has run cannot be planned at enqueue time, and dropping it would silently omit the work.
+   * Appending is safe for the projection — the parent's counters are recomputed from its units on
+   * every refresh — and it is IDEMPOTENT: a descriptor whose identity already exists on the run is
+   * skipped, so a replayed completion cannot double-plan a chunk.
+   *
+   * It refuses a run that is already terminal: resurrecting a finished run would make its recorded
+   * outcome a lie.
+   */
+  async appendUnits(runId, units = []) {
+    if (!runId || !units.length) return { appended: 0, skipped: 0 };
+    const parent = await this.db.jobRun.findUnique({ where: { id: runId } });
+    if (!parent || parent.jobName !== ORCHESTRATION_JOB_NAME) return { appended: 0, skipped: 0, reason: "not_found" };
+    if (TERMINAL_STATUSES.includes(parent.status)) return { appended: 0, skipped: units.length, reason: "run_terminal" };
+
+    const existing = await this.listUnits(runId);
+    const identities = new Set(existing.map((unit) => unitIdentity(unit.payload ?? {})));
+    let sequence = existing.reduce((max, unit) => Math.max(max, unit.priority ?? 0), 0);
+    let appended = 0;
+    let skipped = 0;
+    for (const unit of units) {
+      if (identities.has(unitIdentity(unit))) {
+        skipped += 1;
+        continue;
+      }
+      sequence += 1;
+      identities.add(unitIdentity({ ...unit, sequence }));
+      // eslint-disable-next-line no-await-in-loop
+      await this.db.jobRun.create({
+        data: {
+          jobName: UNIT_JOB_NAME,
+          status: "PENDING",
+          priority: sequence,
+          maxAttempts: this.maxAttempts,
+          correlationId: runId,
+          payload: { parentRunId: runId, ...unit, sequence, lockKey: unitLockKey(unit) },
+        },
+      });
+      appended += 1;
+    }
+    if (appended > 0) {
+      await this.db.jobRun.update({
+        where: { id: runId },
+        data: { payload: { ...(parent.payload ?? {}), totalUnits: existing.length + appended } },
+      });
+      await this.refreshRun(runId);
+    }
+    return { appended, skipped };
+  }
+
+  /**
+   * Materialise the units that a just-completed unit unlocks.
+   *
+   * Optimise commission groups are the case this exists for: the work is one supplier request per
+   * campaign, so a unit has to name a campaign slice, and the campaign list is only known once the
+   * account's campaigns unit has staged it. Discovery is a single read of those staged rows — no
+   * supplier call — and the chunks are appended to the same run under the SAME account lock.
+   */
+  async materialiseFollowOnUnits(runId, descriptor = {}) {
+    const platform = text(descriptor?.platform);
+    const sourceObject = text(descriptor?.sourceObject);
+    if (!runId || !platform || !sourceObject) return { appended: 0, skipped: 0 };
+    const targets = sourcesMaterialisedAfter(platform, sourceObject);
+    if (!targets.includes(OPTIMISE_COMMISSION_GROUPS_SOURCE)) return { appended: 0, skipped: 0 };
+
+    const accountLabel = text(descriptor?.accountLabel) ?? "default";
+    const plan = await this.planCommissionGroupChunks({ platform, accountLabel });
+    const chunks = plan?.chunks ?? [];
+    if (!chunks.length) return { appended: 0, skipped: 0, campaigns: 0 };
+    const options = { ...(descriptor?.options ?? {}), promoteAfter: false };
+    return this.appendUnits(
+      runId,
+      chunks.map((chunk) => ({
+        kind: UNIT_KINDS.NETWORK,
+        platform,
+        accountLabel,
+        sourceObject: OPTIMISE_COMMISSION_GROUPS_SOURCE,
+        campaignChunkIndex: chunk.index,
+        campaignChunkCount: chunks.length,
+        campaignIds: [...chunk.campaignIds],
+        options,
+      })),
+    );
   }
 
   async listUnits(runId) {
@@ -769,6 +916,7 @@ export class SyncOrchestrationService {
       accountLabel: p.accountLabel ?? null,
       sourceObject: p.sourceObject ?? null,
       window: unitWindow(p),
+      campaignChunk: unitCampaignChunk(p),
       lockKey: p.lockKey ?? null,
       status: unit?.status ?? null,
       attempt: unit?.attempt ?? 0,
@@ -857,6 +1005,8 @@ export class SyncOrchestrationService {
       postSyncStages,
       // What this run does NOT cover, and why. Empty for a run with nothing excluded.
       excludedSources: parent.payload?.excludedSources ?? [],
+      // Source objects still to be materialised by a unit that has not completed yet.
+      deferredSources: parent.payload?.deferredSources ?? [],
       // Post-sync work that still has to happen: requested (deferred) or materialised but not
       // runnable (blocked), on a run that has not been finalised. A run finalised by an
       // unrecoverable failure is waiting for nothing, so it reports false.

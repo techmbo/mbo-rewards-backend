@@ -53,7 +53,13 @@ import {
   shouldRefreshCoupons,
   updateAccountSyncTimestamps,
 } from "./syncTimestamps.js";
-import { explicitSyncWindow, getSyncOptions, runWithSyncOptions, shouldPromoteAfterSync } from "./syncContext.js";
+import {
+  boundedCampaignIds,
+  explicitSyncWindow,
+  getSyncOptions,
+  runWithSyncOptions,
+  shouldPromoteAfterSync,
+} from "./syncContext.js";
 import {
   initSyncProgress,
   recordAccountSyncComplete,
@@ -77,6 +83,7 @@ import { syncRakutenAccount } from "./rakutenSupplierSync.js";
 import { syncCjAccount } from "./cjSupplierSync.js";
 import {
   fetchOptimiseCommissionGroupSourceObject,
+  filterCampaignRowsToChunk,
   loadStagedOptimiseCampaignRows,
   optimiseCommissionGroupSyncConfig,
 } from "./optimiseCommissionGroupSync.js";
@@ -1053,11 +1060,21 @@ async function syncOptimiseRegion(region, accountLabel) {
   let commissionGroupsResult = null;
   if (wantCommissionGroups) {
     let campaignRowsForGroups = campaignsResult.error ? [] : asArray(campaignsResult.rows);
-    if (!campaignRowsForGroups.length && !refreshCampaigns) {
+    // Fall back to the staged campaign rows whenever THIS run did not fetch the list itself —
+    // either because the cache was still warm, or because a bounded unit filtered the campaigns
+    // source object out. Without the second case a commission-group unit would have no campaigns
+    // to work from and would silently fetch nothing.
+    if (!campaignRowsForGroups.length && (campaignsResult.skipped || !refreshCampaigns)) {
       campaignRowsForGroups = await loadStagedOptimiseCampaignRows({
         networkSource: platform,
         sourceAccountKey: accountLabel,
       });
+    }
+    // A bounded commission-group unit names its own campaign slice: it requests those campaigns
+    // and no others, so two chunks of the same account never fetch the same campaign twice.
+    const chunkCampaignIds = boundedCampaignIds();
+    if (chunkCampaignIds) {
+      campaignRowsForGroups = filterCampaignRowsToChunk(campaignRowsForGroups, chunkCampaignIds);
     }
     commissionGroupsResult = campaignsResult.error
       ? await fetchOptimiseSourceObject(
