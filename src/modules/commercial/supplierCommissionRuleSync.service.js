@@ -11,6 +11,7 @@ import { enrichSupplierCommissionRuleRecord } from "./supplierCommissionRule.con
 import { collectEmbeddedCommissionRulesFromCampaigns } from "./supplierCommissionRuleFanOut.js";
 import { SupplierCommissionRuleService } from "./services/supplierCommissionRule.service.js";
 import { runWithConcurrency } from "../../core/concurrency.js";
+import { createPermitPool, resolveDbConcurrency } from "../../core/dbPermits.js";
 
 /**
  * How many commission-rule outcomes may be persisted at once.
@@ -26,53 +27,23 @@ import { runWithConcurrency } from "../../core/concurrency.js";
  * writes, raw payload and entity persistence, account timestamp and lock queries, and logging.
  */
 const RULE_CONCURRENCY_DEFAULT = 3;
-const RULE_CONCURRENCY_CEILING = 4;
 
-/**
- * Resolve a requested concurrency to a pool-safe one. An unset or unparseable value falls back to
- * the default, so the safe behaviour needs no environment variable; anything above the ceiling is
- * clamped rather than honoured, and anything below one becomes one.
- */
+/** Pool-safe concurrency for rule persistence; see core/dbPermits for the ceiling and its reason. */
 export function resolveRuleConcurrency(requested) {
-  if (requested === undefined || requested === null || requested === "") {
-    return RULE_CONCURRENCY_DEFAULT;
-  }
-  const value = Number(requested);
-  if (!Number.isFinite(value)) return RULE_CONCURRENCY_DEFAULT;
-  return Math.min(Math.max(Math.floor(value), 1), RULE_CONCURRENCY_CEILING);
+  return resolveDbConcurrency(requested, RULE_CONCURRENCY_DEFAULT);
 }
 
 export const SUPPLIER_COMMISSION_RULE_CONCURRENCY = resolveRuleConcurrency(
   process.env.SUPPLIER_COMMISSION_RULE_CONCURRENCY,
 );
 
+export { createPermitPool };
+
 /**
- * A fixed number of permits, handed straight to the next waiter on release.
- *
  * A per-call limit would not bound the pool: a full sync runs three Optimise regions at once and
  * up to SYNC_ACCOUNT_CONCURRENCY accounts inside each, so several fan-outs can be in flight
- * together. The permits are module state, so the cap is what the whole process may hold at once.
+ * together. These permits are module state, so the cap is what the whole process may hold.
  */
-export function createPermitPool(size) {
-  let available = Math.max(1, Math.floor(size));
-  const waiting = [];
-  return {
-    async acquire() {
-      if (available > 0) {
-        available -= 1;
-        return;
-      }
-      await new Promise((resolve) => waiting.push(resolve));
-    },
-    release() {
-      const next = waiting.shift();
-      if (next) next();
-      else available += 1;
-    },
-    available: () => available,
-  };
-}
-
 const rulePermits = createPermitPool(SUPPLIER_COMMISSION_RULE_CONCURRENCY);
 
 /** Group rules by outcomeKey, preserving the order rules were fanned out in. */

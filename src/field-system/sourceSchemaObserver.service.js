@@ -1,5 +1,6 @@
 import { prisma } from "../database/prisma.js";
 import { runWithConcurrency } from "../core/concurrency.js";
+import { resolveDbConcurrency } from "../core/dbPermits.js";
 import { observeSourceFields } from "./fieldExtractor.js";
 import { computeSchemaSignature } from "./schemaSignature.js";
 import {
@@ -7,7 +8,11 @@ import {
   resolveSourceObjectKey,
 } from "./resolveSourceObject.js";
 
-const FIELD_UPSERT_CONCURRENCY = 25;
+/**
+ * One upsert per distinct field path. Sized against the connection pool, not throughput: this runs
+ * inside other fan-outs, so 25 here multiplied by an outer fan-out is what exhausts the pool.
+ */
+const FIELD_UPSERT_CONCURRENCY = resolveDbConcurrency(process.env.FIELD_UPSERT_CONCURRENCY);
 
 function aggregateObservations(payloads) {
   const byPath = new Map();

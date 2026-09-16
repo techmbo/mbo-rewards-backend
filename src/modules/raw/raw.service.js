@@ -11,6 +11,15 @@ import { runWithConcurrency } from "../../core/concurrency.js";
 import { logFieldUsageWarnings, validateFieldUsage } from "../../field-system/validateFieldUsage.js";
 import { upsertCouponFromSync } from "../coupons/couponCms.service.js";
 import { SYNC_UPSERT_CHUNK_SIZE, SYNC_UPSERT_CONCURRENCY } from "../../jobs/syncConfig.js";
+import { resolveDbConcurrency } from "../../core/dbPermits.js";
+
+/**
+ * Coupon and offer rows are staged one row at a time, and each row's work is several Prisma calls,
+ * so this fan-out is measured against the connection pool rather than against throughput.
+ * SYNC_UPSERT_CONCURRENCY defaulted to 50, which put hundreds of calls in a queue served by five
+ * connections and timed them out.
+ */
+const COUPON_ROW_CONCURRENCY = resolveDbConcurrency(SYNC_UPSERT_CONCURRENCY);
 import { batchUpsertEntities } from "./batchEntityUpsert.js";
 import { normalizeEntity } from "./normalizers.js";
 import {
@@ -319,6 +328,12 @@ export async function upsertRawEntity({
   rawData,
   externalId,
   evidence = null,
+  /**
+   * Schema observation fans out one upsert per field path. When a caller stages many rows it
+   * observes them once for the whole batch and turns this off, so a row fan-out never nests a
+   * second fan-out inside itself.
+   */
+  observeSchema = true,
 }) {
   const original = cloneRawJson(rawData ?? {});
   const record = prepareEntityRecord({
@@ -336,6 +351,7 @@ export async function upsertRawEntity({
         externalId,
         payload: original,
         processingStatus: "RECEIVED",
+        observeSchema,
         ...(evidence || {}),
       });
     } catch (error) {
@@ -387,6 +403,7 @@ export async function upsertRawEntity({
         payload: original,
         entityId: entity?.id ?? null,
         processingStatus: "STAGED",
+        observeSchema: false,
         ...(evidence || {}),
       });
     } catch {
@@ -397,18 +414,58 @@ export async function upsertRawEntity({
   });
 }
 
-async function upsertCouponRows({ networkSource, rows, externalIdPrefix, sourceAccountKey }) {
+/**
+ * Stage coupon/offer rows one at a time, because the coupon CMS merge has to read each existing
+ * Entity before deciding how to write it.
+ *
+ * Two things keep this within the connection pool. The fan-out is bounded by
+ * COUPON_ROW_CONCURRENCY, and schema observation is lifted out of the rows: it happens once for
+ * the whole batch, so no row's work fans out again while the row itself holds a connection.
+ */
+async function upsertCouponRows({
+  networkSource,
+  rows,
+  externalIdPrefix,
+  sourceAccountKey,
+  alreadyObserved = false,
+}) {
   const results = [];
-  await runWithConcurrency(rows, SYNC_UPSERT_CONCURRENCY, async (rawData, index) => {
-    const externalId = withAccountScopedExternalId(
+  const prepared = rows.map((rawData, index) => ({
+    rawData: rawData ?? {},
+    externalId: withAccountScopedExternalId(
       resolveExternalId(rawData ?? {}, externalIdPrefix, index),
       sourceAccountKey,
-    );
+    ),
+  }));
+
+  if (!alreadyObserved) {
+    // Batch observation also writes each row's RECEIVED lineage, exactly as the caller's own
+    // staging pass does, so nothing is lost by taking observation out of the per-row work.
+    try {
+      await persistRawPayloadsForPreparedRecords(
+        prepared.map((entry) => ({
+          networkSource,
+          entityType: "coupon",
+          externalId: entry.externalId,
+          rawData: entry.rawData,
+        })),
+        { metadata: { sourceAccountKey: sourceAccountKey ?? null } },
+      );
+    } catch (error) {
+      logger.warn(
+        { err: error?.message || String(error), networkSource, rows: prepared.length },
+        "coupon batch raw payload persist failed",
+      );
+    }
+  }
+
+  await runWithConcurrency(prepared, COUPON_ROW_CONCURRENCY, async (entry) => {
     const entity = await upsertRawEntity({
       networkSource,
       entityType: "coupon",
-      rawData: rawData ?? {},
-      externalId,
+      rawData: entry.rawData,
+      externalId: entry.externalId,
+      observeSchema: false,
     });
     results.push(entity);
   });
@@ -494,7 +551,8 @@ export async function upsertManyRawEntities({
 
   if (entityType === "coupon") {
     const couponStart = Date.now();
-    await upsertCouponRows({ networkSource, rows, externalIdPrefix, sourceAccountKey });
+    // These are the rows the staging pass above already observed and wrote RECEIVED lineage for.
+    await upsertCouponRows({ networkSource, rows, externalIdPrefix, sourceAccountKey, alreadyObserved: true });
     rowUpsertMs = Date.now() - couponStart;
   } else {
     const batchStart = Date.now();
