@@ -103,6 +103,11 @@ import {
   evidenceFromRunSummary,
 } from "./sourceObjectRuns.js";
 import { resultRows } from "../modules/networkOps/sourceObjectSync.service.js";
+import {
+  optimiseAdvanceWatermark,
+  optimiseCampaignCatalogWalked,
+  optimiseWorkScope,
+} from "./optimiseWorkScope.js";
 
 /** Phase 11 — accumulates per-account timings for SyncJobLog without changing API result shapes. */
 const accountTimingsCollector = [];
@@ -898,14 +903,29 @@ async function syncOptimiseRegion(region, accountLabel) {
   }
 
   const timestamps = await getAccountSyncTimestamps(platform, credentials.accountLabel);
+  const requested = requestedSourceObject();
   // A bounded campaigns unit exists to fetch ONE named slice of the catalog, so it always fetches:
   // letting the cache gate skip it would silently drop pages the run still needs.
   const campaignPage = boundedCampaignPage();
   const refreshCampaigns = campaignPage ? true : shouldRefreshCampaigns(timestamps?.lastCampaignSyncAt);
   const refreshCoupons = shouldRefreshCoupons(timestamps?.lastCouponSyncAt);
+  // Phase 5 — every write below is gated on the same predicate the fetch layer uses, so a unit
+  // that fetched nothing for a resource can never persist, promote or enrich that resource.
+  const scope = optimiseWorkScope(requested, { refreshCampaigns, refreshCoupons });
+  const {
+    persistCampaigns,
+    persistVouchers,
+    touchedPerformance,
+    touchedConversions,
+    conversions: wantsConversions,
+    conversionsByPayment: wantsConversionsByPayment,
+    reporting: wantsReporting,
+    invoiceReporting: wantsInvoiceReporting,
+    payments: wantsPayments,
+    invoices: wantsInvoices,
+  } = scope;
   const networkAccountId =
     credentials.networkAccountId || (await resolveNetworkAccountId(platform, credentials.accountLabel));
-  const requested = requestedSourceObject();
   const unavailable = await runUnavailableIfRequested({
     network: platform,
     networkAccountId,
@@ -1175,23 +1195,39 @@ async function syncOptimiseRegion(region, accountLabel) {
   // detailed groups succeeded now AND for campaigns that already hold open detailed rules.
   // A failed, disabled, skipped or empty detailed fetch therefore never reactivates
   // campaign-summary economics beside existing detailed rules.
+  // Only the campaign and commission-group writes consume this, so a unit that performs neither
+  // must not pay for the lookup.
+  const needsDetailedPrecedence =
+    persistCampaigns ||
+    Boolean(commissionGroupsResult && !commissionGroupsResult.error && !commissionGroupsResult.skipped);
   let detailedPrecedence = null;
-  try {
-    detailedPrecedence = await commissionGroupPersistence.resolveDetailedPrecedence({
-      networkSource,
-      sourceAccountLabel: accountLabel || "default",
-      byCampaign: commissionGroupByCampaign,
-    });
-  } catch (error) {
-    logger.warn(
-      { err: error?.message || String(error), networkSource, accountLabel },
-      "optimise detailed commission precedence lookup failed; campaign-summary fan-out is suppressed for this run",
-    );
+  if (needsDetailedPrecedence) {
+    try {
+      detailedPrecedence = await commissionGroupPersistence.resolveDetailedPrecedence({
+        networkSource,
+        sourceAccountLabel: accountLabel || "default",
+        byCampaign: commissionGroupByCampaign,
+      });
+    } catch (error) {
+      logger.warn(
+        { err: error?.message || String(error), networkSource, accountLabel },
+        "optimise detailed commission precedence lookup failed; campaign-summary fan-out is suppressed for this run",
+      );
+    }
   }
   const detailedCommissionCampaignIds = detailedPrecedence?.protectedCampaignIds ?? null;
   const suppressCampaignSummaryFanOut = detailedPrecedence == null;
 
-  if (refreshCampaigns) {
+  // One decision, two consumers: the account-wide duplicate sweep and lastCampaignSyncAt both
+  // mean "the whole catalog has now been walked", so neither may fire on a partial slice.
+  const walkedWholeCampaignCatalog = optimiseCampaignCatalogWalked({
+    persistCampaigns,
+    campaignsFailed: Boolean(campaignsResult.error),
+    campaignPage,
+    campaignPagination,
+  });
+
+  if (persistCampaigns) {
     await upsertManyRawEntities({
       networkSource,
       entityType: "campaign",
@@ -1203,7 +1239,11 @@ async function syncOptimiseRegion(region, accountLabel) {
       commissionRuleSkipCampaignIds: detailedCommissionCampaignIds,
       commissionRuleFanOutDisabled: suppressCampaignSummaryFanOut,
     });
-    removedDuplicateCampaigns = await cleanupOptimiseCampaignDuplicates(networkSource, accountLabel);
+    // The sweep reads every staged campaign of the network, so it is account-wide work, not slice
+    // work, and cross-slice duplicates only become visible once the last slice has landed.
+    if (walkedWholeCampaignCatalog) {
+      removedDuplicateCampaigns = await cleanupOptimiseCampaignDuplicates(networkSource, accountLabel);
+    }
   }
 
   // Detailed rules → canonical SupplierCommissionRule[] with historical versioning.
@@ -1223,86 +1263,106 @@ async function syncOptimiseRegion(region, accountLabel) {
     }
   }
 
-  await upsertManyRawEntities({
-    networkSource,
-    entityType: "performance",
-    rows: reportingRows,
-    externalIdPrefix: `${networkSource}-report`,
-    sourceAccountKey: accountLabel,
-    onTiming: entityTiming.onTiming,
-    evidence: evidenceFromRunSummary(reportingResult.syncRun, {
-      requestWindow: reportingRange,
-    }),
-  });
-  await upsertManyRawEntities({
-    networkSource,
-    entityType: "performance",
-    rows: invoiceReportingRows,
-    externalIdPrefix: `${networkSource}-invoice-report`,
-    sourceAccountKey: accountLabel,
-    onTiming: entityTiming.onTiming,
-    evidence: evidenceFromRunSummary(invoiceReportingResult.syncRun, {
-      requestWindow: reportingRange,
-    }),
-  });
-  const factPromo = await promotePerformanceRowsToFacts([...reportingRows, ...invoiceReportingRows], {
-    networkSource,
-    sourceAccountLabel: accountLabel || "default",
-    sourceEndpoint: `${networkSource}.reporting`,
-  });
-  const mboClickEnrich = await enrichFactsWithMboLinkClicks({
-    supplier: "OPTIMISE",
-    sourceAccountLabel: accountLabel || "default",
-  });
-  await upsertManyRawEntities({
-    networkSource,
-    entityType: "conversion",
-    rows: conversionsResult.rows,
-    externalIdPrefix: `${networkSource}-conversion`,
-    sourceAccountKey: accountLabel,
-    onTiming: entityTiming.onTiming,
-    evidence: evidenceFromRunSummary(conversionsResult.syncRun, {
-      requestWindow: conversionsRange,
-    }),
-  });
-  await upsertManyRawEntities({
-    networkSource,
-    entityType: "conversion",
-    rows: conversionsByPayment,
-    externalIdPrefix: `${networkSource}-conversion-by-payment`,
-    sourceAccountKey: accountLabel,
-    onTiming: entityTiming.onTiming,
-    evidence: evidenceFromRunSummary(conversionsByPaymentResult.syncRun, {
-      requestWindow: conversionsRange,
-    }),
-  });
+  if (wantsReporting) {
+    await upsertManyRawEntities({
+      networkSource,
+      entityType: "performance",
+      rows: reportingRows,
+      externalIdPrefix: `${networkSource}-report`,
+      sourceAccountKey: accountLabel,
+      onTiming: entityTiming.onTiming,
+      evidence: evidenceFromRunSummary(reportingResult.syncRun, {
+        requestWindow: reportingRange,
+      }),
+    });
+  }
+  if (wantsInvoiceReporting) {
+    await upsertManyRawEntities({
+      networkSource,
+      entityType: "performance",
+      rows: invoiceReportingRows,
+      externalIdPrefix: `${networkSource}-invoice-report`,
+      sourceAccountKey: accountLabel,
+      onTiming: entityTiming.onTiming,
+      evidence: evidenceFromRunSummary(invoiceReportingResult.syncRun, {
+        requestWindow: reportingRange,
+      }),
+    });
+  }
+  // Promotion and MBO-click enrichment exist to turn THIS unit's performance rows into facts.
+  // enrichFactsWithMboLinkClicks scans every fact of the account and issues per-fact queries, so
+  // running it for a unit that fetched no performance rows is pure account-wide cost.
+  const factPromo = touchedPerformance
+    ? await promotePerformanceRowsToFacts([...reportingRows, ...invoiceReportingRows], {
+        networkSource,
+        sourceAccountLabel: accountLabel || "default",
+        sourceEndpoint: `${networkSource}.reporting`,
+      })
+    : { attempted: 0, upserted: 0, skipped: 0 };
+  const mboClickEnrich = touchedPerformance
+    ? await enrichFactsWithMboLinkClicks({
+        supplier: "OPTIMISE",
+        sourceAccountLabel: accountLabel || "default",
+      })
+    : { examined: 0, updated: 0, unresolved: 0 };
+  if (wantsConversions) {
+    await upsertManyRawEntities({
+      networkSource,
+      entityType: "conversion",
+      rows: conversionsResult.rows,
+      externalIdPrefix: `${networkSource}-conversion`,
+      sourceAccountKey: accountLabel,
+      onTiming: entityTiming.onTiming,
+      evidence: evidenceFromRunSummary(conversionsResult.syncRun, {
+        requestWindow: conversionsRange,
+      }),
+    });
+  }
+  if (wantsConversionsByPayment) {
+    await upsertManyRawEntities({
+      networkSource,
+      entityType: "conversion",
+      rows: conversionsByPayment,
+      externalIdPrefix: `${networkSource}-conversion-by-payment`,
+      sourceAccountKey: accountLabel,
+      onTiming: entityTiming.onTiming,
+      evidence: evidenceFromRunSummary(conversionsByPaymentResult.syncRun, {
+        requestWindow: conversionsRange,
+      }),
+    });
+  }
   // Pointer 13 — performance coupon must come from the performance source object, not conversions.
-  const couponEnrich = await enrichFactsWithConversionCoupons();
-  result.conversionCouponEnrich = couponEnrich;
-  await upsertManyRawEntities({
-    networkSource,
-    entityType: "payment",
-    rows: paymentsResult.rows,
-    externalIdPrefix: `${networkSource}-payment`,
-    sourceAccountKey: accountLabel,
-    onTiming: entityTiming.onTiming,
-    evidence: evidenceFromRunSummary(paymentsResult.syncRun, {
-      requestWindow: paymentsRange,
-    }),
-  });
-  await upsertManyRawEntities({
-    networkSource,
-    entityType: "payment",
-    rows: optimiseInvoices,
-    externalIdPrefix: `${networkSource}-invoice`,
-    sourceAccountKey: accountLabel,
-    onTiming: entityTiming.onTiming,
-    evidence: evidenceFromRunSummary(invoicesResult.syncRun, {
-      requestWindow: paymentsRange,
-    }),
-  });
+  const couponEnrich = touchedConversions
+    ? await enrichFactsWithConversionCoupons()
+    : { examined: 0, updated: 0, unresolved: 0, skipped: true, reason: "source_object_filter" };
+  if (wantsPayments) {
+    await upsertManyRawEntities({
+      networkSource,
+      entityType: "payment",
+      rows: paymentsResult.rows,
+      externalIdPrefix: `${networkSource}-payment`,
+      sourceAccountKey: accountLabel,
+      onTiming: entityTiming.onTiming,
+      evidence: evidenceFromRunSummary(paymentsResult.syncRun, {
+        requestWindow: paymentsRange,
+      }),
+    });
+  }
+  if (wantsInvoices) {
+    await upsertManyRawEntities({
+      networkSource,
+      entityType: "payment",
+      rows: optimiseInvoices,
+      externalIdPrefix: `${networkSource}-invoice`,
+      sourceAccountKey: accountLabel,
+      onTiming: entityTiming.onTiming,
+      evidence: evidenceFromRunSummary(invoicesResult.syncRun, {
+        requestWindow: paymentsRange,
+      }),
+    });
+  }
 
-  if (refreshCoupons) {
+  if (persistVouchers) {
     await upsertManyRawEntities({
       networkSource,
       entityType: "coupon",
@@ -1314,18 +1374,16 @@ async function syncOptimiseRegion(region, accountLabel) {
     });
   }
 
+  // Row counts only: totalSaved sums these, so nothing but a number may live here.
   const savedCounts = {
-    // Where this unit's slice ended, so the orchestrator can plan the next one deterministically.
-    // Null for an unbounded run; never any supplier payload.
-    campaignPage: campaignPagination,
-    campaigns: refreshCampaigns ? campaignsResult.rows.length : 0,
+    campaigns: persistCampaigns ? campaignsResult.rows.length : 0,
     conversions: conversionsResult.rows.length,
     conversionsByPayment: conversionsByPayment.length,
     reporting: reportingRows.length,
     invoiceReporting: invoiceReportingRows.length,
     payments: paymentsResult.rows.length,
     invoices: optimiseInvoices.length,
-    vouchers: refreshCoupons ? voucherCodesResult.rows.length : 0,
+    vouchers: persistVouchers ? voucherCodesResult.rows.length : 0,
     commissionGroups: commissionGroupsResult && !commissionGroupsResult.error ? commissionGroupsResult.rows.length : 0,
   };
 
@@ -1334,12 +1392,19 @@ async function syncOptimiseRegion(region, accountLabel) {
     throw new Error(joinUserMessages(warnings));
   }
 
+  // Timestamp semantics are per-resource and never optimistic.
+  // lastCampaignSyncAt means "the whole catalog was walked", which is what the TTL gate and the
+  // Network Health view both read it as, so a partial slice never stamps it.
+  // lastSuccessfulSync is the incremental watermark for the conversions, reporting and payments
+  // windows. A unit that fetched one source object has not covered that window for the others, so
+  // moving the watermark would silently shrink a later window. Only a whole-account run advances
+  // it; re-reading an overlapping window is safe, skipping one is not.
   await markAccountSyncSuccess(platform, credentials.accountLabel, {
-    refreshedCampaigns: refreshCampaigns,
-    refreshedCoupons: refreshCoupons,
+    refreshedCampaigns: walkedWholeCampaignCatalog,
+    refreshedCoupons: persistVouchers,
     refreshedOrders: conversionsResult.rows.length > 0 || reportingRows.length > 0,
     refreshedPayments: paymentsResult.rows.length > 0 || optimiseInvoices.length > 0,
-    advanceLastSuccessfulSync: warnings.length === 0,
+    advanceLastSuccessfulSync: optimiseAdvanceWatermark({ requested, warningCount: warnings.length }),
   });
 
   accountTimer.end("accountSyncMs");
@@ -1355,8 +1420,11 @@ async function syncOptimiseRegion(region, accountLabel) {
     warnings,
     userMessage: warnings.length > 0 ? joinUserMessages(warnings) : null,
     incrementalFrom: conversionsRange.fromDate,
-    skippedCampaignRefresh: !refreshCampaigns,
-    skippedCouponRefresh: !refreshCoupons,
+    // Where this unit's slice ended, so the orchestrator can plan the next one deterministically.
+    // Null for an unbounded run; never any supplier payload.
+    campaignPage: campaignPagination,
+    skippedCampaignRefresh: !persistCampaigns,
+    skippedCouponRefresh: !persistVouchers,
     syncMetadata,
     networkPerformanceFacts: factPromo.upserted,
     mboLinkClickEnrich: mboClickEnrich.updated,

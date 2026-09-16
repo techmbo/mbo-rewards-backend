@@ -165,6 +165,18 @@ export const OPTIMISE_RESOURCE_IDENTITY = Object.freeze({
   },
 });
 
+/**
+ * Phase 5 — the single predicate deciding whether an Optimise resource belongs to the requested
+ * source object. Fetching and every downstream persistence, promotion and enrichment step must
+ * consult this same function, so a bounded unit can never skip a fetch and still write that
+ * resource's data.
+ */
+export function includeOptimiseResource(requested, resource) {
+  const identity = OPTIMISE_RESOURCE_IDENTITY[resource];
+  if (!identity) return true;
+  return includeSourceObject(requested, identity.sourceObject);
+}
+
 export async function fetchOptimiseSourceObject(
   resource,
   credentials,
@@ -175,7 +187,7 @@ export async function fetchOptimiseSourceObject(
   const identity = OPTIMISE_RESOURCE_IDENTITY[resource];
   const requested = requestedSourceObject(ctx.sourceObject);
 
-  if (requested && identity && !includeSourceObject(requested, identity.sourceObject)) {
+  if (identity && !includeOptimiseResource(requested, resource)) {
     return fetchOptimiseResource(resource, credentials, async () => [], {
       skipped: true,
       skipReason: "source_object_filter",
