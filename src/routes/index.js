@@ -360,8 +360,14 @@ router.get(
 );
 // Read-only: what a new /sync/all WOULD plan against current account state. Admin-only, creates
 // nothing, and is registered before the /sync/:platform patterns so it is never captured by them.
+//
+// noStoreHeaders comes FIRST, before the auth guards: it describes the estate's connected accounts
+// and sync cadence, and without it the response falls through to the platform default of
+// `public, max-age=0, must-revalidate` — shared-cacheable. Setting it ahead of the guards covers
+// every response the route can produce, including the 401/403 they short-circuit with.
 router.get(
   "/sync/plan-preview",
+  noStoreHeaders,
   authenticate,
   requireAdminRole,
   requirePermission(PERMISSIONS.SYSTEM_READ),

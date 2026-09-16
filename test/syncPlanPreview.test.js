@@ -312,7 +312,95 @@ describe("the summary is safe and order-independent by contract", () => {
   });
 });
 
+describe("the response is never shared-cacheable", () => {
+  /** Serves the real route chain on an ephemeral port so the wire headers can be read. */
+  async function serve(build) {
+    const express = (await import("express")).default;
+    const app = express();
+    app.use(express.json());
+    build(app);
+    app.use((error, _req, res, _next) => {
+      res.status(error.statusCode ?? error.status ?? 500).json({ ok: false, message: error.message });
+    });
+    const server = await new Promise((resolve) => {
+      const s = app.listen(0, "127.0.0.1", () => resolve(s));
+    });
+    const base = `http://127.0.0.1:${server.address().port}`;
+    return {
+      request: (path) => fetch(`${base}${path}`),
+      stop: () => new Promise((resolve) => server.close(resolve)),
+    };
+  }
+
+  it("Cache-Control is no-store on the answer", async () => {
+    const { noStoreHeaders } = await import("../src/platform/security/index.js");
+    const h = harness();
+    const app = await serve((a) =>
+      a.get("/sync/plan-preview", noStoreHeaders, (req, res, next) => {
+        req.app.locals.syncOrchestration = h.orchestration;
+        return previewSyncPlanHandler(req, res, next);
+      }),
+    );
+    try {
+      const res = await app.request("/sync/plan-preview");
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get("cache-control"), "no-store");
+      assert.equal(res.headers.get("pragma"), "no-cache");
+      assert.ok(!/public/i.test(res.headers.get("cache-control") ?? ""), "never shared-cacheable");
+      assert.equal((await res.json()).preview, true);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  it("no-store also covers the 401/403 the guards short-circuit with", async () => {
+    const { noStoreHeaders } = await import("../src/platform/security/index.js");
+    const refuse = (_req, res) => res.status(403).json({ ok: false, message: "forbidden" });
+    const app = await serve((a) => a.get("/sync/plan-preview", noStoreHeaders, refuse, previewSyncPlanHandler));
+    try {
+      const res = await app.request("/sync/plan-preview");
+      assert.equal(res.status, 403);
+      assert.equal(res.headers.get("cache-control"), "no-store", "a refusal is account state too");
+    } finally {
+      await app.stop();
+    }
+  });
+
+  it("the handler sets no Cache-Control of its own — which is why the route must", async () => {
+    const h = harness();
+    const app = await serve((a) =>
+      a.get("/unguarded", (req, res, next) => {
+        req.app.locals.syncOrchestration = h.orchestration;
+        return previewSyncPlanHandler(req, res, next);
+      }),
+    );
+    try {
+      const res = await app.request("/unguarded");
+      assert.equal(res.status, 200);
+      // The handler emits NO cache directive. Locally that means an absent header; in production
+      // the hosting platform fills the gap with `public, max-age=0, must-revalidate`, which is
+      // exactly what /api/sync/plan-preview returned before this fix. The route-level middleware
+      // is what closes it — the handler is not the right place, because a 401/403 never reaches it.
+      assert.equal(res.headers.get("cache-control"), null);
+    } finally {
+      await app.stop();
+    }
+  });
+});
+
 describe("source guards", () => {
+  it("the route carries the shared no-store middleware, ahead of the auth guards", () => {
+    const route = ROUTES_SRC.split('"/sync/plan-preview",')[1].split(");")[0];
+    assert.match(route, /noStoreHeaders/, "the existing internal-API cache-control mechanism");
+    assert.ok(
+      route.indexOf("noStoreHeaders") < route.indexOf("authenticate"),
+      "before the guards, so a 401/403 is covered too",
+    );
+    // The shared middleware is reused, not a second caching mechanism invented for this route.
+    assert.match(ROUTES_SRC, /import \{[^}]*noStoreHeaders[^}]*\} from "\.\.\/platform\/security\/index\.js";/s);
+    assert.ok(!route.includes("Cache-Control"), "the header is not hand-written into the route");
+  });
+
   it("the route is admin-only, a GET, and registered before the /sync/:platform patterns", () => {
     const route = ROUTES_SRC.split('"/sync/plan-preview",')[1].split(");")[0];
     assert.match(route, /authenticate/);
