@@ -16,6 +16,7 @@ import {
   UNIT_BLOCKED_REASON,
   UNIT_JOB_NAME,
   UNIT_KINDS,
+  isUnitExecutable,
   unitLockKey,
 } from "../src/jobs/syncOrchestration.service.js";
 import { SyncAccountLockService, stageLockKey } from "../src/jobs/syncAccountLock.service.js";
@@ -528,16 +529,17 @@ describe("the worker executes exactly one aggregation day", () => {
     assert.deepEqual(h.rebuilds, []);
   });
 
-  it("aggregation is executable, and entity promotion is still not", () => {
-    assert.ok(EXECUTABLE_UNIT_KINDS.includes(UNIT_KINDS.AGGREGATION));
-    assert.ok(EXECUTABLE_UNIT_KINDS.includes(UNIT_KINDS.NETWORK));
-    // Phase 6b made CONVERSION_PROMOTION bounded (one unit is one cursor page), so it joined the
-    // list; see conversionPromotionUnit.test.js. Entity PROMOTION has no bounded implementation
-    // and is the one stage a worker still refuses.
-    assert.ok(EXECUTABLE_UNIT_KINDS.includes(UNIT_KINDS.CONVERSION_PROMOTION));
-    assert.ok(!EXECUTABLE_UNIT_KINDS.includes(UNIT_KINDS.PROMOTION));
-    // Widening the list never widens what an AGGREGATION unit itself may do.
-    assert.equal(EXECUTABLE_UNIT_KINDS.length, 3);
+  it("every post-sync stage is now bounded, and an aggregation unit is still only its own day", () => {
+    // Phase 6a bounded AGGREGATION to one day, 6b bounded CONVERSION_PROMOTION to one cursor page,
+    // 6c bounded PROMOTION to one cursor page of one entity type. Being executable is NOT being
+    // ordered: the stages still depend on each other and the parent gate owns that.
+    for (const kind of Object.values(UNIT_KINDS)) {
+      assert.ok(EXECUTABLE_UNIT_KINDS.includes(kind), kind);
+    }
+    assert.equal(EXECUTABLE_UNIT_KINDS.length, Object.keys(UNIT_KINDS).length);
+    // Widening the list never widens what an AGGREGATION unit itself may do: a day unit still
+    // rebuilds exactly its own day, which the rest of this file pins.
+    assert.equal(isUnitExecutable({ kind: UNIT_KINDS.AGGREGATION, executable: false }), false);
   });
 });
 

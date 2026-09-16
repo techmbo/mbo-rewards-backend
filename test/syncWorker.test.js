@@ -384,7 +384,7 @@ describe("source guards — one unit, nothing in the background, nothing else ch
     // The unbounded post-sync entrypoints stay out of the controller entirely. AggregationJob and
     // ConversionPromotionService are reachable, but ONLY through their bounded entrypoints: the
     // whole-catalog stages are not.
-    for (const forbidden of ["runTrackedJob", "PromotionJob", "promotionJob", "maybePromoteAfterSync", "syncAll"]) {
+    for (const forbidden of ["runTrackedJob", "maybePromoteAfterSync", "syncAll"]) {
       assert.ok(!worker.includes(forbidden), forbidden);
       assert.ok(!CONTROLLER_SRC.includes(forbidden), `${forbidden} in the controller`);
     }
@@ -402,6 +402,18 @@ describe("source guards — one unit, nothing in the background, nothing else ch
       "an unbounded conversion-promotion drain is called in the controller",
     );
     assert.match(CONTROLLER_SRC, /new ConversionPromotionService\(\)\.runPage\(input\)/);
+    // Phase 6c — PromotionJob.run() drains every page of every requested type AND fires the
+    // whole-sweep Rakuten commission hook. A bounded unit may only reach the single-page
+    // entrypoint, and the retry path must stay out of the worker entirely.
+    assert.ok(
+      !/PromotionJob\(\)\s*\.\s*run\(/.test(CONTROLLER_SRC),
+      "the unbounded PromotionJob.run() drain is called in the controller",
+    );
+    assert.ok(!CONTROLLER_SRC.includes("runPromotionJob"), "runPromotionJob in the controller");
+    assert.ok(!CONTROLLER_SRC.includes("retryPromotionJob"), "retryPromotionJob in the controller");
+    assert.ok(!CONTROLLER_SRC.includes("persistRakutenCommissionOffers"), "the Rakuten whole sweep in the controller");
+    assert.match(CONTROLLER_SRC, /new PromotionJob\(\)\.runPage\(input\)/);
+    assert.ok(!worker.includes("PromotionJob"), "the worker itself never reaches for the job");
     assert.ok(!worker.includes("AggregationJob"), "the worker itself never reaches for the job");
     assert.ok(!worker.includes("ConversionPromotionService"), "the worker itself never reaches for the service");
     // Every promise in the worker path is awaited.

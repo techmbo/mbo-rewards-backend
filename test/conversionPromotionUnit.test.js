@@ -590,9 +590,15 @@ describe("Phase 6b — a conversion-promotion unit is exactly one cursor page", 
     assert.equal(h.units(run.id).filter((u) => u.status === "PENDING").length, 1, "the continuation, left for the next invocation");
   });
 
-  it("24. entity promotion is still NOT executable, and the order it must follow is unchanged", async () => {
-    assert.equal(isUnitExecutable({ kind: UNIT_KINDS.PROMOTION }), false);
-    assert.throws(() => assertUnitExecutable({ kind: UNIT_KINDS.PROMOTION }), (error) => error.code === "unit_not_executable");
+  it("24. a blocked entity-promotion placeholder is still refused, and ordering is not yet enforced", async () => {
+    // Phase 6c made entity promotion bounded too, so the kind list no longer holds the ordering.
+    // What still holds is the stored flag: an older run's placeholder is executable:false and no
+    // worker will touch it.
+    assert.equal(isUnitExecutable({ kind: UNIT_KINDS.PROMOTION, executable: false }), false);
+    assert.throws(
+      () => assertUnitExecutable({ kind: UNIT_KINDS.PROMOTION, executable: false }),
+      (error) => error.code === "unit_not_executable",
+    );
 
     resetClock();
     const h = app();
@@ -600,10 +606,14 @@ describe("Phase 6b — a conversion-promotion unit is exactly one cursor page", 
       kind: "full",
       trigger: "api",
       options: { promoteAfter: false },
-      units: [{ kind: UNIT_KINDS.PROMOTION, options: {} }, promotionUnit()],
+      units: [
+        { kind: UNIT_KINDS.PROMOTION, options: {}, executable: false, blockedReason: "bounded_units_not_implemented" },
+        promotionUnit(),
+      ],
     });
-    // The promotion placeholder is skipped, not executed — and skipping it is exactly why this
-    // phase must not be materialised into a production run before Phase 6c.
+    // The blocked placeholder is skipped and the conversion-promotion page runs instead. Nothing
+    // here makes promotion run FIRST, which is why neither stage may be materialised into a
+    // production run until the parent transition gate enforces the order.
     const res = await h.worker();
     assert.equal(res.body.unit.kind, UNIT_KINDS.CONVERSION_PROMOTION);
     assert.equal(h.calls.length, 1);

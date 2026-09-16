@@ -169,25 +169,29 @@ describe("plan — one bounded, ordered unit per network account, then the post-
   });
 
   it("executability is refused on BOTH grounds independently: an unbounded kind, or an explicit flag", () => {
-    // By kind alone — a post-sync stage with no bounded implementation is not executable.
-    // Phase 6a made AGGREGATION bounded (one unit is one day) and Phase 6b made
-    // CONVERSION_PROMOTION bounded (one unit is one cursor page), so they left this list.
-    // Entity PROMOTION has no bounded implementation and stays refused.
-    for (const kind of [UNIT_KINDS.PROMOTION]) {
-      assert.equal(isUnitExecutable({ kind }), false, kind);
-      assert.throws(() => assertUnitExecutable({ kind }), (error) => error.code === "unit_not_executable");
-    }
+    // By kind alone — every stage now has a bounded implementation: 6a made AGGREGATION one day,
+    // 6b made CONVERSION_PROMOTION one cursor page, 6c made PROMOTION one cursor page of one
+    // entity type. An unknown kind is still refused, which is what keeps this a list and not a
+    // rubber stamp.
     assert.equal(isUnitExecutable({ kind: UNIT_KINDS.AGGREGATION }), true, "one day is a bounded unit");
     assert.equal(isUnitExecutable({ kind: UNIT_KINDS.CONVERSION_PROMOTION }), true, "one page is a bounded unit");
+    assert.equal(isUnitExecutable({ kind: UNIT_KINDS.PROMOTION }), true, "one typed page is a bounded unit");
     // …and a stage planned as blocked stays blocked whatever the kind list says, so widening the
-    // list can never silently un-block an older run's placeholders.
-    assert.equal(isUnitExecutable({ kind: UNIT_KINDS.AGGREGATION, executable: false }), false);
-    assert.equal(isUnitExecutable({ kind: UNIT_KINDS.CONVERSION_PROMOTION, executable: false }), false);
-    assert.equal(
-      isUnitExecutable({ payload: { kind: UNIT_KINDS.CONVERSION_PROMOTION, executable: false } }),
-      false,
-      "an older run's blocked conversion-promotion placeholder stays blocked",
-    );
+    // list can never silently un-block an older run's placeholders. THIS is what now carries the
+    // safety that the kind list used to: every placeholder the planner writes is executable:false.
+    for (const kind of [UNIT_KINDS.AGGREGATION, UNIT_KINDS.CONVERSION_PROMOTION, UNIT_KINDS.PROMOTION]) {
+      assert.equal(isUnitExecutable({ kind, executable: false }), false, kind);
+      assert.equal(
+        isUnitExecutable({ payload: { kind, executable: false } }),
+        false,
+        `an older run's blocked ${kind} placeholder stays blocked`,
+      );
+      assert.throws(
+        () => assertUnitExecutable({ kind, executable: false }),
+        (error) => error.code === "unit_not_executable",
+        kind,
+      );
+    }
     // By flag alone — an otherwise executable kind marked non-executable stays refused.
     assert.equal(isUnitExecutable({ kind: UNIT_KINDS.NETWORK }), true);
     assert.equal(isUnitExecutable({ kind: UNIT_KINDS.NETWORK, executable: false }), false);

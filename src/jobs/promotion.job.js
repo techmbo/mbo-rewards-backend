@@ -4,7 +4,15 @@ import { PromotionService } from "../modules/supplier/services/promotion.service
 import { SupplierCampaignPromotionService } from "../modules/supplier/services/supplierCampaignPromotion.service.js";
 import { SupplierCouponPromotionService } from "../modules/supplier/services/supplierCouponPromotion.service.js";
 import { CampaignNormalizationService } from "../modules/ops/campaignNormalization.service.js";
-import { persistRakutenCommissionOffers } from "../modules/commercial/rakutenCommissionPersistence.service.js";
+import {
+  RakutenCommissionPersistenceService,
+  persistRakutenCommissionOffers,
+} from "../modules/commercial/rakutenCommissionPersistence.service.js";
+import {
+  OFFER_ENTITY_TYPE,
+  OFFER_NETWORK_SOURCE,
+  PROMOTION_PAGE_SIZE,
+} from "./promotionUnit.js";
 
 function emptySummary() {
   return {
@@ -52,6 +60,73 @@ export class PromotionJob {
     this.entityRepo = deps.entityRepo ?? new EntityRepository();
     this.normalization = deps.normalization ?? new CampaignNormalizationService();
     this.rakutenCommissionPromotion = deps.rakutenCommissionPromotion ?? persistRakutenCommissionOffers;
+    // The PER-OFFER Rakuten commission writer. The hook above is the legacy whole-sweep call and
+    // stays exactly as it was for run(); a bounded offer page promotes one offer at a time.
+    this.rakutenOfferPromotion = deps.rakutenOfferPromotion ?? new RakutenCommissionPersistenceService();
+  }
+
+  /**
+   * Promote exactly ONE page of ONE entity type and return where it ended.
+   *
+   * This is the bounded entrypoint a durable unit executes. It does NOT drain, it does NOT walk
+   * another type, and it never runs the whole-sweep Rakuten hook: an offer page promotes the
+   * offers on that page and nothing else, so the commission work happens exactly once per offer
+   * and can never fire from a campaign or coupon page.
+   *
+   * Supplier seeds are ensured on every page. They are five idempotent upserts against a static
+   * table, and campaign promotion resolves its supplier reference through them, so a page that
+   * skipped seeding could write campaigns with a null supplier reference. Making it a separate
+   * once-only unit would buy five queries and cost a hard ordering dependency.
+   */
+  async runPage({ networkSource, entityType, cursorId, batchSize = PROMOTION_PAGE_SIZE } = {}) {
+    const startedAt = Date.now();
+    const summary = emptySummary();
+    summary.lastCursor = null;
+    summary.hasMore = false;
+
+    await this.promotionService.ensureSuppliersSeeded();
+
+    const batch = await this.entityRepo.findPageForPromotion({
+      entityType,
+      networkSource,
+      batchSize,
+      cursorId,
+    });
+
+    if (!batch.length) {
+      summary.durationMs = Date.now() - startedAt;
+      return summary;
+    }
+
+    for (const entity of batch) {
+      // eslint-disable-next-line no-await-in-loop
+      const result = await this.promotePagedEntity(entity, entityType);
+      accumulate(summary, result);
+    }
+
+    summary.lastCursor = batch[batch.length - 1].id;
+    summary.hasMore = batch.length >= batchSize;
+    summary.promoted = summary.created + summary.updated;
+    summary.durationMs = Date.now() - startedAt;
+    return summary;
+  }
+
+  /**
+   * One entity of a bounded page. Campaigns and coupons take the existing promotion path; an
+   * offer is Rakuten commission evidence and takes the per-offer commission writer.
+   *
+   * A thrown error is NOT swallowed: it fails the page, which returns the unit to PENDING with an
+   * attempt spent, and the retry re-runs the same page from the same cursor.
+   */
+  async promotePagedEntity(entity, entityType) {
+    if (entityType !== OFFER_ENTITY_TYPE) return this.promoteEntity(entity);
+    if (entity?.networkSource !== OFFER_NETWORK_SOURCE) return { result: "skipped" };
+
+    const outcome = await this.rakutenOfferPromotion.persistOfferEntity(entity);
+    // upsertNormalizedFact is an upsert on the rule's natural key, so re-running a page that
+    // already persisted its offers writes the same rows again rather than duplicating them.
+    if (outcome?.skipped) return { result: "skipped" };
+    return { result: (outcome?.persisted ?? 0) > 0 ? "updated" : "skipped" };
   }
 
   async run({

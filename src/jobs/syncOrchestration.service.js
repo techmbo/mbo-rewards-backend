@@ -86,9 +86,13 @@ export const ABANDONED_UNIT_REASON = "worker lease expired before completion";
  * Kinds a worker may execute TODAY, widened one bounded stage at a time.
  *
  * AGGREGATION is executable because one unit is one DAY: it runs
- * rebuild({ from: day, to: day }) and nothing else. PROMOTION and CONVERSION_PROMOTION stay out
- * until their paged implementations exist — the existing global PromotionJob and conversion
- * promotion walk every entity of every network and must never be one unit inside an invocation.
+ * rebuild({ from: day, to: day }) and nothing else. CONVERSION_PROMOTION is one cursor PAGE of one
+ * network. PROMOTION is one cursor PAGE of one network and one entity TYPE. Each of them replaces
+ * a stage that used to walk every entity of every network in a single call.
+ *
+ * Being executable is not the same as being ORDERED. The post-sync stages still depend on each
+ * other — promotion, then conversion promotion, then aggregation — and nothing in this list
+ * enforces that. The parent transition gate owns it.
  *
  * A unit planned with `executable: false` stays refused whatever this list says: isUnitExecutable
  * checks the stored flag first, so widening this can never silently un-block an older run's
@@ -98,6 +102,7 @@ export const EXECUTABLE_UNIT_KINDS = Object.freeze([
   UNIT_KINDS.NETWORK,
   UNIT_KINDS.AGGREGATION,
   UNIT_KINDS.CONVERSION_PROMOTION,
+  UNIT_KINDS.PROMOTION,
 ]);
 export const UNIT_BLOCKED_REASON = "bounded_units_not_implemented";
 
@@ -452,6 +457,9 @@ function unitIdentity(descriptor = {}) {
     // both, every page of a walk would collapse to one identity and only the first would append.
     descriptor.networkSource ?? "",
     descriptor.cursorId ?? "",
+    // A promotion page adds the entity TYPE: the campaign walk and the coupon walk of one network
+    // share a cursor space, so without it the two walks would collide on identity.
+    descriptor.entityType ?? "",
   ].join("|");
 }
 
@@ -1226,8 +1234,10 @@ export class SyncOrchestrationService {
       kind: p.kind ?? null,
       // The calendar day an aggregation unit rebuilds; null for every other kind.
       day: p.day ?? null,
-      // The page a conversion-promotion unit promotes. Position only — never an entity payload.
+      // The page a promotion or conversion-promotion unit walks. Position only — never an entity
+      // payload.
       networkSource: p.networkSource ?? null,
+      entityType: p.entityType ?? null,
       cursorId: p.cursorId ?? null,
       platform: p.platform ?? null,
       accountLabel: p.accountLabel ?? null,
