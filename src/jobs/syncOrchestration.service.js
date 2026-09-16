@@ -36,6 +36,16 @@ import {
   accountLockKey,
   stageLockKey,
 } from "./syncAccountLock.service.js";
+// Phase 6d — the durable post-sync dependency gate. Pure functions over JobRun rows; see the
+// module comment for why each stage edge exists.
+import {
+  FAILURE_STAGES,
+  POST_SYNC_STAGES,
+  failureStageOf,
+  planPostSyncTransition,
+  postSyncMayAppendUnits,
+  postSyncStageOf,
+} from "./postSyncStages.js";
 
 export const ORCHESTRATION_JOB_NAME = "sync:orchestration";
 export const UNIT_JOB_NAME = "sync:unit";
@@ -356,8 +366,8 @@ export function summarisePlan(plan = {}, { kind = "full", options = {} } = {}) {
  * `percentComplete` is null while the run's total work is not yet knowable (promotion requested,
  * bounded units not materialised) — the denominator is unknown, and no weighting is invented.
  */
-function summarizeUnits(units, { postSyncStages = "none" } = {}) {
-  const counters = { totalUnits: units.length, completedUnits: 0, failedUnits: 0, pendingUnits: 0, runningUnits: 0, blockedUnits: 0 };
+function summarizeUnits(units, { postSyncStages = "none", postSyncMayAppend = false } = {}) {
+  const counters = { totalUnits: units.length, completedUnits: 0, failedUnits: 0, pendingUnits: 0, runningUnits: 0, blockedUnits: 0, supersededUnits: 0 };
   let partial = false;
   let latestError = null;
   let latestWarning = null;
@@ -376,7 +386,12 @@ function summarizeUnits(units, { postSyncStages = "none" } = {}) {
       if (!current) current = unit;
     } else if (!isUnitExecutable(unit)) {
       // Planned but not runnable in this phase: never offered to a worker, never silently "done".
-      counters.blockedUnits += 1;
+      // A placeholder the post-sync gate has SUPERSEDED with bounded units is different: it is a
+      // historical planning marker whose work now exists as real units, so it neither runs nor
+      // holds the run open. It stays visible rather than being cancelled, because cancelling it
+      // would count as a failure.
+      if (unit?.payload?.supersededBy) counters.supersededUnits += 1;
+      else counters.blockedUnits += 1;
     } else {
       counters.pendingUnits += 1;
       if (unit.lastError && !latestError) latestError = unit.lastError;
@@ -384,16 +399,22 @@ function summarizeUnits(units, { postSyncStages = "none" } = {}) {
   }
   const terminal = counters.completedUnits + counters.failedUnits;
   const unitsPercentComplete = counters.totalUnits > 0 ? Math.min(100, Math.round((terminal / counters.totalUnits) * 100)) : 0;
-  const settled = terminal + counters.blockedUnits === counters.totalUnits && counters.totalUnits > 0;
+  const settled = terminal + counters.blockedUnits + counters.supersededUnits === counters.totalUnits && counters.totalUnits > 0;
   // 1 — an unrecoverable unit failure beats any outstanding post-sync work.
   const permanentlyFailed = settled && counters.failedUnits > 0;
-  // 2 — otherwise, requested post-sync work that does not exist yet keeps the run open.
-  const awaitingPostSync = settled && !permanentlyFailed && postSyncStages === "deferred";
+  // 2 — otherwise, post-sync work that is still to come keeps the run open. "Still to come" is
+  // read from the ROWS by the gate, not from a stored label: before Phase 6d that could only mean
+  // "requested but never materialised", and now it also means "this stage is done but the next one
+  // has not been seeded yet". A run that has reached its aggregation days can append nothing more,
+  // so it is free to finalise. "blocked" keeps its pre-6d meaning exactly: placeholders alone are
+  // not outstanding work, because nothing will ever materialise them.
+  const postSyncOutstanding = (postSyncStages === "deferred" || postSyncStages === "materialised") && postSyncMayAppend;
+  const awaitingPostSync = settled && !permanentlyFailed && postSyncOutstanding;
   const blocked = settled && !permanentlyFailed && !awaitingPostSync && counters.blockedUnits > 0;
   const finished = settled && (permanentlyFailed || (!awaitingPostSync && counters.blockedUnits === 0));
-  // The overall denominator is unknown while promotion is requested but not materialised — except
-  // once the run is finished, when nothing further will be materialised.
-  const totalWorkKnown = postSyncStages !== "deferred" || finished;
+  // The overall denominator is unknown while a stage can still append units — except once the run
+  // is finished, when nothing further will be materialised.
+  const totalWorkKnown = !postSyncOutstanding || finished;
   const percentComplete = totalWorkKnown ? unitsPercentComplete : null;
   let status = "running";
   if (finished) status = counters.failedUnits > 0 ? "failed" : partial ? "partial" : "success";
@@ -404,6 +425,7 @@ function summarizeUnits(units, { postSyncStages = "none" } = {}) {
     unitsPercentComplete,
     percentComplete,
     totalWorkKnown,
+    postSyncOutstanding,
     finished,
     settled,
     permanentlyFailed,
@@ -414,6 +436,17 @@ function summarizeUnits(units, { postSyncStages = "none" } = {}) {
     latestWarning,
     current,
   };
+}
+
+/**
+ * Truthful progress of ONE phase: settled units over units that exist in that phase, or null when
+ * the phase has no units at all. Never a claim about work that has not been planned yet.
+ */
+function phasePercent(units, belongs) {
+  const phase = units.filter(belongs);
+  if (!phase.length) return null;
+  const settled = phase.filter((unit) => TERMINAL_STATUSES.includes(unit.status)).length;
+  return Math.min(100, Math.round((settled / phase.length) * 100));
 }
 
 /** The one account's block of a sync result, without assuming which key it sits under. */
@@ -1183,11 +1216,98 @@ export class SyncOrchestrationService {
   }
 
   /** Recompute the parent's counters/progress from its units; finalise when every unit is terminal. */
+  /**
+   * Advance the parent through the post-sync stages, appending at most one stage's seeds.
+   *
+   * This is the Phase 6d gate. It is a pure read of durable rows followed by an idempotent append:
+   * no entity scan, no supplier call, no clock except the run's own immutable start, and no module
+   * memory. Two workers that reach it at the same moment compute the same seeds and `appendUnits`
+   * collapses them to one, so a race, a replayed completion and a worker that died between the
+   * append and the refresh all converge on the same rows.
+   *
+   * It never skips a stage and never advances past a failure.
+   */
+  async advancePostSync(runId) {
+    if (!runId) return { stage: null, appended: 0, reason: "no_run" };
+    const parent = await this.db.jobRun.findUnique({ where: { id: runId } });
+    if (!parent || parent.jobName !== ORCHESTRATION_JOB_NAME) {
+      return { stage: null, appended: 0, reason: "not_found" };
+    }
+    if (TERMINAL_STATUSES.includes(parent.status)) {
+      return { stage: null, appended: 0, reason: "run_terminal" };
+    }
+    // A run from an older planner has a different unit shape; seeding bounded stages into it would
+    // mix two vocabularies on one parent.
+    if ((parent.payload?.plannerVersion ?? null) !== PLANNER_VERSION) {
+      return { stage: null, appended: 0, reason: "planner_version_mismatch" };
+    }
+    const postSyncStages = parent.payload?.postSyncStages ?? "none";
+    if (postSyncStages === "none") return { stage: POST_SYNC_STAGES.NONE, appended: 0, reason: "post_sync_not_requested" };
+
+    const units = await this.listUnits(runId);
+    const plan = planPostSyncTransition(units, {
+      postSyncRequested: true,
+      deferredSources: parent.payload?.deferredSources ?? [],
+      // PINNED, never the wall clock: a run materialised days later must rebuild the fortnight it
+      // gathered data for, not the fortnight around whenever a worker happened to reach it.
+      runStartedAt: parent.startedAt ?? parent.createdAt ?? null,
+    });
+    if (!plan.seeds.length) {
+      return { stage: plan.stage, appended: 0, reason: plan.reason, ...(plan.failureStage ? { failureStage: plan.failureStage } : {}) };
+    }
+
+    // An old planner's placeholder for a stage we are now seeding becomes a historical marker. It
+    // is never executed and never deleted; it simply stops standing for work that now exists.
+    const seededKinds = new Set(plan.seeds.map((seed) => seed.kind));
+    await this.#supersedePlaceholders(runId, units, seededKinds);
+
+    const appended = await this.appendUnits(runId, plan.seeds);
+
+    // Record what could not be recomputed safely: the pinned window, and that post-sync has begun.
+    const fresh = await this.db.jobRun.findUnique({ where: { id: runId } });
+    const payload = fresh?.payload ?? parent.payload ?? {};
+    const postSync = { ...(payload.postSync ?? {}) };
+    if (plan.window && !postSync.aggregation) {
+      postSync.aggregation = { ...plan.window, pinnedTo: parent.startedAt ? "startedAt" : "createdAt" };
+    }
+    await this.db.jobRun.update({
+      where: { id: runId },
+      data: { payload: { ...payload, postSyncStages: "materialised", postSync } },
+    });
+    return { stage: plan.stage, appended: appended.appended ?? 0, skipped: appended.skipped ?? 0, reason: plan.reason, ...(plan.window ? { window: plan.window } : {}) };
+  }
+
+  /**
+   * Mark a stage's inert placeholders as superseded by the bounded units just seeded.
+   *
+   * A payload write only: no status change, so a placeholder can never be counted as a failure,
+   * and no row is removed, so the original plan stays auditable.
+   */
+  async #supersedePlaceholders(runId, units, kinds) {
+    const at = this.now().toISOString();
+    for (const unit of units) {
+      const descriptor = unit.payload ?? {};
+      if (descriptor.executable !== false) continue;
+      if (descriptor.kind === UNIT_KINDS.NETWORK) continue;
+      if (!kinds.has(descriptor.kind)) continue;
+      if (descriptor.supersededBy) continue;
+      // eslint-disable-next-line no-await-in-loop
+      await this.db.jobRun.update({
+        where: { id: unit.id },
+        data: { payload: { ...descriptor, supersededBy: "bounded_units", supersededAt: at } },
+      });
+    }
+  }
+
   async refreshRun(runId) {
     if (!runId) return null;
     const [parent, units] = await Promise.all([this.db.jobRun.findUnique({ where: { id: runId } }), this.listUnits(runId)]);
     if (!parent) return null;
-    const summary = summarizeUnits(units, { postSyncStages: parent.payload?.postSyncStages ?? "none" });
+    const postSyncStages = parent.payload?.postSyncStages ?? "none";
+    const summary = summarizeUnits(units, {
+      postSyncStages,
+      postSyncMayAppend: postSyncMayAppendUnits(units, { postSyncRequested: postSyncStages !== "none" }),
+    });
     const data = {
       // The Int column carries the progress of the units that exist; the nullable overall
       // percentage lives in `result`, where "unknown" can be represented truthfully.
@@ -1199,6 +1319,7 @@ export class SyncOrchestrationService {
         pendingUnits: summary.pendingUnits,
         runningUnits: summary.runningUnits,
         blockedUnits: summary.blockedUnits,
+        supersededUnits: summary.supersededUnits,
         unitsPercentComplete: summary.unitsPercentComplete,
         percentComplete: summary.percentComplete,
         totalWorkKnown: summary.totalWorkKnown,
@@ -1212,6 +1333,13 @@ export class SyncOrchestrationService {
       data.status = summary.failedUnits > 0 ? "FAILED" : "COMPLETED";
       data.completedAt = this.now();
       data.lastError = summary.latestError;
+      // WHICH stage failed, durably. The database status stays exactly as it was — FAILED is still
+      // FAILED — but a successful 134-unit network phase must never be readable as a network
+      // failure because an aggregation day dead-lettered days later.
+      const failureStage = summary.failedUnits > 0 ? failureStageOf(units) : null;
+      if (failureStage) {
+        data.payload = { ...(parent.payload ?? {}), failureStage };
+      }
     }
     return this.db.jobRun.update({ where: { id: runId }, data });
   }
@@ -1311,6 +1439,16 @@ export class SyncOrchestrationService {
       // eslint-disable-next-line no-await-in-loop
       const unit = await this.nextUnit(run.id);
       if (unit) return { run, unit };
+      // Nothing workable on this run. That is exactly the moment a post-sync stage may be ready to
+      // open: the previous stage has settled and its successor has not been seeded. Seeding here
+      // also repairs a run whose worker died between appending a continuation and refreshing the
+      // parent, because the gate reads rows and not what that worker was about to do.
+      // eslint-disable-next-line no-await-in-loop
+      const advanced = await this.advancePostSync(run.id);
+      if (!advanced?.appended) continue;
+      // eslint-disable-next-line no-await-in-loop
+      const seeded = await this.nextUnit(run.id);
+      if (seeded) return { run, unit: seeded };
     }
     return null;
   }
@@ -1322,7 +1460,9 @@ export class SyncOrchestrationService {
     if (!parent || parent.jobName !== ORCHESTRATION_JOB_NAME) return null;
     const units = await this.listUnits(runId);
     const postSyncStages = parent.payload?.postSyncStages ?? "none";
-    const summary = summarizeUnits(units, { postSyncStages });
+    const postSyncRequested = postSyncStages !== "none";
+    const postSyncMayAppend = postSyncMayAppendUnits(units, { postSyncRequested });
+    const summary = summarizeUnits(units, { postSyncStages, postSyncMayAppend });
     const status = TERMINAL_STATUSES.includes(parent.status) && !summary.finished
       ? (parent.status === "COMPLETED" ? "success" : "failed")
       : summary.status;
@@ -1349,7 +1489,22 @@ export class SyncOrchestrationService {
       pendingUnits: summary.pendingUnits,
       runningUnits: summary.runningUnits,
       blockedUnits: summary.blockedUnits,
+      // Inert planning markers from an older planner whose work now exists as bounded units.
+      supersededUnits: summary.supersededUnits,
       postSyncStages,
+      // The stage the run is in, DERIVED from its rows rather than read from a stored label: a
+      // payload can be written by one worker and read by another mid-transition, and rows cannot
+      // disagree with themselves. One of awaiting_post_sync, promoting, conversion_promoting,
+      // aggregating, completed, failed or none.
+      postSyncStage: postSyncStageOf(units, {
+        postSyncRequested,
+        deferredSources: parent.payload?.deferredSources ?? [],
+      }),
+      // The stage a permanent failure belongs to, or null. Distinct from the database status so a
+      // post-sync failure is never mistaken for a network one.
+      failureStage: failureStageOf(units) ?? parent.payload?.failureStage ?? null,
+      // The window the aggregation days were pinned to, once they exist.
+      postSyncAggregation: parent.payload?.postSync?.aggregation ?? null,
       // What this run does NOT cover, and why. Empty for a run with nothing excluded.
       excludedSources: parent.payload?.excludedSources ?? [],
       // Source objects whose units are planned by another unit's completion. Each entry carries
@@ -1359,17 +1514,30 @@ export class SyncOrchestrationService {
       // True while any deferred source is still unmaterialised. While it is true `totalUnits` is
       // a floor, not a total: completing the unit a deferral depends on legitimately ADDS units.
       deferredPending,
-      totalUnitsMayIncrease: deferredPending,
+      // True while ANY stage can still add units: a deferred network source, a cursor walk that
+      // can append a continuation, or a post-sync stage that has not been seeded yet. It becomes
+      // false only once the aggregation days exist, because an aggregation unit is one day and
+      // appends nothing. While it is true `totalUnits` is a floor, not a total.
+      totalUnitsMayIncrease: deferredPending || postSyncMayAppend,
       // Post-sync work that still has to happen: requested (deferred) or materialised but not
       // runnable (blocked), on a run that has not been finalised. A run finalised by an
       // unrecoverable failure is waiting for nothing, so it reports false.
-      postSyncPending: (postSyncStages === "deferred" || postSyncStages === "blocked") && !summary.finished,
+      postSyncPending:
+        (postSyncStages === "deferred" || postSyncStages === "materialised" || postSyncStages === "blocked") &&
+        !summary.finished,
       currentUnit: current,
       // Truthful progress of the units that exist; `percentComplete` is null while the run's total
       // work is not yet knowable (see summarizeUnits).
       unitsPercentComplete: summary.unitsPercentComplete,
       percentComplete: summary.percentComplete,
       totalWorkKnown: summary.totalWorkKnown,
+      // Two honest tracks instead of one misleading number. The network phase has a known
+      // denominator from the moment the run is planned; the post-sync phase does not until its
+      // last stage is seeded, so its percentage is null until then rather than a guess.
+      networkPercentComplete: phasePercent(units, (unit) => unit.payload?.kind === UNIT_KINDS.NETWORK),
+      postSyncPercentComplete: postSyncMayAppend
+        ? null
+        : phasePercent(units, (unit) => unit.payload?.kind && unit.payload.kind !== UNIT_KINDS.NETWORK && unit.payload?.executable !== false),
       // Redacted at the projection boundary: these come from supplier-produced text, and this
       // projection is what /sync/status, /sync/all and the worker all return.
       latestError: safeUnitError(summary.latestError ?? parent.lastError ?? null),

@@ -642,6 +642,11 @@ export async function triggerSyncWorker(req, res, next) {
             ? summarisePromotionUnitOutcome(result)
             : summariseSyncUnitOutcome(result, { accountLabel: descriptor.accountLabel }),
     );
+    // Phase 6d — completing this unit may have settled a whole stage. The gate opens the next one
+    // if and only if the rows say every dependency is finished; it appends nothing otherwise, and
+    // it never advances past a failure. Running it AFTER completion is what makes "the last unit
+    // of a stage" observable at all.
+    const staged = await orchestration.advancePostSync(run.id);
     const syncStatus = await orchestration.describeRun(run.id);
     return res.status(200).json({
       ok: true,
@@ -651,6 +656,9 @@ export async function triggerSyncWorker(req, res, next) {
       runId: run.id,
       unit: { ...unitView, status: "COMPLETED" },
       ...(followOn?.appended ? { unitsMaterialised: followOn.appended } : {}),
+      // Which post-sync stage this completion opened, and how many first pages or days it seeded.
+      // Counts and a stage name only — never a network's data.
+      ...(staged?.appended ? { postSyncStaged: { stage: staged.stage, units: staged.appended } } : {}),
       syncStatus,
     });
   } catch (error) {
