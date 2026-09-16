@@ -1,3 +1,9 @@
+import {
+  DB_WORK_CONCURRENCY_CEILING,
+  resolveAccountConcurrency,
+  resolveDbPoolLimit,
+} from "../core/dbPermits.js";
+
 /**
  * Centralized sync optimization configuration (env-driven).
  * Defaults preserve backward compatibility when vars are unset.
@@ -14,8 +20,23 @@ function readInt(name, defaultValue) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultValue;
 }
 
-/** Phase 2 — parallel account sync limit */
+/** Phase 2 — parallel account sync limit, as requested before the DB budget is applied. */
 export const SYNC_ACCOUNT_CONCURRENCY = readInt("SYNC_ACCOUNT_CONCURRENCY", 3);
+
+/** The connection pool this process assumes it shares. */
+export const DB_POOL_LIMIT = resolveDbPoolLimit(process.env.DATABASE_POOL_LIMIT);
+
+/**
+ * What the pool actually affords. An account that reaches coupon/offer staging or commission-rule
+ * persistence can hold DB_WORK_CONCURRENCY_CEILING connections, so running several accounts at
+ * once multiplies that against a pool of five. A request of 3 is therefore lowered here rather
+ * than honoured; SYNC_ACCOUNT_CONCURRENCY can narrow this, never widen it.
+ */
+export const SAFE_SYNC_ACCOUNT_CONCURRENCY = resolveAccountConcurrency({
+  requested: SYNC_ACCOUNT_CONCURRENCY,
+  poolLimit: DB_POOL_LIMIT,
+  perAccountConcurrency: DB_WORK_CONCURRENCY_CEILING,
+});
 
 /** Phase 7 — parallel DB upsert workers (raised default for throughput) */
 export const SYNC_UPSERT_CONCURRENCY = readInt("SYNC_UPSERT_CONCURRENCY", 50);

@@ -43,7 +43,7 @@ import {
   AUTO_AGGREGATE_AFTER_SYNC,
   AGGREGATION_AFTER_SYNC_DAYS,
   DEFAULT_DAYS_BACK,
-  SYNC_ACCOUNT_CONCURRENCY,
+  SAFE_SYNC_ACCOUNT_CONCURRENCY,
   SYNC_OVERLAP_DAYS,
 } from "./syncConfig.js";
 import { createSyncTimer, mergeTimings } from "./syncMetrics.js";
@@ -103,6 +103,7 @@ import {
   evidenceFromRunSummary,
 } from "./sourceObjectRuns.js";
 import { resultRows } from "../modules/networkOps/sourceObjectSync.service.js";
+import { createPermitPool } from "../core/dbPermits.js";
 import {
   optimiseAdvanceWatermark,
   optimiseCampaignCatalogWalked,
@@ -396,9 +397,24 @@ async function markAccountSyncFailure(platform, accountLabel, error) {
 /**
  * Phase 2 — sync multiple accounts with controlled concurrency; failures are isolated.
  */
+/**
+ * The cap on accounts syncing at once, for the whole process.
+ *
+ * A per-call limit would not bound the pool. syncOptimise runs three regions concurrently and each
+ * region calls this helper with its own accounts, so a per-call limit of 3 permits nine accounts
+ * at once, each able to hold DB_WORK_CONCURRENCY_CEILING connections. These permits are module
+ * state, so the cap is what the process may hold however many callers are in flight.
+ *
+ * Acquisition is one-way: an account permit is taken before the account's work begins and released
+ * when it ends, and nothing inside that work ever waits for another account permit. The fan-outs it
+ * reaches draw on their own separate pools, so the ordering is acyclic and cannot deadlock.
+ */
+const accountPermits = createPermitPool(SAFE_SYNC_ACCOUNT_CONCURRENCY);
+
 async function syncAccountsWithConcurrency(accountLabels, syncFn, { platform } = {}) {
   const result = {};
-  await runWithConcurrency(accountLabels, SYNC_ACCOUNT_CONCURRENCY, async (label) => {
+  await runWithConcurrency(accountLabels, SAFE_SYNC_ACCOUNT_CONCURRENCY, async (label) => {
+    await accountPermits.acquire();
     try {
       const accountResult = await syncFn(label);
       result[label] = accountResult;
@@ -414,6 +430,8 @@ async function syncAccountsWithConcurrency(accountLabels, syncFn, { platform } =
         await markAccountSyncFailure(platform, label, error);
       }
       recordAccountSyncComplete({ success: false });
+    } finally {
+      accountPermits.release();
     }
   });
   return result;

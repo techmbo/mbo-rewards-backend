@@ -56,3 +56,56 @@ export function createPermitPool(size) {
     available: () => available,
   };
 }
+
+/** The connection pool this process assumes it shares, when nothing says otherwise. */
+export const DB_POOL_LIMIT_DEFAULT = 5;
+
+/**
+ * Connections held back from account fan-out for the work that runs beside it: JobRun
+ * orchestration writes, the account lock, sync status reads, and logging.
+ */
+export const DB_POOL_RESERVE = 1;
+
+/** Resolve the assumed pool size. Never below one, and never trusted from a malformed value. */
+export function resolveDbPoolLimit(requested, fallback = DB_POOL_LIMIT_DEFAULT) {
+  const safeFallback = Math.max(1, Math.floor(fallback) || DB_POOL_LIMIT_DEFAULT);
+  if (requested === undefined || requested === null || requested === "") return safeFallback;
+  const value = Number(requested);
+  if (!Number.isFinite(value) || value < 1) return safeFallback;
+  return Math.floor(value);
+}
+
+/**
+ * How many accounts may sync at once without their fan-outs outgrowing the pool.
+ *
+ * Derived, not configured: an account that reaches a DB-heavy fan-out can hold
+ * perAccountConcurrency connections, so the budget left after the reserve divides by that. A
+ * request larger than the result is lowered to it, which is what stops
+ * SYNC_ACCOUNT_CONCURRENCY multiplying against the per-account bound.
+ */
+export function resolveAccountConcurrency({
+  requested,
+  poolLimit = DB_POOL_LIMIT_DEFAULT,
+  perAccountConcurrency = DB_WORK_CONCURRENCY_CEILING,
+  reserve = DB_POOL_RESERVE,
+} = {}) {
+  const limit = resolveDbPoolLimit(poolLimit);
+  const perAccount = Math.max(1, Math.floor(perAccountConcurrency) || 1);
+  const budget = Math.max(1, limit - Math.max(0, Math.floor(reserve) || 0));
+  const affordable = Math.max(1, Math.floor(budget / perAccount));
+
+  const asked = Number(requested);
+  const wanted = Number.isFinite(asked) && asked >= 1 ? Math.floor(asked) : 1;
+  return Math.min(wanted, affordable);
+}
+
+/**
+ * The invariant this module exists to keep: peak connections an account fan-out can demand.
+ * It must stay within the pool once the reserve is set aside.
+ */
+export function maxConcurrentDbDemand({
+  accountConcurrency,
+  perAccountConcurrency = DB_WORK_CONCURRENCY_CEILING,
+} = {}) {
+  return Math.max(1, Math.floor(accountConcurrency) || 1) * Math.max(1, Math.floor(perAccountConcurrency) || 1);
+}
