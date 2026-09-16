@@ -700,13 +700,76 @@ export class SyncOrchestrationService {
       appended += 1;
     }
     if (appended > 0) {
+      // Two workers can reach this at the same moment (a retried invocation, a replayed
+      // completion): both read the same empty identity set and both create. The pre-check above
+      // cannot prevent that, so the duplicates are collapsed durably afterwards — every racer
+      // computes the same identity for the same work, so they converge on the same survivor.
+      const removed = await this.#collapseDuplicateUnits(runId);
+      const units = await this.listUnits(runId);
       await this.db.jobRun.update({
         where: { id: runId },
-        data: { payload: { ...(parent.payload ?? {}), totalUnits: existing.length + appended } },
+        data: { payload: { ...(parent.payload ?? {}), totalUnits: units.length } },
       });
       await this.refreshRun(runId);
+      return { appended: appended - removed, skipped: skipped + removed };
     }
     return { appended, skipped };
+  }
+
+  /**
+   * Delete units that duplicate work already planned on this run, keeping the earliest.
+   *
+   * Deleted rather than cancelled on purpose: a CANCELLED unit counts as a failed unit in the
+   * parent's projection, and a row this code created twice by accident is not a failure of the
+   * run. Only a still-PENDING duplicate is removed, so a unit another worker has already claimed
+   * is never pulled out from under it.
+   */
+  async #collapseDuplicateUnits(runId) {
+    const units = await this.listUnits(runId);
+    const seen = new Set();
+    const duplicates = [];
+    const ordered = [...units].sort(
+      (a, b) => (a.priority ?? 0) - (b.priority ?? 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    );
+    for (const unit of ordered) {
+      const identity = unitIdentity(unit.payload ?? {});
+      if (!seen.has(identity)) {
+        seen.add(identity);
+        continue;
+      }
+      duplicates.push(unit);
+    }
+    let removed = 0;
+    for (const duplicate of duplicates) {
+      // eslint-disable-next-line no-await-in-loop
+      const { count } = await this.db.jobRun.deleteMany({
+        where: { id: duplicate.id, jobName: UNIT_JOB_NAME, status: "PENDING" },
+      });
+      removed += count;
+    }
+    return removed;
+  }
+
+  /**
+   * Record on the parent that a deferred source object has been materialised — including when it
+   * materialised ZERO units because the account had no eligible campaigns. Without this a run
+   * would keep reporting work that is never coming.
+   */
+  async #resolveDeferredSource(runId, { platform, accountLabel, sourceObject }, { units = 0 } = {}) {
+    const parent = await this.db.jobRun.findUnique({ where: { id: runId } });
+    const deferred = parent?.payload?.deferredSources;
+    if (!Array.isArray(deferred) || !deferred.length) return false;
+    const resolvedAt = this.now().toISOString();
+    const next = deferred.map((entry) =>
+      entry.platform === platform && entry.accountLabel === accountLabel && entry.sourceObject === sourceObject
+        ? { ...entry, status: "materialised", units, resolvedAt }
+        : entry,
+    );
+    await this.db.jobRun.update({
+      where: { id: runId },
+      data: { payload: { ...(parent.payload ?? {}), deferredSources: next } },
+    });
+    return true;
   }
 
   /**
@@ -725,11 +788,18 @@ export class SyncOrchestrationService {
     if (!targets.includes(OPTIMISE_COMMISSION_GROUPS_SOURCE)) return { appended: 0, skipped: 0 };
 
     const accountLabel = text(descriptor?.accountLabel) ?? "default";
+    const key = { platform, accountLabel, sourceObject: OPTIMISE_COMMISSION_GROUPS_SOURCE };
     const plan = await this.planCommissionGroupChunks({ platform, accountLabel });
     const chunks = plan?.chunks ?? [];
-    if (!chunks.length) return { appended: 0, skipped: 0, campaigns: 0 };
+    if (!chunks.length) {
+      // A successful campaigns fetch with no eligible campaign is a RESOLVED deferral, not a
+      // pending one: there is no commission-group work for this account, and the run must be
+      // free to settle instead of waiting for units that will never exist.
+      const resolved = await this.#resolveDeferredSource(runId, key, { units: 0 });
+      return { appended: 0, skipped: 0, units: 0, resolved };
+    }
     const options = { ...(descriptor?.options ?? {}), promoteAfter: false };
-    return this.appendUnits(
+    const result = await this.appendUnits(
       runId,
       chunks.map((chunk) => ({
         kind: UNIT_KINDS.NETWORK,
@@ -742,6 +812,11 @@ export class SyncOrchestrationService {
         options,
       })),
     );
+    // The deferral is only resolved once the rows exist. A failed or refused append leaves it
+    // pending, so the work stays visible and the next attempt picks it up.
+    if (result.reason) return { ...result, units: chunks.length, resolved: false };
+    const resolved = await this.#resolveDeferredSource(runId, key, { units: chunks.length });
+    return { ...result, units: chunks.length, resolved };
   }
 
   async listUnits(runId) {
@@ -989,6 +1064,12 @@ export class SyncOrchestrationService {
       : summary.status;
     const current = unitView(summary.current);
     const kind = parent.payload?.kind ?? null;
+    const deferredSources = (parent.payload?.deferredSources ?? []).map((entry) => ({
+      ...entry,
+      status: entry.status ?? "pending",
+      units: entry.units ?? null,
+    }));
+    const deferredPending = deferredSources.some((entry) => entry.status === "pending");
     return {
       runId: parent.id,
       kind,
@@ -1005,8 +1086,14 @@ export class SyncOrchestrationService {
       postSyncStages,
       // What this run does NOT cover, and why. Empty for a run with nothing excluded.
       excludedSources: parent.payload?.excludedSources ?? [],
-      // Source objects still to be materialised by a unit that has not completed yet.
-      deferredSources: parent.payload?.deferredSources ?? [],
+      // Source objects whose units are planned by another unit's completion. Each entry carries
+      // its own state: "pending" (not materialised yet) or "materialised" with the number of
+      // units it produced — zero when the account had no eligible campaign.
+      deferredSources,
+      // True while any deferred source is still unmaterialised. While it is true `totalUnits` is
+      // a floor, not a total: completing the unit a deferral depends on legitimately ADDS units.
+      deferredPending,
+      totalUnitsMayIncrease: deferredPending,
       // Post-sync work that still has to happen: requested (deferred) or materialised but not
       // runnable (blocked), on a run that has not been finalised. A run finalised by an
       // unrecoverable failure is waiting for nothing, so it reports false.

@@ -462,7 +462,11 @@ describe("nothing is silently widened", () => {
     assert.ok(parent.payload.deferredSources.every((d) => d.sourceObject === "commission_groups" && d.after === "campaigns"));
     const status = await h.orchestration.describeRun(run.id);
     assert.deepEqual(status.excludedSources, []);
-    assert.deepEqual(status.deferredSources, parent.payload.deferredSources);
+    // Every deferral starts explicitly pending, and while one is pending the unit count is a
+    // floor rather than a total.
+    assert.ok(status.deferredSources.every((d) => d.status === "pending" && d.units === null));
+    assert.equal(status.deferredPending, true);
+    assert.equal(status.totalUnitsMayIncrease, true);
     // Deferred work is not a blocked unit: it must not hold the run open for ever.
     assert.equal(status.blockedUnits, 0);
     assert.equal(parent.payload.postSyncStages, "deferred", "post-sync deferral is a separate thing");

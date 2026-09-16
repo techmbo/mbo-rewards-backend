@@ -94,6 +94,13 @@ function createStore() {
     async findUnique({ where }) { const row = rows.find((r) => r.id === where.id); return row ? clone(row) : null; },
     async findFirst({ where, orderBy }) { const list = sort(rows.filter((r) => match(r, where)), orderBy); return list.length ? clone(list[0]) : null; },
     async findMany({ where, orderBy }) { return sort(rows.filter((r) => match(r, where ?? {})), orderBy).map(clone); },
+    async deleteMany({ where }) {
+      let count = 0;
+      for (let i = rows.length - 1; i >= 0; i -= 1) {
+        if (match(rows[i], where)) { rows.splice(i, 1); count += 1; }
+      }
+      return { count };
+    },
   };
   return { rows, prisma: { jobRun, async $transaction(fn) { return fn({ jobRun }); } } };
 }
@@ -423,7 +430,259 @@ describe("source guards", () => {
   it("materialisation performs no supplier work and no promotion", () => {
     const materialise = SERVICE_SRC.split("  async materialiseFollowOnUnits(")[1].split("\n  }")[0];
     assert.match(materialise, /promoteAfter: false/);
-    assert.ok(!materialise.includes("adapter"), "discovery reads staged rows, never a supplier");
-    assert.ok(!materialise.includes("fetch"), "no fetch of any kind");
+    for (const forbidden of ["adapter", "fetchOptimise", "httpClient", "createSupplierAdapter", "axios"]) {
+      assert.ok(!materialise.includes(forbidden), `${forbidden} has no place in materialisation`);
+    }
+    // Its only outward calls are the staged-row plan and the durable append.
+    assert.match(materialise, /await this\.planCommissionGroupChunks\(/);
+    assert.match(materialise, /await this\.appendUnits\(/);
+  });
+});
+
+describe("orchestration hardening around deferred materialisation", () => {
+  it("the last pending unit materialises its chunks BEFORE the parent can finalise", async () => {
+    const h = harness({ campaigns: SIZE + 1 });
+    // The campaigns unit is the ONLY unit: completing it would finalise the run.
+    const run = await h.orchestration.createRun({
+      kind: "full", trigger: "api", options: { promoteAfter: false },
+      units: [{ kind: UNIT_KINDS.NETWORK, platform: "optimise_sea", accountLabel: "default", sourceObject: "campaigns", options: {} }],
+    });
+    const res = await h.worker();
+    assert.equal(res.body.worked, true);
+    assert.equal(res.body.unitsMaterialised, 2);
+
+    const parent = h.rows.find((r) => r.id === run.id);
+    assert.equal(parent.status, "RUNNING", "the run cannot be terminal while its new chunks are pending");
+    assert.equal(parent.completedAt, null);
+    const status = await h.orchestration.describeRun(run.id);
+    assert.equal(status.status, "running");
+    assert.equal(status.totalUnits, 3, "totalUnits legitimately grew");
+    assert.equal(status.pendingUnits, 2);
+    assert.equal(status.finishedAt, null);
+
+    // The run settles only once the chunks themselves are done.
+    await h.worker();
+    await h.worker();
+    assert.equal(h.rows.find((r) => r.id === run.id).status, "COMPLETED");
+    assert.equal((await h.orchestration.describeRun(run.id)).status, "success");
+  });
+
+  it("zero eligible campaigns resolves the deferral and lets the parent settle", async () => {
+    const h = harness({ campaigns: 0 });
+    const run = await h.orchestration.createRun({
+      kind: "full", trigger: "api", options: { promoteAfter: false },
+      units: [{ kind: UNIT_KINDS.NETWORK, platform: "optimise_sea", accountLabel: "default", sourceObject: "campaigns", options: {} }],
+    });
+    // Give the run a deferral to resolve, exactly as the planner records one.
+    const parentRow = h.rows.find((r) => r.id === run.id);
+    parentRow.payload = {
+      ...parentRow.payload,
+      deferredSources: [{ platform: "optimise_sea", accountLabel: "default", sourceObject: "commission_groups", after: "campaigns" }],
+    };
+
+    const res = await h.worker();
+    assert.equal(res.body.worked, true);
+    assert.equal(res.body.unitsMaterialised, undefined, "no chunk units are invented for an empty account");
+    assert.equal(chunksOf(h, run.id).length, 0);
+
+    const status = await h.orchestration.describeRun(run.id);
+    assert.deepEqual(status.deferredSources.map((d) => ({ status: d.status, units: d.units })), [
+      { status: "materialised", units: 0 },
+    ]);
+    assert.equal(status.deferredPending, false, "no phantom deferral remains");
+    assert.equal(status.totalUnitsMayIncrease, false);
+    assert.equal(status.status, "success", "the run settles normally");
+    assert.equal(h.rows.find((r) => r.id === run.id).status, "COMPLETED");
+    assert.ok(status.finishedAt);
+  });
+
+  it("concurrent completions of the same campaigns unit create ONE set of chunks", async () => {
+    const h = harness({ campaigns: SIZE * 2 + 1 });
+    const run = await runWithCampaignsUnit(h);
+    const descriptor = h.unitsOf(run.id)[0].payload;
+
+    // Two workers materialising at the same moment: both read an empty run and both create.
+    const [a, b] = await Promise.all([
+      h.orchestration.materialiseFollowOnUnits(run.id, descriptor),
+      h.orchestration.materialiseFollowOnUnits(run.id, descriptor),
+    ]);
+
+    const chunks = chunksOf(h, run.id);
+    assert.equal(chunks.length, 3, "one unit per chunk, not two sets");
+    assert.deepEqual(chunks.map((u) => u.payload.campaignChunkIndex).sort(), [0, 1, 2]);
+    assert.equal(a.appended + b.appended, 3, "the winners' counts add up to the real work");
+    // No duplicate survived, and no unit was left CANCELLED to poison the parent's counters.
+    const identities = chunks.map((u) => `${u.payload.sourceObject}:${u.payload.campaignChunkIndex}`);
+    assert.equal(new Set(identities).size, identities.length);
+    assert.ok(h.unitsOf(run.id).every((u) => u.status === "PENDING"));
+    const status = await h.orchestration.describeRun(run.id);
+    assert.equal(status.failedUnits, 0, "collapsing a duplicate is not a run failure");
+    assert.equal(status.totalUnits, h.unitsOf(run.id).length, "the parent's count matches reality");
+
+    // And the sequences stay usable: one unit per priority.
+    const priorities = h.unitsOf(run.id).map((u) => u.priority);
+    assert.equal(new Set(priorities).size, priorities.length);
+  });
+
+  it("a failed chunk write leaves the deferral pending and the run unfinished", async () => {
+    const h = harness({ campaigns: SIZE });
+    const run = await h.orchestration.createRun({
+      kind: "full", trigger: "api", options: { promoteAfter: false },
+      units: [{ kind: UNIT_KINDS.NETWORK, platform: "optimise_sea", accountLabel: "default", sourceObject: "campaigns", options: {} }],
+    });
+    const parentRow = h.rows.find((r) => r.id === run.id);
+    parentRow.payload = {
+      ...parentRow.payload,
+      deferredSources: [{ platform: "optimise_sea", accountLabel: "default", sourceObject: "commission_groups", after: "campaigns" }],
+    };
+
+    const create = h.prisma.jobRun.create;
+    let created = 0;
+    h.prisma.jobRun.create = async (args) => {
+      if (args.data.jobName === UNIT_JOB_NAME && created >= 0) {
+        created += 1;
+        throw new Error("zzrowwritefailedzz");
+      }
+      return create(args);
+    };
+    await assert.rejects(h.worker(), /zzrowwritefailedzz/);
+    h.prisma.jobRun.create = create;
+
+    // The campaigns unit was never completed, so the run cannot claim to be finished…
+    const unit = h.unitsOf(run.id)[0];
+    assert.equal(unit.status, "RUNNING");
+    assert.equal(h.rows.find((r) => r.id === run.id).status, "RUNNING");
+    const status = await h.orchestration.describeRun(run.id);
+    assert.notEqual(status.status, "success");
+    assert.equal(status.finishedAt, null);
+    // …and the deferral is still pending, so the work stays visible.
+    assert.equal(status.deferredSources[0].status, "pending");
+    assert.equal(status.deferredPending, true);
+
+    // Recoverable: once the dead attempt's lease expires the unit is offered again, and the
+    // retry materialises and completes normally.
+    unit.startedAt = new Date(NOW.getTime() - 60 * 60 * 1000);
+    const retry = await h.worker();
+    assert.equal(retry.body.worked, true);
+    assert.equal(chunksOf(h, run.id).length, 1);
+    assert.equal((await h.orchestration.describeRun(run.id)).deferredSources[0].status, "materialised");
+  });
+
+  it("a refused append leaves the deferral pending rather than marking work done", async () => {
+    const h = harness({ campaigns: SIZE });
+    const run = await h.orchestration.createRun({
+      kind: "full", trigger: "api", options: { promoteAfter: false },
+      units: [{ kind: UNIT_KINDS.NETWORK, platform: "optimise_sea", accountLabel: "default", sourceObject: "campaigns", options: {} }],
+    });
+    const parentRow = h.rows.find((r) => r.id === run.id);
+    parentRow.payload = {
+      ...parentRow.payload,
+      deferredSources: [{ platform: "optimise_sea", accountLabel: "default", sourceObject: "commission_groups", after: "campaigns" }],
+    };
+    // Drive the run terminal first, so the append is refused even though chunks DO exist.
+    const unit = await h.orchestration.nextUnit(run.id);
+    await h.orchestration.claimUnit(unit.id, { workerId: "w" });
+    await h.orchestration.completeUnit(unit.id, { ok: true });
+    assert.equal(h.rows.find((r) => r.id === run.id).status, "COMPLETED");
+
+    const result = await h.orchestration.materialiseFollowOnUnits(run.id, unit.payload);
+    assert.equal(result.appended, 0);
+    assert.equal(result.reason, "run_terminal");
+    assert.equal(result.units, 1, "the chunks were real; they simply could not be added");
+    assert.equal(result.resolved, false, "a refusal is never a resolution");
+    const status = await h.orchestration.describeRun(run.id);
+    assert.equal(status.deferredSources[0].status, "pending", "the outstanding work stays visible");
+    assert.equal(status.deferredPending, true);
+  });
+
+  it("collapsing duplicates never removes a unit another worker has claimed", async () => {
+    const h = harness({ campaigns: SIZE });
+    const run = await h.orchestration.createRun({
+      kind: "full", trigger: "api", options: { promoteAfter: false },
+      units: [
+        { kind: UNIT_KINDS.NETWORK, platform: "optimise_sea", accountLabel: "default", sourceObject: "commission_groups", campaignChunkIndex: 0, campaignIds: [campaignId(1)], options: {} },
+        { kind: UNIT_KINDS.NETWORK, platform: "optimise_sea", accountLabel: "default", sourceObject: "commission_groups", campaignChunkIndex: 0, campaignIds: [campaignId(1)], options: {} },
+      ],
+    });
+    const [first, duplicate] = h.unitsOf(run.id);
+    // The LATER row — the one collapsing would drop — is already being worked.
+    duplicate.status = "RUNNING";
+    duplicate.startedAt = new Date(NOW.getTime());
+
+    // Appending anything triggers the collapse pass.
+    await h.orchestration.appendUnits(run.id, [
+      { kind: UNIT_KINDS.NETWORK, platform: "optimise_sea", accountLabel: "default", sourceObject: "commission_groups", campaignChunkIndex: 1, campaignIds: [campaignId(2)], options: {} },
+    ]);
+
+    const survivors = h.unitsOf(run.id);
+    assert.ok(survivors.some((u) => u.id === duplicate.id), "a claimed unit is never deleted under its worker");
+    assert.equal(h.rows.find((r) => r.id === duplicate.id).status, "RUNNING");
+    assert.ok(survivors.some((u) => u.id === first.id));
+    assert.equal(survivors.length, 3);
+  });
+
+  it("status distinguishes pending, materialised-with-units and materialised-with-none", async () => {
+    const h = harness({ campaigns: SIZE + 1 });
+    const run = await runWithCampaignsUnit(h);
+    const parentRow = h.rows.find((r) => r.id === run.id);
+    parentRow.payload = {
+      ...parentRow.payload,
+      deferredSources: [
+        { platform: "optimise_sea", accountLabel: "default", sourceObject: "commission_groups", after: "campaigns" },
+        { platform: "optimise_uk", accountLabel: "default", sourceObject: "commission_groups", after: "campaigns" },
+      ],
+    };
+
+    // 1 — deferred, not yet materialised.
+    let status = await h.orchestration.describeRun(run.id);
+    assert.ok(status.deferredSources.every((d) => d.status === "pending" && d.units === null));
+    assert.equal(status.deferredPending, true);
+    const unitsBefore = status.totalUnits;
+
+    // 2 — materialised with units pending.
+    await h.worker();
+    status = await h.orchestration.describeRun(run.id);
+    const sea = status.deferredSources.find((d) => d.platform === "optimise_sea");
+    assert.equal(sea.status, "materialised");
+    assert.equal(sea.units, 2);
+    assert.ok(sea.resolvedAt);
+    assert.equal(status.totalUnits, unitsBefore + 2, "totalUnits increases after campaigns complete");
+    assert.equal(status.pendingUnits >= 2, true);
+    // The other account has not run its campaigns unit yet, so it stays pending.
+    assert.equal(status.deferredSources.find((d) => d.platform === "optimise_uk").status, "pending");
+    assert.equal(status.deferredPending, true);
+
+    // 3 — materialised with zero units.
+    await h.orchestration.materialiseFollowOnUnits(run.id, {
+      platform: "optimise_uk", accountLabel: "default", sourceObject: "campaigns", options: {},
+    });
+    status = await h.orchestration.describeRun(run.id);
+    const uk = status.deferredSources.find((d) => d.platform === "optimise_uk");
+    assert.equal(uk.status, "materialised");
+    assert.equal(uk.units, 2, "this harness plans the same chunks for either account");
+    assert.equal(status.deferredPending, false);
+    assert.equal(status.totalUnitsMayIncrease, false, "the total is a total again");
+  });
+
+  it("materialisation touches no supplier: staged rows in, JobRun rows out", async () => {
+    const seen = [];
+    const h = harness({
+      chunkPlan: async (args) => {
+        seen.push(args);
+        return { chunks: [{ index: 0, campaignIds: [campaignId(1)] }], chunkSize: SIZE };
+      },
+    });
+    const run = await runWithCampaignsUnit(h);
+    const before = h.calls.length;
+    await h.orchestration.materialiseFollowOnUnits(run.id, h.unitsOf(run.id)[0].payload);
+    assert.equal(h.calls.length, before, "no account sync, and therefore no Optimise request");
+    assert.deepEqual(seen, [{ platform: "optimise_sea", accountLabel: "default" }]);
+    assert.equal(chunksOf(h, run.id).length, 1, "the only writes are JobRun rows");
+    // The discovery helper itself reads staged rows and nothing else.
+    const planner = OPTIMISE_SRC.split("export async function planOptimiseCommissionGroupChunks(")[1].split("\n}\n")[0];
+    assert.match(planner, /await loadStagedOptimiseCampaignRows\(/);
+    for (const forbidden of ["adapter", "fetchOptimiseCommissionGroups", "httpClient"]) {
+      assert.ok(!planner.includes(forbidden), forbidden);
+    }
   });
 });

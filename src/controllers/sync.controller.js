@@ -419,11 +419,16 @@ export async function triggerSyncWorker(req, res, next) {
       });
     }
 
-    await orchestration.completeUnit(unit.id, summariseSyncUnitOutcome(result, { accountLabel: descriptor.accountLabel }));
     // Some work can only be scoped once another unit has run — an Optimise account's commission
     // groups are one request per campaign, and the campaign list is what this unit just staged.
-    // Materialising here keeps that work in the same run instead of dropping it.
+    //
+    // This runs BEFORE the unit is completed, and the order matters: completing the last pending
+    // unit finalises the parent, and a finalised run refuses new units. Materialising first means
+    // the chunks exist while this unit is still RUNNING, so the parent cannot terminate between
+    // the two. If it throws, the unit is never completed, its lease expires and the whole step is
+    // retried — the failure is visible and recoverable rather than a silently short run.
     const followOn = await orchestration.materialiseFollowOnUnits(run.id, descriptor);
+    await orchestration.completeUnit(unit.id, summariseSyncUnitOutcome(result, { accountLabel: descriptor.accountLabel }));
     const syncStatus = await orchestration.describeRun(run.id);
     return res.status(200).json({
       ok: true,
