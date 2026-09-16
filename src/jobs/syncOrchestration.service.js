@@ -46,6 +46,9 @@ import {
   postSyncMayAppendUnits,
   postSyncStageOf,
 } from "./postSyncStages.js";
+// The durable Entity-staging barrier. The gate is the one place that TRANSITIONS into the frozen
+// state, so it is the one place that needs the announce-then-verify handshake.
+import { EntityStagingBarrier, STAGING_FROZEN_CODE } from "./entityStagingBarrier.js";
 
 export const ORCHESTRATION_JOB_NAME = "sync:orchestration";
 export const UNIT_JOB_NAME = "sync:unit";
@@ -629,7 +632,7 @@ function compatibilityConditions({ kind = null, options = null, plannerVersion =
 }
 
 export class SyncOrchestrationService {
-  constructor({ prisma = defaultPrisma, now = () => new Date(), leaseMs = DEFAULT_LEASE_MS, maxAttempts = DEFAULT_UNIT_MAX_ATTEMPTS, listAccounts = defaultListAccounts, loadAccountState = defaultLoadAccountState, planCommissionGroupChunks = planOptimiseCommissionGroupChunks, locks = null } = {}) {
+  constructor({ prisma = defaultPrisma, now = () => new Date(), leaseMs = DEFAULT_LEASE_MS, maxAttempts = DEFAULT_UNIT_MAX_ATTEMPTS, listAccounts = defaultListAccounts, loadAccountState = defaultLoadAccountState, planCommissionGroupChunks = planOptimiseCommissionGroupChunks, locks = null, barrier = null } = {}) {
     this.db = prisma;
     this.now = now;
     this.leaseMs = leaseMs;
@@ -641,6 +644,8 @@ export class SyncOrchestrationService {
     this.planCommissionGroupChunks = planCommissionGroupChunks;
     // One shared durable lock vocabulary for orchestration units AND (later) the manual route.
     this.locks = locks ?? new SyncAccountLockService({ prisma, now, leaseMs });
+    // The Entity-staging freeze. Injected in tests; otherwise backed by the same rows and clock.
+    this.barrier = barrier ?? new EntityStagingBarrier({ prisma, now, leaseMs });
   }
 
   /**
@@ -1200,6 +1205,51 @@ export class SyncOrchestrationService {
   }
 
   /** Retryable while attempts remain (back to PENDING, no sleep); DEAD_LETTER otherwise. */
+  /**
+   * Hand a claimed unit BACK without consuming an attempt.
+   *
+   * A staging freeze is a temporary condition owned by ANOTHER run's post-sync phase. A second
+   * orchestration run whose network unit cannot stage right now has done nothing wrong, and three
+   * such invocations must not dead-letter work that would succeed an hour later. So the claim is
+   * undone rather than recorded: status back to PENDING, the lease dropped, and the attempt
+   * decremented by exactly the one that claimUnit added.
+   */
+  async deferUnit(unitId, { reason = STAGING_FROZEN_CODE, workerId = null } = {}) {
+    const unit = await this.db.jobRun.findUnique({ where: { id: unitId } });
+    if (!unit) return null;
+
+    // Only a unit this caller is CURRENTLY holding may be handed back. Each of these guards closes
+    // a way the naive "update by id" version could corrupt state:
+    //   - not RUNNING  → it completed, failed or dead-lettered while we were away; reviving it to
+    //                    PENDING would re-run finished work or resurrect terminal work.
+    //   - another claim → its lease expired and a second worker took it; returning it would drop
+    //                    that worker's claim out from under it.
+    //   - attempt 0    → nothing to give back; decrementing would go negative and hand the unit
+    //                    more attempts than maxAttempts allows.
+    if (unit.status !== "RUNNING") return unit;
+    const holder = unit.result?.claim?.workerId ?? null;
+    if (workerId && holder && holder !== workerId) return unit;
+    if ((unit.attempt ?? 0) <= 0) return unit;
+
+    // Conditional on RUNNING, so two concurrent deferrals cannot both apply: the first flips the
+    // row to PENDING and the second matches nothing. The attempt is written as an ABSOLUTE value
+    // computed from the row we read and clamped at zero, never as a blind decrement.
+    const { count } = await this.db.jobRun.updateMany({
+      where: { id: unitId, jobName: UNIT_JOB_NAME, status: "RUNNING" },
+      data: {
+        status: "PENDING",
+        startedAt: null,
+        attempt: Math.max(0, (unit.attempt ?? 1) - 1),
+        // Visible, but NOT lastError: this is not a failure and must not read as one, and it must
+        // not overwrite a real execution error recorded by an earlier attempt.
+        result: { ...(unit.result ?? {}), deferred: { reason, at: this.now().toISOString() } },
+      },
+    });
+    if (!count) return unit;
+    await this.refreshRun(unit.correlationId);
+    return this.db.jobRun.findUnique({ where: { id: unitId } });
+  }
+
   async failUnit(unitId, error) {
     const unit = await this.db.jobRun.findUnique({ where: { id: unitId } });
     if (!unit) return null;
@@ -1256,6 +1306,24 @@ export class SyncOrchestrationService {
       return { stage: plan.stage, appended: 0, reason: plan.reason, ...(plan.failureStage ? { failureStage: plan.failureStage } : {}) };
     }
 
+    // THE transition. Seeding the first promotion units is the moment the Entity cursor walks
+    // begin, so it is the moment staging must already have stopped. Announce the intent FIRST so a
+    // stager racing this call sees it, THEN look for participants already in flight. If any are,
+    // the marker stays up — new stagers keep refusing, in-flight ones drain, and a later invocation
+    // seeds. Releasing the marker here instead would let the two sides abort each other forever.
+    //
+    // Every LATER seed (coupons, offers, conversion pages, aggregation days) needs no handshake:
+    // bounded promotion units already exist by then, so the DERIVED freeze is authoritative.
+    if (plan.reason === "promotion_campaign_seeded") {
+      await this.barrier.announceFreezeIntent({ correlationId: runId });
+      const inFlight = await this.barrier.activeParticipants();
+      if (inFlight.length) {
+        // A deferral, not a failure: nothing is seeded, nothing is consumed, and the caller is told
+        // exactly why so a stalled run can be explained from its rows.
+        return { stage: plan.stage, appended: 0, reason: "staging_in_flight", stagingParticipants: inFlight.length };
+      }
+    }
+
     // An old planner's placeholder for a stage we are now seeding becomes a historical marker. It
     // is never executed and never deleted; it simply stops standing for work that now exists.
     const seededKinds = new Set(plan.seeds.map((seed) => seed.kind));
@@ -1274,6 +1342,10 @@ export class SyncOrchestrationService {
       where: { id: runId },
       data: { payload: { ...payload, postSyncStages: "materialised", postSync } },
     });
+    // The bounded promotion units now exist, so the derived freeze holds on its own and the marker
+    // is redundant. Dropping it means a gate that dies later cannot leave a lease-shaped freeze
+    // behind that outlives the walk it was protecting.
+    if (plan.reason === "promotion_campaign_seeded") await this.barrier.clearFreezeIntent();
     return { stage: plan.stage, appended: appended.appended ?? 0, skipped: appended.skipped ?? 0, reason: plan.reason, ...(plan.window ? { window: plan.window } : {}) };
   }
 

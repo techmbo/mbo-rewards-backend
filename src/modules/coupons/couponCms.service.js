@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 import { prisma } from "../../database/prisma.js";
 import { fail } from "../../core/apiResponse.js";
 import { listEntities } from "../raw/raw.service.js";
+// Coupon CMS writes mutate Entity directly, bypassing the raw staging chokepoints, so they carry
+// the barrier themselves. A coupon authored mid-walk is exactly the row a coupon promotion page
+// could skip: its id is a fresh random UUID and may sort below the cursor.
+import { entityStagingBarrier } from "../../jobs/entityStagingBarrier.js";
 import {
   applyManualCouponFields,
   buildNormalizedFromCouponFields,
@@ -290,6 +294,7 @@ export async function getCouponById(id) {
 }
 
 export async function createManualCoupon({ fields = {}, fieldPolicies = {}, fieldTypes = {} }) {
+  await entityStagingBarrier.assertStagingAllowed();
   const externalId = `manual-${randomUUID()}`;
   const withDefaults = {
     campaignStatus: "Active",
@@ -322,6 +327,7 @@ export async function createManualCoupon({ fields = {}, fieldPolicies = {}, fiel
 }
 
 export async function updateCoupon(id, { fields, fieldPolicies, fieldTypes, resolveConflict } = {}) {
+  await entityStagingBarrier.assertStagingAllowed();
   const existing = await prisma.entity.findFirst({
     where: { id, entityType: "coupon" },
   });
@@ -390,6 +396,7 @@ export async function updateCoupon(id, { fields, fieldPolicies, fieldTypes, reso
 }
 
 export async function deleteCoupon(id) {
+  await entityStagingBarrier.assertStagingAllowed();
   const existing = await prisma.entity.findFirst({
     where: { id, entityType: "coupon" },
   });

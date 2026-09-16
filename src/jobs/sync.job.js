@@ -109,6 +109,7 @@ import {
   optimiseCampaignCatalogWalked,
   optimiseWorkScope,
 } from "./optimiseWorkScope.js";
+import { entityStagingBarrier } from "./entityStagingBarrier.js";
 
 /** Phase 11 — accumulates per-account timings for SyncJobLog without changing API result shapes. */
 const accountTimingsCollector = [];
@@ -678,6 +679,9 @@ async function syncBoostinyAccount(accountLabel) {
   const entityTiming = createEntityTimingCollector();
 
   if (includeSourceObject(requested, "api_reports")) {
+    // A direct Entity delete that runs BEFORE the staging call that would otherwise refuse. Without
+    // its own check a frozen sync would delete these rows and then fail to restage them.
+    await entityStagingBarrier.assertStagingAllowed();
     await prisma.entity.deleteMany({
       where: {
         networkSource: "boostiny",

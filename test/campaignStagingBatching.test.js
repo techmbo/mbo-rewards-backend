@@ -693,7 +693,11 @@ test("raw staging hands the linkage guard the payload's real entity id", async (
   const { readFile } = await import("node:fs/promises");
   const { functionBody } = await import("./helpers/jsGuardScan.js");
   const source = await readFile(new URL("../src/modules/raw/raw.service.js", import.meta.url), "utf8");
-  const staging = functionBody(source, "upsertManyRawEntities");
+  // The exported entrypoint is now a thin Entity-staging-barrier wrapper that delegates to
+  // stageManyRawEntities; the staging body — and the guard this test pins — lives there.
+  const wrapper = functionBody(source, "upsertManyRawEntities");
+  assert.ok(wrapper.includes("entityStagingBarrier.withStaging("), "staging must register with the barrier");
+  const staging = functionBody(source, "stageManyRawEntities");
   assert.ok(
     staging.includes("currentEntityId: rawRecord.entityId"),
     "the link must carry the stored entity id so an already-linked payload is skipped",

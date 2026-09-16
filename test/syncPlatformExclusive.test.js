@@ -130,7 +130,11 @@ describe("triggerSyncPlatform — handler wiring", () => {
     assert.match(incremental, /triggerScheduledSync\(\{ reason: "api" \}\)/);
     assert.match(incremental, /res\.status\(202\)/);
     const canary = CONTROLLER_SRC.split("export async function triggerBoostinyCanarySync")[1].split("\nexport ")[0];
-    assert.match(canary, /const run = await runExclusiveSync\(/);
+    // The canary now takes the shared durable account lock, so the await sits on withLock,
+    // which awaits the function that calls runExclusiveSync. Still fully awaited, never detached.
+    assert.match(canary, /const outcome = await locks\.withLock\(/);
+    assert.match(canary, /runExclusiveSync\(/);
+    assert.match(canary, /const run = outcome\.result;/);
     assert.ok(!canary.includes("respondWithExclusiveSync("), "canary block not modified");
   });
 });

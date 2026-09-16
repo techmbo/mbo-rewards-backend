@@ -21,6 +21,10 @@ import { resolveDbConcurrency } from "../../core/dbPermits.js";
  */
 const COUPON_ROW_CONCURRENCY = resolveDbConcurrency(SYNC_UPSERT_CONCURRENCY);
 import { batchUpsertEntities } from "./batchEntityUpsert.js";
+// The durable Entity-staging barrier. This module is the FINAL safety boundary: every supplier
+// staging path funnels through the two entrypoints below, so a future sync path cannot bypass the
+// freeze by forgetting a route-level check.
+import { entityStagingBarrier } from "../../jobs/entityStagingBarrier.js";
 import { normalizeEntity } from "./normalizers.js";
 import {
   persistRawPayload,
@@ -190,6 +194,10 @@ export function buildOptimiseCampaignExternalId(networkSource, rawData, index) {
 }
 
 export async function cleanupOptimiseCampaignDuplicates(networkSource, sourceAccountKey) {
+  // A direct Entity delete, not routed through the staging chokepoints. It removes duplicate staged
+  // campaigns, which is exactly the row set a campaign walk is paging through, so it is refused
+  // under the same freeze.
+  await entityStagingBarrier.assertStagingAllowed();
   const campaigns = await prisma.entity.findMany({
     where: { networkSource, entityType: "campaign" },
     select: { id: true, externalId: true, rawData: true },
@@ -322,7 +330,17 @@ function prepareEntityRecord({ networkSource, entityType, rawData, externalId })
 /**
  * Single-entity upsert (coupons and direct callers).
  */
-export async function upsertRawEntity({
+export async function upsertRawEntity(options) {
+  // Registered as a staging participant for the whole write, and refused outright if a promotion
+  // or conversion-promotion cursor walk is in flight. See entityStagingBarrier.js for why.
+  return entityStagingBarrier.withStaging(
+    `${options?.networkSource ?? "unknown"}:${options?.entityType ?? "unknown"}`,
+    () => stageRawEntity(options),
+    { holderId: "upsertRawEntity" },
+  );
+}
+
+async function stageRawEntity({
   networkSource,
   entityType,
   rawData,
@@ -475,7 +493,17 @@ async function upsertCouponRows({
 /**
  * Batch upserts with bulk SQL for standard entities; coupons keep per-row merge logic.
  */
-export async function upsertManyRawEntities({
+export async function upsertManyRawEntities(options) {
+  // Same barrier, one participant for the whole batch rather than one per row: a batch is a single
+  // staging operation, and the freeze must either allow all of it or none of it.
+  return entityStagingBarrier.withStaging(
+    `${options?.networkSource ?? "unknown"}:${options?.entityType ?? "unknown"}`,
+    () => stageManyRawEntities(options),
+    { holderId: "upsertManyRawEntities" },
+  );
+}
+
+async function stageManyRawEntities({
   networkSource,
   entityType,
   rows,

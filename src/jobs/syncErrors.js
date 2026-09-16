@@ -242,7 +242,14 @@ export function summarizeOptimiseSyncIssues(resourceFailures, credentials) {
 }
 
 export function formatSyncError(error) {
-  return new Error(toUserFriendlySyncError(error));
+  const formatted = new Error(toUserFriendlySyncError(error));
+  // Carry the machine-readable classification across the rewrite. Without this a refusal that
+  // carries its own HTTP status — an Entity-staging freeze is a 409, not a server fault — arrives
+  // at the error handler as a bare Error and is reported as a 500.
+  if (error?.code) formatted.code = error.code;
+  if (error?.statusCode) formatted.statusCode = error.statusCode;
+  if (error?.retryable !== undefined) formatted.retryable = error.retryable;
+  return formatted;
 }
 
 export function getSyncErrorMessage(error) {

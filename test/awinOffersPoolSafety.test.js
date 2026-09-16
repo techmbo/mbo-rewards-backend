@@ -174,7 +174,10 @@ test("a coupon or offer row never fans out schema observation of its own", () =>
 });
 
 test("the staged-lineage write never re-observes a payload the same call already observed", () => {
-  const body = functionBody(rawService, "upsertRawEntity");
+  // The exported entrypoint is now the Entity-staging-barrier wrapper; the staging body it
+  // delegates to is where this guard belongs.
+  assert.ok(functionBody(rawService, "upsertRawEntity").includes("entityStagingBarrier.withStaging("));
+  const body = functionBody(rawService, "stageRawEntity");
   const stagedAt = body.indexOf('processingStatus: "STAGED"');
   assert.ok(stagedAt > 0);
   assert.ok(
@@ -184,7 +187,10 @@ test("the staged-lineage write never re-observes a payload the same call already
 });
 
 test("the batch staging path tells the coupon fan-out its rows are already observed", () => {
-  const body = functionBody(rawService, "upsertManyRawEntities");
+  // The exported entrypoint is now the Entity-staging-barrier wrapper; the staging body it
+  // delegates to is where this guard belongs.
+  assert.ok(functionBody(rawService, "upsertManyRawEntities").includes("entityStagingBarrier.withStaging("));
+  const body = functionBody(rawService, "stageManyRawEntities");
   assert.ok(
     body.includes("alreadyObserved: true"),
     "rows staged and observed by the batch pass must not be observed again per row",

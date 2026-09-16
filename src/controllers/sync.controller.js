@@ -27,6 +27,7 @@ import {
   summarisePromotionUnitOutcome,
 } from "../jobs/promotionUnit.js";
 import { SyncAccountLockService, accountLockKey } from "../jobs/syncAccountLock.service.js";
+import { isStagingFrozenError } from "../jobs/entityStagingBarrier.js";
 
 const SUPPORTED_SYNC_PLATFORMS = new Set([
   "boostiny",
@@ -444,17 +445,39 @@ export async function triggerBoostinyCanarySync(req, res, next) {
     // response is sent), so the canary must finish — real Boostiny fetch, dry-run plan, status
     // finalised — before anything is written to the client. The same in-process slot and status
     // bookkeeping as every other sync is used; only this route waits for it.
-    const run = await runExclusiveSync(
-      jobName,
+    // The canary used to rely on runExclusiveSync alone, which guards on module memory and is
+    // therefore per-instance and worthless across serverless invocations: a live canary could stage
+    // Boostiny campaigns with no durable exclusion at all. It now takes the SAME account lock key
+    // and lease as the worker unit and the manual route, so all three exclude each other. A dry run
+    // takes it too: it is cheap, and it keeps one rule rather than two.
+    const lockKey = accountLockKey({ platform: "boostiny", accountLabel });
+    const locks = accountLocksFor(req);
+    const outcome = await locks.withLock(
+      lockKey,
       () =>
-        syncPlatformAccount("boostiny", accountLabel, {
-          fastSync: false,
-          promoteAfter: false,
-          sourceObject: "campaigns",
-          canary,
-        }),
-      { trigger: "api" },
+        runExclusiveSync(
+          jobName,
+          () =>
+            syncPlatformAccount("boostiny", accountLabel, {
+              fastSync: false,
+              promoteAfter: false,
+              sourceObject: "campaigns",
+              canary,
+            }),
+          { trigger: "api" },
+        ),
+      { holderId: jobName },
     );
+    if (!outcome.ran) {
+      return res.status(409).json({
+        ok: false,
+        status: "locked",
+        message: "Another sync holds this Boostiny account; the canary did not run.",
+        reason: outcome.reason,
+        lock: { key: lockKey, heldBy: outcome.heldBy ?? null },
+      });
+    }
+    const run = outcome.result;
     if (!run.started) {
       return res.status(409).json({ ok: false, status: "running", message: run.reason, syncStatus: run.status });
     }
@@ -596,6 +619,23 @@ export async function triggerSyncWorker(req, res, next) {
     try {
       result = await executeUnit(req, descriptor);
     } catch (error) {
+      // A staging freeze belongs to ANOTHER run's post-sync phase. It is temporary and this unit
+      // did nothing wrong, so the claim is handed back without consuming an attempt; three of these
+      // must never dead-letter work that would succeed once the walk finishes.
+      if (isStagingFrozenError(error)) {
+        const deferred = await orchestration.deferUnit(unit.id, { reason: error.code, workerId });
+        const syncStatus = await orchestration.describeRun(run.id);
+        return res.status(200).json({
+          ok: true,
+          worked: false,
+          status: "unit_deferred",
+          message: "Entity staging is frozen by an active post-sync phase; the unit was returned unworked.",
+          reason: error.code,
+          runId: run.id,
+          unit: { ...unitView, status: deferred?.status ?? "PENDING", attempt: deferred?.attempt ?? null },
+          syncStatus,
+        });
+      }
       const failed = await orchestration.failUnit(unit.id, error);
       const syncStatus = await orchestration.describeRun(run.id);
       return res.status(200).json({

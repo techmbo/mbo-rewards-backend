@@ -429,7 +429,11 @@ describe("source guards — enqueue only, and the other routes untouched", () =>
     assert.match(platform, /resolvePlatformSyncOptions\(req\.query\)/);
     assert.ok(!platform.includes("getOrCreateRun"));
     const canary = handlerOf("triggerBoostinyCanarySync");
-    assert.match(canary, /const run = await runExclusiveSync\(/);
+    // The canary now takes the shared durable account lock, so the await sits on withLock,
+    // which awaits the function that calls runExclusiveSync. Still fully awaited, never detached.
+    assert.match(canary, /const outcome = await locks\.withLock\(/);
+    assert.match(canary, /runExclusiveSync\(/);
+    assert.match(canary, /const run = outcome\.result;/);
     assert.match(canary, /promoteAfter: false,/);
     assert.ok(!canary.includes("getOrCreateRun"));
     // Unit execution belongs to the worker alone: no other handler claims or completes units,

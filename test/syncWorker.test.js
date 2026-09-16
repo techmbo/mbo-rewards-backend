@@ -456,8 +456,20 @@ describe("source guards — one unit, nothing in the background, nothing else ch
     assert.match(status, /inMemory,/);
     assert.match(status, /inspectLatestRun\(\)/);
     assert.ok(!status.includes("claimUnit") && !status.includes("refreshRun"));
+    // The canary IS re-wired by the staging-barrier phase: runExclusiveSync guards on module
+    // memory, which is per-instance and worthless across serverless invocations, so a live canary
+    // could stage Boostiny campaigns with no durable exclusion. It now takes the SAME account lock
+    // key as the worker unit and the manual route, and still awaits its run.
     const canary = handlerOf("triggerBoostinyCanarySync");
-    assert.match(canary, /const run = await runExclusiveSync\(/);
-    assert.ok(!canary.includes("withLock"), "the canary is not re-wired in this phase");
+    assert.match(canary, /const lockKey = accountLockKey\(\{ platform: "boostiny", accountLabel \}\);/);
+    // The run is still fully awaited before the response: withLock awaits the function it is given,
+    // and that function is what calls runExclusiveSync. Nothing is detached.
+    assert.match(canary, /const outcome = await locks\.withLock\(/);
+    assert.match(canary, /runExclusiveSync\(/);
+    for (const detached of [".then(", "void ", "setTimeout", "setInterval"]) {
+      assert.ok(!canary.includes(detached), detached);
+    }
+    assert.match(canary, /if \(!outcome\.ran\)/, "a held account lock refuses the canary rather than running it");
+    assert.ok(!canary.includes("nextWorkableUnit"), "the canary never reaches for orchestration work");
   });
 });

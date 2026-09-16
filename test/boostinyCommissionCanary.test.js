@@ -445,7 +445,14 @@ describe("admin-only entrypoint", () => {
     assert.match(handler, /syncPlatformAccount\("boostiny", accountLabel, \{\s*fastSync: false,\s*promoteAfter: false,\s*sourceObject: "campaigns",\s*canary,\s*\}\)/);
     assert.match(handler, /return res\.status\(error\.status \?\? 400\)\.json\(\{ ok: false, message: error\.message \}\);/);
     // Awaited, never fire-and-forget: the response is written only after the run has finished.
-    assert.match(handler, /const run = await runExclusiveSync\(/);
+    // The await now sits on the durable account lock, which awaits the function that starts the
+    // run, so the whole canary still completes before anything is written to the client.
+    assert.match(handler, /const outcome = await locks\.withLock\(/);
+    assert.match(handler, /runExclusiveSync\(/);
+    assert.match(handler, /const run = outcome\.result;/);
+    // The canary takes the SAME durable account key as the worker unit and the manual route, so a
+    // live canary can no longer stage Boostiny campaigns with only process-local exclusion.
+    assert.match(handler, /const lockKey = accountLockKey\(\{ platform: "boostiny", accountLabel \}\);/);
     assert.ok(!handler.includes("startBackgroundSync("), "no background launcher on the canary route");
     assert.ok(!handler.includes("runSyncInBackground("), "no un-awaited sync promise");
     assert.match(handler, /if \(!run\.started\) \{\s*return res\.status\(409\)/);
