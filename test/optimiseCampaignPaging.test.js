@@ -413,6 +413,188 @@ describe("what a slice exposes", () => {
   });
 });
 
+describe("where a materialised continuation lands in the worker order", () => {
+  /** A realistic slice of a planner-v6 plan: Boostiny first, then one Optimise account. */
+  async function mixedRun(h) {
+    const unit = (platform, sourceObject, extra = {}) => ({
+      kind: UNIT_KINDS.NETWORK, platform, accountLabel: "default", sourceObject, options: {}, ...extra,
+    });
+    return h.orchestration.createRun({
+      kind: "full", trigger: "api", options: { promoteAfter: false },
+      units: [
+        unit("boostiny", "campaigns"),
+        unit("boostiny", "coupons"),
+        unit("optimise_sea", "campaigns", {
+          campaignPageIndex: 0, campaignPageOffset: 0, campaignPageLimit: LIMIT, campaignPageBudget: PAGES,
+        }),
+        unit("optimise_sea", "voucher_codes"),
+        unit("optimise_sea", "conversions", { windowStart: "2026-09-09", windowEnd: "2026-09-15" }),
+      ],
+    });
+  }
+
+  const label = (u) =>
+    `${u.payload.platform}:${u.payload.sourceObject}${u.payload.campaignPageOffset === undefined ? "" : `@${u.payload.campaignPageOffset}`}`;
+
+  it("the continuation is appended AFTER every unit already planned, and is worked last", async () => {
+    const h = harness({ totalCampaigns: SLICE * 2 });
+    const run = await mixedRun(h);
+    assert.deepEqual(h.unitsOf(run.id).map((u) => u.priority), [1, 2, 3, 4, 5]);
+
+    const executed = [];
+    for (let i = 0; i < 6; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await h.worker();
+      if (!res.body.worked) break;
+      executed.push(`${res.body.unit.platform}:${res.body.unit.sourceObject}${res.body.unit.campaignPage ? `@${res.body.unit.campaignPage.offset}` : ""}`);
+    }
+
+    // THE ACTUAL WORKER ORDER: the second campaign slice is drained last, not next.
+    assert.deepEqual(executed, [
+      "boostiny:campaigns",
+      "boostiny:coupons",
+      "optimise_sea:campaigns@0",
+      "optimise_sea:voucher_codes",
+      "optimise_sea:conversions",
+      "optimise_sea:campaigns@800",
+    ]);
+
+    const continuation = h.campaignUnits(run.id).find((u) => u.payload.campaignPageOffset === SLICE);
+    assert.equal(continuation.priority, 6, "max(existing priority) + 1, i.e. behind unrelated units");
+    assert.equal(continuation.payload.sequence, 6);
+    assert.deepEqual(h.unitsOf(run.id).map(label), [
+      "boostiny:campaigns", "boostiny:coupons", "optimise_sea:campaigns@0",
+      "optimise_sea:voucher_codes", "optimise_sea:conversions", "optimise_sea:campaigns@800",
+    ]);
+  });
+
+  it("nextWorkableUnit offers the next PLANNED unit after slice 0, not the continuation", async () => {
+    const h = harness({ totalCampaigns: SLICE * 2 });
+    const run = await mixedRun(h);
+    await h.worker(); // boostiny:campaigns
+    await h.worker(); // boostiny:coupons
+    await h.worker(); // optimise_sea:campaigns@0  -> appends @800 at priority 6
+
+    const next = await h.orchestration.nextWorkableUnit();
+    assert.equal(next.unit.payload.sourceObject, "voucher_codes", "lowest pending priority wins, as always");
+    assert.notEqual(next.unit.payload.campaignPageOffset, SLICE);
+    assert.equal(next.run.id, run.id);
+  });
+
+  it("totalUnits grows and pendingUnits stays arithmetically correct across the append", async () => {
+    const h = harness({ totalCampaigns: SLICE * 2 });
+    const run = await mixedRun(h);
+    const before = await h.orchestration.describeRun(run.id);
+    assert.equal(before.totalUnits, 5);
+    assert.equal(before.pendingUnits, 5);
+
+    await h.worker(); await h.worker(); await h.worker(); // through slice 0
+
+    const after = await h.orchestration.describeRun(run.id);
+    assert.equal(after.totalUnits, 6, "the continuation is counted");
+    assert.equal(h.rows.find((r) => r.id === run.id).payload.totalUnits, 6, "and recorded on the parent");
+    assert.equal(after.completedUnits, 3);
+    assert.equal(after.pendingUnits, 3);
+    assert.equal(
+      after.completedUnits + after.failedUnits + after.pendingUnits + after.runningUnits + after.blockedUnits,
+      after.totalUnits,
+      "the counters still account for every unit",
+    );
+    assert.equal(after.status, "running");
+    assert.equal(h.rows.find((r) => r.id === run.id).status, "RUNNING", "a growing run is never finalised early");
+  });
+});
+
+describe("commission groups against an outstanding slice", () => {
+  const chunkPlan = async () => ({ chunks: [{ index: 0, campaignIds: ["c1"] }], campaignIds: ["c1"] });
+  const commissionUnits = (h, runId) => h.unitsOf(runId).filter((u) => u.payload.sourceObject === "commission_groups");
+
+  async function twoSliceRun(h) {
+    const run = await h.orchestration.createRun({
+      kind: "full", trigger: "api", options: { promoteAfter: false },
+      units: [{
+        kind: UNIT_KINDS.NETWORK, platform: "optimise_sea", accountLabel: "default", sourceObject: "campaigns",
+        campaignPageIndex: 0, campaignPageOffset: 0, campaignPageLimit: LIMIT, campaignPageBudget: PAGES, options: {},
+      }],
+    });
+    const parent = h.rows.find((r) => r.id === run.id);
+    parent.payload = {
+      ...parent.payload,
+      deferredSources: [{ platform: "optimise_sea", accountLabel: "default", sourceObject: "commission_groups", after: "campaigns" }],
+    };
+    return run;
+  }
+
+  it("a PENDING slice blocks materialisation", async () => {
+    const h = harness({ totalCampaigns: SLICE * 2, chunkPlan });
+    const run = await twoSliceRun(h);
+    await h.worker(); // slice 0 -> appends slice 800, still PENDING
+    assert.equal(commissionUnits(h, run.id).length, 0);
+    assert.equal((await h.orchestration.describeRun(run.id)).deferredSources[0].status, "pending");
+  });
+
+  it("a RUNNING slice blocks materialisation", async () => {
+    const h = harness({ totalCampaigns: SLICE * 2, chunkPlan });
+    const run = await twoSliceRun(h);
+    await h.worker();
+    const slice = h.campaignUnits(run.id).find((u) => u.payload.campaignPageOffset === SLICE);
+    slice.status = "RUNNING";
+    slice.startedAt = new Date(NOW.getTime());
+    const first = h.campaignUnits(run.id)[0];
+    const result = await h.orchestration.materialiseFollowOnUnits(
+      run.id, first.payload,
+      { sea: { default: { campaigns: 1, campaignPage: { offset: 0, hasMore: false, nextOffset: null } } } },
+      { completingUnitId: first.id },
+    );
+    assert.equal(result.appended, 0);
+    assert.equal(result.waitingOnUnits, 1);
+    assert.equal(commissionUnits(h, run.id).length, 0);
+  });
+
+  it("a retryable slice — failed but back to PENDING — blocks materialisation", async () => {
+    const h = harness({ totalCampaigns: SLICE * 2, chunkPlan });
+    const run = await twoSliceRun(h);
+    await h.worker();
+    const slice = h.campaignUnits(run.id).find((u) => u.payload.campaignPageOffset === SLICE);
+    await h.orchestration.claimUnit(slice.id, { workerId: "w" });
+    await h.orchestration.failUnit(slice.id, new Error("zzsupplierzz"));
+    assert.equal(h.rows.find((r) => r.id === slice.id).status, "PENDING", "retryable, not terminal");
+
+    const first = h.campaignUnits(run.id)[0];
+    const result = await h.orchestration.materialiseFollowOnUnits(
+      run.id, first.payload,
+      { sea: { default: { campaigns: 1, campaignPage: { offset: 0, hasMore: false, nextOffset: null } } } },
+      { completingUnitId: first.id },
+    );
+    assert.equal(result.appended, 0, "a slice that will run again is outstanding work");
+    assert.equal(commissionUnits(h, run.id).length, 0);
+  });
+
+  it("the final slice materialises commission groups once, and only once", async () => {
+    const h = harness({ totalCampaigns: SLICE * 2, chunkPlan });
+    const run = await twoSliceRun(h);
+    await h.worker();  // slice 0
+    assert.equal(commissionUnits(h, run.id).length, 0);
+    await h.worker();  // slice 800 — the last one
+    assert.equal(commissionUnits(h, run.id).length, 1, "exactly one chunk, planned once");
+
+    // Replaying the final completion, and racing it, add nothing.
+    const last = h.campaignUnits(run.id).find((u) => u.payload.campaignPageOffset === SLICE);
+    const outcome = { sea: { default: { campaigns: 1, campaignPage: { offset: SLICE, hasMore: false, nextOffset: null } } } };
+    const opts = { completingUnitId: last.id };
+    await h.orchestration.materialiseFollowOnUnits(run.id, last.payload, outcome, opts);
+    const racy = await Promise.all([
+      h.orchestration.materialiseFollowOnUnits(run.id, last.payload, outcome, opts),
+      h.orchestration.materialiseFollowOnUnits(run.id, last.payload, outcome, opts),
+    ]);
+    assert.equal(racy.reduce((sum, r) => sum + r.appended, 0), 0);
+    assert.equal(commissionUnits(h, run.id).length, 1);
+    const status = await h.orchestration.describeRun(run.id);
+    assert.equal(status.deferredSources[0].status, "materialised");
+    assert.equal(status.deferredSources[0].units, 1);
+  });
+});
+
 describe("source guards", () => {
   it("the bounded fetch uses the supplier's own offset paging and stops on a short page", () => {
     const fn = ADAPTER_SRC.split("async function fetchOffsetPage(")[1].split("\n}\n")[0];
