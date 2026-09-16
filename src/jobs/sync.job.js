@@ -55,6 +55,7 @@ import {
 } from "./syncTimestamps.js";
 import {
   boundedCampaignIds,
+  boundedCampaignPage,
   explicitSyncWindow,
   getSyncOptions,
   runWithSyncOptions,
@@ -897,7 +898,10 @@ async function syncOptimiseRegion(region, accountLabel) {
   }
 
   const timestamps = await getAccountSyncTimestamps(platform, credentials.accountLabel);
-  const refreshCampaigns = shouldRefreshCampaigns(timestamps?.lastCampaignSyncAt);
+  // A bounded campaigns unit exists to fetch ONE named slice of the catalog, so it always fetches:
+  // letting the cache gate skip it would silently drop pages the run still needs.
+  const campaignPage = boundedCampaignPage();
+  const refreshCampaigns = campaignPage ? true : shouldRefreshCampaigns(timestamps?.lastCampaignSyncAt);
   const refreshCoupons = shouldRefreshCoupons(timestamps?.lastCouponSyncAt);
   const networkAccountId =
     credentials.networkAccountId || (await resolveNetworkAccountId(platform, credentials.accountLabel));
@@ -943,6 +947,23 @@ async function syncOptimiseRegion(region, accountLabel) {
 
   accountTimer.start("apiFetchMs");
 
+  // A bounded unit walks the supplier's own offset/limit paging for at most its page budget and
+  // reports where the next slice begins; an unbounded call keeps the existing whole-catalog walk.
+  let campaignPagination = null;
+  const fetchCampaignRows = campaignPage
+    ? async () => {
+        const page = await adapter.fetchCampaignsPage(campaignPage);
+        campaignPagination = {
+          offset: campaignPage.offset,
+          pagesFetched: page.pagesFetched,
+          rowsFetched: page.rows.length,
+          nextOffset: page.nextOffset,
+          hasMore: page.hasMore,
+        };
+        return page.rows;
+      }
+    : () => adapter.fetchCampaigns();
+
   // Independent Optimise source objects; failure of conversions must not fail campaigns.
   const [
     campaignsResult,
@@ -955,7 +976,7 @@ async function syncOptimiseRegion(region, accountLabel) {
     voucherCodesResult,
   ] = await Promise.all([
     refreshCampaigns
-      ? fetchOptimiseSourceObject("campaigns", credentials, () => adapter.fetchCampaigns(), {}, srcCtx)
+      ? fetchOptimiseSourceObject("campaigns", credentials, fetchCampaignRows, {}, srcCtx)
       : fetchOptimiseSourceObject(
           "campaigns",
           credentials,
@@ -1294,6 +1315,9 @@ async function syncOptimiseRegion(region, accountLabel) {
   }
 
   const savedCounts = {
+    // Where this unit's slice ended, so the orchestrator can plan the next one deterministically.
+    // Null for an unbounded run; never any supplier payload.
+    campaignPage: campaignPagination,
     campaigns: refreshCampaigns ? campaignsResult.rows.length : 0,
     conversions: conversionsResult.rows.length,
     conversionsByPayment: conversionsByPayment.length,

@@ -25,7 +25,7 @@
 import { prisma as defaultPrisma } from "../database/prisma.js";
 import { listMarketplaceAccounts } from "../modules/integrations/oauth.service.js";
 import { getAccountSyncTimestamps } from "./syncTimestamps.js";
-import { planAccountUnits, planSourcesFor, sourcesMaterialisedAfter } from "./syncSourcePlan.js";
+import { nextPagedUnit, planAccountUnits, planSourcesFor, sourcesMaterialisedAfter } from "./syncSourcePlan.js";
 import {
   OPTIMISE_COMMISSION_GROUP_CHUNK_SIZE,
   planOptimiseCommissionGroupChunks,
@@ -67,8 +67,14 @@ export const DEFAULT_UNIT_MAX_ATTEMPTS = 3;
  *
  * Bump this whenever a change makes previously planned units incompatible with newly planned
  * ones. Runs created before it existed carry no version at all and are compatible with nothing.
+ *
+ * 6 — Optimise campaigns became a PAGED source. A version-5 campaigns unit carries no page
+ * descriptor, so it would walk the whole catalog and hit the invocation limit exactly as run
+ * 0991cd7f did, and its completion would materialise commission groups from a catalog only
+ * partly staged. Version-5 runs are therefore neither reused nor executed by this planner; they
+ * stay readable and are retired deliberately.
  */
-export const PLANNER_VERSION = 5;
+export const PLANNER_VERSION = 6;
 
 /**
  * Why a unit was terminalised without ever reporting a failure: its worker was killed (a
@@ -394,6 +400,23 @@ function summarizeUnits(units, { postSyncStages = "none" } = {}) {
   };
 }
 
+/** The one account's block of a sync result, without assuming which key it sits under. */
+function accountOutcome(result, accountLabel) {
+  if (!result || typeof result !== "object") return null;
+  const direct = accountLabel ? result[accountLabel] : null;
+  if (direct && typeof direct === "object") return direct;
+  // Optimise nests its account block under the region: { sea: { default: {...} } }.
+  for (const value of Object.values(result)) {
+    if (!value || typeof value !== "object") continue;
+    if (accountLabel && value[accountLabel] && typeof value[accountLabel] === "object") return value[accountLabel];
+    if (value.campaignPage !== undefined) return value;
+    for (const nested of Object.values(value)) {
+      if (nested && typeof nested === "object" && nested.campaignPage !== undefined) return nested;
+    }
+  }
+  return null;
+}
+
 export const OPTIMISE_COMMISSION_GROUPS_SOURCE = "commission_groups";
 export { OPTIMISE_COMMISSION_GROUP_CHUNK_SIZE };
 
@@ -410,6 +433,7 @@ function unitIdentity(descriptor = {}) {
     descriptor.windowStart ?? "",
     descriptor.windowEnd ?? "",
     descriptor.campaignChunkIndex ?? "",
+    descriptor.campaignPageOffset ?? "",
   ].join("|");
 }
 
@@ -418,6 +442,18 @@ function unitIdentity(descriptor = {}) {
  * Deliberately counts and positions only — the campaign identifiers themselves are supplier data
  * and never leave the unit payload.
  */
+/** Safe slice metadata: which page window this unit covers. Offsets and counts only. */
+function unitCampaignPage(descriptor = {}) {
+  const offset = descriptor?.campaignPageOffset;
+  if (offset === null || offset === undefined) return null;
+  return {
+    index: descriptor?.campaignPageIndex ?? null,
+    offset,
+    limit: descriptor?.campaignPageLimit ?? null,
+    pages: descriptor?.campaignPageBudget ?? null,
+  };
+}
+
 function unitCampaignChunk(descriptor = {}) {
   const index = descriptor?.campaignChunkIndex;
   if (index === null || index === undefined) return null;
@@ -449,6 +485,7 @@ function unitView(unit) {
     // a pre-Phase-5 account-wide unit.
     window: unitWindow(p),
     campaignChunk: unitCampaignChunk(p),
+    campaignPage: unitCampaignPage(p),
     lockKey: p.lockKey ?? null,
     status: unit.status,
     attempt: unit.attempt ?? 0,
@@ -888,6 +925,23 @@ export class SyncOrchestrationService {
   }
 
   /**
+   * How many units of one account's source object are still in flight, EXCLUDING any that are
+   * already terminal. The unit whose completion triggered this is terminal by then, so a lone
+   * final slice counts zero and the deferred work proceeds.
+   */
+  async #unsettledUnitsFor(runId, { platform, accountLabel, sourceObject, excludeUnitId = null }) {
+    const units = await this.listUnits(runId);
+    return units.filter(
+      (unit) =>
+        unit.id !== excludeUnitId &&
+        unit.payload?.platform === platform &&
+        unit.payload?.accountLabel === accountLabel &&
+        unit.payload?.sourceObject === sourceObject &&
+        !TERMINAL_STATUSES.includes(unit.status),
+    ).length;
+  }
+
+  /**
    * Record on the parent that a deferred source object has been materialised — including when it
    * materialised ZERO units because the account had no eligible campaigns. Without this a run
    * would keep reporting work that is never coming.
@@ -917,14 +971,42 @@ export class SyncOrchestrationService {
    * account's campaigns unit has staged it. Discovery is a single read of those staged rows — no
    * supplier call — and the chunks are appended to the same run under the SAME account lock.
    */
-  async materialiseFollowOnUnits(runId, descriptor = {}) {
+  async materialiseFollowOnUnits(runId, descriptor = {}, outcome = null, { completingUnitId = null } = {}) {
     const platform = text(descriptor?.platform);
     const sourceObject = text(descriptor?.sourceObject);
     if (!runId || !platform || !sourceObject) return { appended: 0, skipped: 0 };
+    const accountLabel = text(descriptor?.accountLabel) ?? "default";
+
+    // A paged source plans its NEXT slice from what the supplier just said, and nothing else
+    // happens until the catalog is fully walked.
+    const pagination = accountOutcome(outcome, accountLabel)?.campaignPage ?? null;
+    const continuation = nextPagedUnit({ ...descriptor, platform, accountLabel }, pagination);
+    if (continuation) {
+      const appended = await this.appendUnits(runId, [{
+        kind: UNIT_KINDS.NETWORK,
+        platform,
+        accountLabel,
+        sourceObject,
+        options: { ...(descriptor?.options ?? {}), promoteAfter: false },
+        ...continuation,
+      }]);
+      return { ...appended, continued: true };
+    }
+
     const targets = sourcesMaterialisedAfter(platform, sourceObject);
     if (!targets.includes(OPTIMISE_COMMISSION_GROUPS_SOURCE)) return { appended: 0, skipped: 0 };
 
-    const accountLabel = text(descriptor?.accountLabel) ?? "default";
+    // Commission groups are planned from the STAGED campaign list, so they may only be planned
+    // once every slice of that list has settled — including slices another worker is still on.
+    const outstanding = await this.#unsettledUnitsFor(runId, {
+      platform,
+      accountLabel,
+      sourceObject,
+      // The unit whose completion brought us here has done its supplier work and staged its rows;
+      // the caller completes it immediately after. Counting it would deadlock the deferral.
+      excludeUnitId: completingUnitId,
+    });
+    if (outstanding > 0) return { appended: 0, skipped: 0, waitingOnUnits: outstanding };
     const key = { platform, accountLabel, sourceObject: OPTIMISE_COMMISSION_GROUPS_SOURCE };
     const plan = await this.planCommissionGroupChunks({ platform, accountLabel });
     const chunks = plan?.chunks ?? [];
@@ -1129,6 +1211,7 @@ export class SyncOrchestrationService {
       sourceObject: p.sourceObject ?? null,
       window: unitWindow(p),
       campaignChunk: unitCampaignChunk(p),
+      campaignPage: unitCampaignPage(p),
       lockKey: p.lockKey ?? null,
       status: unit?.status ?? null,
       attempt: unit?.attempt ?? 0,

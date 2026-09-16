@@ -412,6 +412,16 @@ export async function triggerSyncWorker(req, res, next) {
               of: descriptor.campaignChunkCount ?? null,
               campaignCount: Array.isArray(descriptor.campaignIds) ? descriptor.campaignIds.length : null,
             },
+      // Offsets and counts only; never a supplier row.
+      campaignPage:
+        descriptor.campaignPageOffset === null || descriptor.campaignPageOffset === undefined
+          ? null
+          : {
+              index: descriptor.campaignPageIndex ?? null,
+              offset: descriptor.campaignPageOffset,
+              limit: descriptor.campaignPageLimit ?? null,
+              pages: descriptor.campaignPageBudget ?? null,
+            },
     };
 
     let result;
@@ -435,6 +445,15 @@ export async function triggerSyncWorker(req, res, next) {
         ...(Array.isArray(descriptor.campaignIds) && descriptor.campaignIds.length
           ? { campaignIds: [...descriptor.campaignIds] }
           : {}),
+        // A bounded catalog slice: the supplier's own offset/limit paging, so a retry re-requests
+        // exactly the pages this unit named and nothing else.
+        ...(descriptor.campaignPageOffset === null || descriptor.campaignPageOffset === undefined
+          ? {}
+          : {
+              campaignPageOffset: descriptor.campaignPageOffset,
+              campaignPageLimit: descriptor.campaignPageLimit,
+              campaignPageBudget: descriptor.campaignPageBudget,
+            }),
       });
     } catch (error) {
       const failed = await orchestration.failUnit(unit.id, error);
@@ -458,7 +477,9 @@ export async function triggerSyncWorker(req, res, next) {
     // the chunks exist while this unit is still RUNNING, so the parent cannot terminate between
     // the two. If it throws, the unit is never completed, its lease expires and the whole step is
     // retried — the failure is visible and recoverable rather than a silently short run.
-    const followOn = await orchestration.materialiseFollowOnUnits(run.id, descriptor);
+    const followOn = await orchestration.materialiseFollowOnUnits(run.id, descriptor, result, {
+      completingUnitId: unit.id,
+    });
     await orchestration.completeUnit(unit.id, summariseSyncUnitOutcome(result, { accountLabel: descriptor.accountLabel }));
     const syncStatus = await orchestration.describeRun(run.id);
     return res.status(200).json({

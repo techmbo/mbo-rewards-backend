@@ -81,3 +81,24 @@ export function boundedCampaignIds() {
   const ids = value.map((id) => String(id ?? "").trim()).filter(Boolean);
   return ids.length ? ids : null;
 }
+
+/**
+ * The slice of the Optimise campaign catalog a bounded unit was planned with, or null when the
+ * caller supplied none (a manual sync, the scheduler, a pre-6 unit). Offsets are the supplier's
+ * own offset/limit paging, so a retry re-requests exactly the same pages.
+ */
+export function boundedCampaignPage() {
+  const { campaignPageOffset, campaignPageLimit, campaignPageBudget } = getSyncOptions();
+  if (campaignPageOffset === null || campaignPageOffset === undefined) return null;
+  const offset = Number(campaignPageOffset);
+  if (!Number.isFinite(offset) || offset < 0) {
+    throw new Error("Bounded campaign page carries an unusable offset");
+  }
+  const limit = Number(campaignPageLimit);
+  const maxPages = Number(campaignPageBudget);
+  return {
+    offset: Math.floor(offset),
+    ...(Number.isFinite(limit) && limit > 0 ? { limit: Math.floor(limit) } : {}),
+    ...(Number.isFinite(maxPages) && maxPages > 0 ? { maxPages: Math.floor(maxPages) } : {}),
+  };
+}

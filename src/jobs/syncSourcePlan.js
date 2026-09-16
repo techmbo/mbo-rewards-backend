@@ -37,6 +37,12 @@ function source({
   // advanced reports pull a fixed payment history, not the events window).
   spanDaysBack = null,
   spanIncremental = null,
+  // A catalog whose size is only known by walking the supplier's paging. The plan emits the FIRST
+  // slice (offset 0, which is always knowable) and each completed slice plans the next while the
+  // supplier says there is more.
+  paged = false,
+  pagesPerUnit = null,
+  pageLimit = null,
   // A source object whose unit scope is only knowable after another source object of the same
   // account has run. It is not planned at enqueue time and is NOT an exclusion: the named unit's
   // completion materialises it.
@@ -54,11 +60,26 @@ function source({
     spanDaysBack,
     spanIncremental,
     materialisedAfter,
+    paged: Boolean(paged),
+    pagesPerUnit: paged ? pagesPerUnit : null,
+    pageLimit: paged ? pageLimit : null,
   });
 }
 
 /** Why a planned unit may not be executed. Explicit, never silent. */
 export const UNBOUNDED_FANOUT_REASON = "unbounded_per_campaign_fanout";
+
+/**
+ * Supplier pages per bounded Optimise campaigns unit, and the rows per page.
+ *
+ * Optimise holds requests OPTIMISE_MIN_INTERVAL_MS (12.5s) apart and that pacing MULTIPLIES across
+ * pagination: N pages cost at least (N-1) x 12.5s of waiting before any response time or staging.
+ * A 300s invocation therefore affords ~24 requests in total, which is why the whole-catalog walk
+ * timed out. Eight pages is ~87.5s of pacing — roughly a third of the budget — leaving ample room
+ * for response time, row staging and a slow page. 100 rows per page is the adapter's own default.
+ */
+export const OPTIMISE_CAMPAIGN_PAGES_PER_UNIT = 8;
+export const OPTIMISE_CAMPAIGN_PAGE_LIMIT = 100;
 
 /**
  * Per-network span behaviour, read from the sync layer as it stands:
@@ -95,7 +116,13 @@ const FAMILY_SOURCES = Object.freeze({
   ]),
   // Limiter 12500ms/request — the slowest supplier in the estate, so the shortest windows.
   optimise: Object.freeze([
-    source({ sourceObject: "campaigns", notes: "GET /campaigns, offset-paginated." }),
+    source({
+      sourceObject: "campaigns",
+      paged: true,
+      pagesPerUnit: OPTIMISE_CAMPAIGN_PAGES_PER_UNIT,
+      pageLimit: OPTIMISE_CAMPAIGN_PAGE_LIMIT,
+      notes: "GET /campaigns, offset-paginated. Every page waits on the 12.5s limiter, so the walk is split into bounded slices of the supplier's own paging.",
+    }),
     source({ sourceObject: "voucher_codes", notes: "GET /vouchercodes, cache-gated." }),
     source({ sourceObject: "conversions", windowed: true, windowDays: 7, notes: "GET /conversions (fromDate/toDate); the conversionsByPayment variant shares this identity and rides with it." }),
     source({ sourceObject: "reporting", windowed: true, windowDays: 7, notes: "POST /reporting/ (fromDate/toDate); the invoice-date variant shares this identity." }),
@@ -301,6 +328,17 @@ export function planAccountUnits({
       options: { ...networkOptions },
       ...(source.companions ? { sourceObjectCompanions: [...source.companions] } : {}),
     };
+    if (source.paged) {
+      // Only the first slice is knowable now; completing it plans the next while more remains.
+      units.push({
+        ...base,
+        campaignPageIndex: 0,
+        campaignPageOffset: 0,
+        campaignPageLimit: source.pageLimit,
+        campaignPageBudget: source.pagesPerUnit,
+      });
+      continue;
+    }
     if (!source.windowed) {
       units.push(base);
       continue;
@@ -322,6 +360,25 @@ export function sourcesMaterialisedAfter(platform, sourceObject) {
   return planSourcesFor(platform)
     .filter((source) => source.materialisedAfter === key)
     .map((source) => source.sourceObject);
+}
+
+/**
+ * The next slice of a paged source, from the slice that just ran and what the supplier said about
+ * having more. Returns null when the supplier reported the last page — which is what makes the
+ * chain finite and a zero-row account a single unit.
+ */
+export function nextPagedUnit(descriptor = {}, pagination = null) {
+  if (!pagination?.hasMore) return null;
+  const nextOffset = Number(pagination.nextOffset);
+  if (!Number.isFinite(nextOffset) || nextOffset <= Number(descriptor.campaignPageOffset ?? -1)) return null;
+  const source = planSourcesFor(descriptor.platform).find((item) => item.sourceObject === descriptor.sourceObject);
+  if (!source?.paged) return null;
+  return {
+    campaignPageIndex: Number(descriptor.campaignPageIndex ?? 0) + 1,
+    campaignPageOffset: nextOffset,
+    campaignPageLimit: descriptor.campaignPageLimit ?? source.pageLimit,
+    campaignPageBudget: descriptor.campaignPageBudget ?? source.pagesPerUnit,
+  };
 }
 
 /** Diagnostics for the audit report and the tests: how big a plan is, without building it. */

@@ -265,11 +265,14 @@ describe("materialisation after the campaigns unit", () => {
   it("replaying the same completion does not double-plan a chunk", async () => {
     const h = harness({ campaigns: SIZE + 2 });
     const run = await runWithCampaignsUnit(h);
-    const descriptor = h.unitsOf(run.id)[0].payload;
-    await h.orchestration.materialiseFollowOnUnits(run.id, descriptor);
+    const campaignsUnit = h.unitsOf(run.id)[0];
+    const descriptor = campaignsUnit.payload;
+    // The worker passes the unit it is completing; the deferral waits on every OTHER slice.
+    const opts = { completingUnitId: campaignsUnit.id };
+    await h.orchestration.materialiseFollowOnUnits(run.id, descriptor, null, opts);
     const first = chunksOf(h, run.id).length;
     assert.equal(first, 2);
-    const again = await h.orchestration.materialiseFollowOnUnits(run.id, descriptor);
+    const again = await h.orchestration.materialiseFollowOnUnits(run.id, descriptor, null, opts);
     assert.equal(again.appended, 0);
     assert.equal(again.skipped, 2);
     assert.equal(chunksOf(h, run.id).length, first, "the run still has exactly one unit per chunk");
@@ -499,12 +502,14 @@ describe("orchestration hardening around deferred materialisation", () => {
   it("concurrent completions of the same campaigns unit create ONE set of chunks", async () => {
     const h = harness({ campaigns: SIZE * 2 + 1 });
     const run = await runWithCampaignsUnit(h);
-    const descriptor = h.unitsOf(run.id)[0].payload;
+    const campaignsUnit = h.unitsOf(run.id)[0];
+    const descriptor = campaignsUnit.payload;
+    const opts = { completingUnitId: campaignsUnit.id };
 
     // Two workers materialising at the same moment: both read an empty run and both create.
     const [a, b] = await Promise.all([
-      h.orchestration.materialiseFollowOnUnits(run.id, descriptor),
-      h.orchestration.materialiseFollowOnUnits(run.id, descriptor),
+      h.orchestration.materialiseFollowOnUnits(run.id, descriptor, null, opts),
+      h.orchestration.materialiseFollowOnUnits(run.id, descriptor, null, opts),
     ]);
 
     const chunks = chunksOf(h, run.id);
@@ -674,7 +679,10 @@ describe("orchestration hardening around deferred materialisation", () => {
     });
     const run = await runWithCampaignsUnit(h);
     const before = h.calls.length;
-    await h.orchestration.materialiseFollowOnUnits(run.id, h.unitsOf(run.id)[0].payload);
+    const campaignsUnit = h.unitsOf(run.id)[0];
+    await h.orchestration.materialiseFollowOnUnits(run.id, campaignsUnit.payload, null, {
+      completingUnitId: campaignsUnit.id,
+    });
     assert.equal(h.calls.length, before, "no account sync, and therefore no Optimise request");
     assert.deepEqual(seen, [{ platform: "optimise_sea", accountLabel: "default" }]);
     assert.equal(chunksOf(h, run.id).length, 1, "the only writes are JobRun rows");

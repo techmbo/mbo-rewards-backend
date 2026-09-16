@@ -462,6 +462,41 @@ async function fetchOffsetPaginated(httpClient, endpoint, baseParams) {
 
 
 /**
+ * ONE BOUNDED SLICE of an offset-paginated resource.
+ *
+ * The unbounded walker above cannot be used from a serverless worker: every page waits
+ * OPTIMISE_MIN_INTERVAL_MS (12.5s) on the shared limiter, so the pacing multiplies across
+ * pagination and a large catalog exceeds the invocation limit before the loop ends. This fetches
+ * at most `maxPages` pages from `offset` and reports where the next slice starts, using the
+ * supplier's own offset/limit paging — no synthetic partitioning of any kind.
+ *
+ * `hasMore` is the supplier's own signal, read exactly as the unbounded walker reads it: a page
+ * shorter than `limit` is the last page.
+ */
+async function fetchOffsetPage(httpClient, endpoint, baseParams, { offset = 0, limit = OPTIMISE_PAGE_LIMIT, maxPages = 1 } = {}) {
+  const size = Math.max(1, Math.floor(Number(limit) || OPTIMISE_PAGE_LIMIT));
+  const budget = Math.max(1, Math.floor(Number(maxPages) || 1));
+  const rows = [];
+  let cursor = Math.max(0, Math.floor(Number(offset) || 0));
+  let pagesFetched = 0;
+
+  while (pagesFetched < budget) {
+    // eslint-disable-next-line no-await-in-loop
+    const response = await requestWithOptimiseLimits(() =>
+      httpClient.get(endpoint, { params: { ...baseParams, offset: cursor, limit: size } }),
+    );
+    const pageRows = extractRows(response.data);
+    rows.push(...pageRows);
+    pagesFetched += 1;
+    cursor += size;
+    if (pageRows.length < size) {
+      return { rows, pagesFetched, nextOffset: null, hasMore: false };
+    }
+  }
+  return { rows, pagesFetched, nextOffset: cursor, hasMore: true };
+}
+
+/**
  * Downloads a feed body, byte-capped, without ever leaving the allowed host.
  *
  * Redirects are followed MANUALLY. Node's fetch follows them automatically by default, across hosts
@@ -692,6 +727,22 @@ export function createOptimiseAdapter({
         returnPublishersForCampaign: true,
         ...params,
       });
+    },
+    /**
+     * One bounded slice of the campaign catalog, for a bounded orchestration unit. Same endpoint,
+     * same parameters and same row extraction as fetchCampaigns — only the walk is bounded.
+     */
+    fetchCampaignsPage(page = {}) {
+      return fetchOffsetPage(
+        httpClient,
+        "/campaigns",
+        {
+          ...commonParams,
+          extendedData: true,
+          returnPublishersForCampaign: true,
+        },
+        page,
+      );
     },
     fetchCampaignDetail(campaignId) {
       return requestWithRetry(() =>
