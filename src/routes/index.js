@@ -373,8 +373,11 @@ router.get(
   requirePermission(PERMISSIONS.SYSTEM_READ),
   previewSyncPlanHandler,
 );
+// Its 202 carries the same durable run projection /sync/status returns — run ids, per-account
+// unit counts and sync state — so it is no more shared-cacheable than the status endpoint.
 router.post(
   "/sync/all",
+  noStoreHeaders,
   authenticate,
   requirePermission(PERMISSIONS.SYNC_TRIGGER),
   auditAction("sync.all", "sync"),

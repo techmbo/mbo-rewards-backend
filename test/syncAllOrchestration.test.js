@@ -20,6 +20,7 @@ import {
 } from "../src/jobs/syncOrchestration.service.js";
 
 const CONTROLLER_SRC = readFileSync(new URL("../src/controllers/sync.controller.js", import.meta.url), "utf8");
+const ROUTES_SRC = readFileSync(new URL("../src/routes/index.js", import.meta.url), "utf8");
 const handlerOf = (name) => CONTROLLER_SRC.split(`export async function ${name}`)[1].split("\nexport ")[0];
 
 /** Minimal JobRun store honouring the where-shapes the orchestration service uses. */
@@ -442,5 +443,52 @@ describe("source guards — enqueue only, and the other routes untouched", () =>
     for (const forbidden of ["cron", "CRON", "collapseDuplicateRun"]) {
       assert.ok(!CONTROLLER_SRC.includes(forbidden), forbidden);
     }
+  });
+});
+
+describe("the enqueue response is never shared-cacheable", () => {
+  /** Serves the route on an ephemeral port so the wire headers can be read. */
+  async function serve(build) {
+    const express = (await import("express")).default;
+    const app = express();
+    app.use(express.json());
+    build(app);
+    const server = await new Promise((resolve) => {
+      const s = app.listen(0, "127.0.0.1", () => resolve(s));
+    });
+    const base = `http://127.0.0.1:${server.address().port}`;
+    return {
+      request: (path) => fetch(`${base}${path}`, { method: "POST" }),
+      stop: () => new Promise((resolve) => server.close(resolve)),
+    };
+  }
+
+  it("POST /sync/all answers with Cache-Control: no-store", async () => {
+    const { noStoreHeaders } = await import("../src/platform/security/index.js");
+    const h = harness();
+    const app = await serve((a) =>
+      a.post("/sync/all", noStoreHeaders, (req, res, next) => {
+        req.app.locals.syncOrchestration = h.orchestration;
+        return triggerSyncAll(req, res, next);
+      }),
+    );
+    try {
+      const res = await app.request("/sync/all");
+      assert.equal(res.status, 202);
+      assert.equal(res.headers.get("cache-control"), "no-store");
+      assert.equal(res.headers.get("pragma"), "no-cache");
+      assert.ok(!/public/i.test(res.headers.get("cache-control") ?? ""));
+      // The 202 really does carry durable run state, which is why it must not be cached.
+      assert.ok((await res.json()).syncStatus.runId);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  it("the route carries the shared middleware, ahead of the auth guards", () => {
+    const route = ROUTES_SRC.split('"/sync/all",')[1].split(");")[0];
+    assert.match(route, /noStoreHeaders/, "the existing internal-API cache-control mechanism");
+    assert.ok(route.indexOf("noStoreHeaders") < route.indexOf("authenticate"), "covers a 401/403 too");
+    assert.ok(!route.includes("Cache-Control"), "not a hand-written header");
   });
 });

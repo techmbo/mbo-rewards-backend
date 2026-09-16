@@ -56,6 +56,21 @@ export const DEFAULT_LEASE_MS = LOCK_LEASE_MS;
 export const DEFAULT_UNIT_MAX_ATTEMPTS = 3;
 
 /**
+ * What KIND of plan a run's units are, recorded durably on the parent.
+ *
+ * A run is only reusable by a request that would plan the same shape of work. Kind and options
+ * are not enough for that: a pre-Phase-5 run's units are whole accounts, a Phase 5 run's are
+ * platform + account + source object [+ window]. They answer the same `/sync/all` and match on
+ * every option, yet resuming one when the caller asked for the other silently does entirely
+ * different work — which is exactly what happened in production, where a full sync resumed a
+ * 9-unit account-wide run instead of planning 124 bounded units.
+ *
+ * Bump this whenever a change makes previously planned units incompatible with newly planned
+ * ones. Runs created before it existed carry no version at all and are compatible with nothing.
+ */
+export const PLANNER_VERSION = 5;
+
+/**
  * Why a unit was terminalised without ever reporting a failure: its worker was killed (a
  * serverless invocation timeout, a crash, an instance reclaim) and its lease ran out.
  */
@@ -495,6 +510,28 @@ export function summariseSyncUnitOutcome(result, { accountLabel = null } = {}) {
   };
 }
 
+/**
+ * What makes an active run REUSABLE by a new request: the same kind, the same execution options,
+ * and the same planner version. The version condition matches on an exact stored value, so a run
+ * that predates versioning — no `plannerVersion` key at all — is matched by nothing and is left
+ * strictly alone.
+ *
+ * A null `plannerVersion` means "do not filter on it", used by the read-only status lookups that
+ * must still be able to see a legacy run.
+ */
+function compatibilityConditions({ kind = null, options = null, plannerVersion = null } = {}) {
+  const conditions = [];
+  if (kind) conditions.push({ payload: { path: ["kind"], equals: kind } });
+  if (options) {
+    conditions.push({ payload: { path: ["options", "fastSync"], equals: Boolean(options.fastSync) } });
+    conditions.push({ payload: { path: ["options", "promoteAfter"], equals: options.promoteAfter !== false } });
+  }
+  if (plannerVersion !== null && plannerVersion !== undefined) {
+    conditions.push({ payload: { path: ["plannerVersion"], equals: plannerVersion } });
+  }
+  return conditions;
+}
+
 export class SyncOrchestrationService {
   constructor({ prisma = defaultPrisma, now = () => new Date(), leaseMs = DEFAULT_LEASE_MS, maxAttempts = DEFAULT_UNIT_MAX_ATTEMPTS, listAccounts = defaultListAccounts, loadAccountState = defaultLoadAccountState, planCommissionGroupChunks = planOptimiseCommissionGroupChunks, locks = null } = {}) {
     this.db = prisma;
@@ -516,13 +553,8 @@ export class SyncOrchestrationService {
    * incompatible request (e.g. ?fast=true) into an unrelated run and give the caller a run id
    * whose units do different work than they asked for.
    */
-  async findActiveRun({ kind = null, options = null } = {}) {
-    const conditions = [];
-    if (kind) conditions.push({ payload: { path: ["kind"], equals: kind } });
-    if (options) {
-      conditions.push({ payload: { path: ["options", "fastSync"], equals: Boolean(options.fastSync) } });
-      conditions.push({ payload: { path: ["options", "promoteAfter"], equals: options.promoteAfter !== false } });
-    }
+  async findActiveRun({ kind = null, options = null, plannerVersion = null } = {}) {
+    const conditions = compatibilityConditions({ kind, options, plannerVersion });
     return this.db.jobRun.findFirst({
       where: {
         jobName: ORCHESTRATION_JOB_NAME,
@@ -566,6 +598,9 @@ export class SyncOrchestrationService {
           payload: {
             kind,
             trigger,
+            // The shape of this run's units. A later request only reuses a run that plans the
+            // same shape; see PLANNER_VERSION.
+            plannerVersion: PLANNER_VERSION,
             options: { fastSync: Boolean(options.fastSync), promoteAfter: options.promoteAfter !== false },
             // Explicit, never silent: "none" when promotion was not requested, "blocked" when
             // placeholders exist, "deferred" when promotion was asked for but has no bounded units.
@@ -614,7 +649,7 @@ export class SyncOrchestrationService {
       return parent;
     };
     const parent = typeof this.db.$transaction === "function" ? await this.db.$transaction(run) : await run(this.db);
-    return { id: parent.id, kind, trigger, totalUnits: planned.length, excludedSources: exclusions, deferredSources, created: true };
+    return { id: parent.id, kind, trigger, plannerVersion: PLANNER_VERSION, totalUnits: planned.length, excludedSources: exclusions, deferredSources, created: true };
   }
 
   /**
@@ -643,13 +678,8 @@ export class SyncOrchestrationService {
   }
 
   /** Every active run doing the same work, earliest first. The first is the canonical one. */
-  async listActiveCompatibleRuns({ kind = null, options = null } = {}) {
-    const conditions = [];
-    if (kind) conditions.push({ payload: { path: ["kind"], equals: kind } });
-    if (options) {
-      conditions.push({ payload: { path: ["options", "fastSync"], equals: Boolean(options.fastSync) } });
-      conditions.push({ payload: { path: ["options", "promoteAfter"], equals: options.promoteAfter !== false } });
-    }
+  async listActiveCompatibleRuns({ kind = null, options = null, plannerVersion = null } = {}) {
+    const conditions = compatibilityConditions({ kind, options, plannerVersion });
     return this.db.jobRun.findMany({
       where: {
         jobName: ORCHESTRATION_JOB_NAME,
@@ -672,6 +702,13 @@ export class SyncOrchestrationService {
     if (!parent || parent.jobName !== ORCHESTRATION_JOB_NAME || !ACTIVE_STATUSES.includes(parent.status)) {
       return { collapsed: false, reason: "already_terminal" };
     }
+    // Never collapse a run this planner did not create. A legacy run is not a duplicate of a
+    // Phase 5 run — it is different work — and cancelling one as "a duplicate" would destroy an
+    // operator's in-flight run. The version filter should already have excluded it; this refuses
+    // it outright in case a caller ever passes one in directly.
+    if ((parent.payload?.plannerVersion ?? null) !== PLANNER_VERSION) {
+      return { collapsed: false, reason: "foreign_planner_version" };
+    }
     const units = await this.listUnits(runId);
     if (units.some((unit) => unit.status !== "PENDING")) return { collapsed: false, reason: "work_started" };
     const cancelledAt = this.now();
@@ -693,8 +730,8 @@ export class SyncOrchestrationService {
   }
 
   /** Collapse every active compatible duplicate after the canonical one. Idempotent. */
-  async #collapseDuplicatesOf(canonicalRunId, { kind, options }) {
-    const active = await this.listActiveCompatibleRuns({ kind, options });
+  async #collapseDuplicatesOf(canonicalRunId, { kind, options, plannerVersion = null }) {
+    const active = await this.listActiveCompatibleRuns({ kind, options, plannerVersion });
     for (const run of active) {
       if (run.id === canonicalRunId) continue;
       // eslint-disable-next-line no-await-in-loop
@@ -709,6 +746,7 @@ export class SyncOrchestrationService {
       trigger: run.payload?.trigger ?? null,
       options: run.payload?.options ?? null,
       totalUnits: run.payload?.totalUnits ?? null,
+      plannerVersion: run.payload?.plannerVersion ?? null,
       excludedSources: run.payload?.excludedSources ?? [],
       deferredSources: run.payload?.deferredSources ?? [],
       created: false,
@@ -728,9 +766,13 @@ export class SyncOrchestrationService {
    * pass also self-heals a duplicate left behind by an earlier crash.
    */
   async getOrCreateRun({ kind = "full", trigger = "api", options = {} } = {}) {
-    const existing = await this.findActiveRun({ kind, options });
+    // Reuse is scoped to this planner version: an active run whose units are a different shape —
+    // a pre-Phase-5 account-wide run, or one from a future version — is not this request's run,
+    // and resuming it would quietly do different work than the caller asked for.
+    const plannerVersion = PLANNER_VERSION;
+    const existing = await this.findActiveRun({ kind, options, plannerVersion });
     if (existing) {
-      await this.#collapseDuplicatesOf(existing.id, { kind, options });
+      await this.#collapseDuplicatesOf(existing.id, { kind, options, plannerVersion });
       return this.#reuseView(existing, kind);
     }
 
@@ -738,7 +780,7 @@ export class SyncOrchestrationService {
 
     // Resolve a possible concurrent creation. This read happens after our own rows are committed,
     // so a racer that committed before us is visible here.
-    const canonical = (await this.listActiveCompatibleRuns({ kind, options }))[0] ?? null;
+    const canonical = (await this.listActiveCompatibleRuns({ kind, options, plannerVersion }))[0] ?? null;
     if (canonical && canonical.id !== created.id) {
       const collapse = await this.collapseDuplicateRun(created.id, { canonicalRunId: canonical.id });
       if (collapse.collapsed) return { ...this.#reuseView(canonical, kind), collapsedRunId: created.id };
@@ -747,7 +789,7 @@ export class SyncOrchestrationService {
       return { ...created, options: { fastSync: Boolean(options.fastSync), promoteAfter: options.promoteAfter !== false } };
     }
 
-    await this.#collapseDuplicatesOf(created.id, { kind, options });
+    await this.#collapseDuplicatesOf(created.id, { kind, options, plannerVersion });
     return { ...created, options: { fastSync: Boolean(options.fastSync), promoteAfter: options.promoteAfter !== false } };
   }
 
@@ -1168,6 +1210,8 @@ export class SyncOrchestrationService {
     return {
       runId: parent.id,
       kind,
+      // null for a run planned before versioning existed: its units are whole accounts.
+      plannerVersion: parent.payload?.plannerVersion ?? null,
       status,
       trigger: parent.payload?.trigger ?? null,
       startedAt: parent.startedAt ?? parent.createdAt ?? null,

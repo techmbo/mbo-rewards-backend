@@ -257,6 +257,8 @@ describe("certification cache headers — a 429 is not cacheable either", () => 
       // Authenticated admin read describing the estate's connected accounts and sync cadence:
       // it must never sit in a shared cache, and a 401/403 from its guards must not either.
       "/sync/plan-preview",
+      // Its 202 body is the durable run projection, the same state /sync/status returns.
+      "/sync/all",
     ];
     const uses = [...routesSource.matchAll(/^\s*noStoreHeaders,\s*$/gm)];
     assert.equal(uses.length, allowed.length, "one use per approved route");
