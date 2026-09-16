@@ -362,26 +362,40 @@ describe("source guards — one unit, nothing in the background, nothing else ch
   const worker = handlerOf("triggerSyncWorker");
   const platform = handlerOf("triggerSyncPlatform");
 
+  const executeUnit = CONTROLLER_SRC.split("async function executeUnit(")[1].split("\n}\n")[0];
+
   it("the worker awaits one unit and never loops, recurses or detaches work", () => {
     assert.match(worker, /await orchestration\.nextWorkableUnit\(\)/);
     assert.match(worker, /await orchestration\.claimUnit\(/);
-    assert.match(worker, /await accountSyncFor\(req\)\(/);
-    assert.match(worker, /promoteAfter: false,/);
+    assert.match(worker, /await executeUnit\(req, descriptor\)/);
     assert.match(worker, /await orchestration\.completeUnit\(/);
     assert.match(worker, /await orchestration\.failUnit\(/);
     assert.match(worker, /assertUnitExecutable\(unit\)/);
-    // No loop, no recursion, no detached work, and no post-sync execution (the word may appear in
-    // a comment; what must be absent is any CALL that runs those stages).
-    for (const forbidden of ["for (", "while (", "triggerSyncWorker(", "setTimeout", "setInterval", "setImmediate", ".then(", ".catch(", "void ", "Promise.all", "Promise.race"]) {
-      assert.ok(!worker.includes(forbidden), forbidden);
+    // Phase 6a — per-kind execution lives in executeUnit; the network branch still refuses
+    // promotion and the aggregation branch is one bounded day.
+    assert.match(executeUnit, /await accountSyncFor\(req\)\(|return accountSyncFor\(req\)\(/);
+    assert.match(executeUnit, /promoteAfter: false,/);
+    // No loop, no recursion, no detached work, in EITHER half of the worker path.
+    for (const source of [worker, executeUnit]) {
+      for (const forbidden of ["for (", "while (", "triggerSyncWorker(", "setTimeout", "setInterval", "setImmediate", ".then(", ".catch(", "void ", "Promise.all", "Promise.race"]) {
+        assert.ok(!source.includes(forbidden), forbidden);
+      }
     }
-    for (const forbidden of ["runTrackedJob", "PromotionJob", "promotionJob", "aggregationJob", "conversionPromotion", "maybePromoteAfterSync", "syncAll"]) {
+    // The unbounded post-sync entrypoints stay out of the controller entirely. AggregationJob is
+    // reachable, but only through the bounded single-day unit: the whole-catalog stages are not.
+    for (const forbidden of ["runTrackedJob", "PromotionJob", "promotionJob", "conversionPromotion", "maybePromoteAfterSync", "syncAll"]) {
       assert.ok(!worker.includes(forbidden), forbidden);
       assert.ok(!CONTROLLER_SRC.includes(forbidden), `${forbidden} in the controller`);
     }
+    // A CALL, not the word: the module comment explains why rebuild is used instead of
+    // runForDate, and explaining it is the point.
+    assert.ok(!CONTROLLER_SRC.includes("runForDate("), "runForDate called in the controller");
+    assert.ok(!worker.includes("AggregationJob"), "the worker itself never reaches for the job");
     // Every promise in the worker path is awaited.
-    for (const call of worker.match(/(?<!await )(?<![\w.])(orchestration|accountSyncFor\(req\))\.[a-zA-Z]+\(/g) ?? []) {
-      assert.fail(`un-awaited call: ${call}`);
+    for (const source of [worker, executeUnit]) {
+      for (const call of source.match(/(?<!await )(?<!return )(?<![\w.])(orchestration|accountSyncFor\(req\))\.[a-zA-Z]+\(/g) ?? []) {
+        assert.fail(`un-awaited call: ${call}`);
+      }
     }
   });
 

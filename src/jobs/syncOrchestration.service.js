@@ -83,11 +83,18 @@ export const PLANNER_VERSION = 6;
 export const ABANDONED_UNIT_REASON = "worker lease expired before completion";
 
 /**
- * Kinds a worker may execute TODAY. Post-sync stages are planned as non-executable placeholders
- * until their bounded (paged / per-day) implementation exists: the existing global PromotionJob,
- * conversion promotion and 14-day rebuild must never be run as one unit inside an invocation.
+ * Kinds a worker may execute TODAY, widened one bounded stage at a time.
+ *
+ * AGGREGATION is executable because one unit is one DAY: it runs
+ * rebuild({ from: day, to: day }) and nothing else. PROMOTION and CONVERSION_PROMOTION stay out
+ * until their paged implementations exist — the existing global PromotionJob and conversion
+ * promotion walk every entity of every network and must never be one unit inside an invocation.
+ *
+ * A unit planned with `executable: false` stays refused whatever this list says: isUnitExecutable
+ * checks the stored flag first, so widening this can never silently un-block an older run's
+ * placeholders.
  */
-export const EXECUTABLE_UNIT_KINDS = Object.freeze([UNIT_KINDS.NETWORK]);
+export const EXECUTABLE_UNIT_KINDS = Object.freeze([UNIT_KINDS.NETWORK, UNIT_KINDS.AGGREGATION]);
 export const UNIT_BLOCKED_REASON = "bounded_units_not_implemented";
 
 /** Platforms in the established syncAll order; account-labelled ones enumerate connected accounts. */
@@ -434,6 +441,9 @@ function unitIdentity(descriptor = {}) {
     descriptor.windowEnd ?? "",
     descriptor.campaignChunkIndex ?? "",
     descriptor.campaignPageOffset ?? "",
+    // Two aggregation units differ only by the day they rebuild; without it every day would
+    // collapse to one identity and appendUnits would keep just the first.
+    descriptor.day ?? "",
   ].join("|");
 }
 
@@ -1206,6 +1216,8 @@ export class SyncOrchestrationService {
       unitId: unit?.id ?? null,
       sequence: p.sequence ?? unit?.priority ?? null,
       kind: p.kind ?? null,
+      // The calendar day an aggregation unit rebuilds; null for every other kind.
+      day: p.day ?? null,
       platform: p.platform ?? null,
       accountLabel: p.accountLabel ?? null,
       sourceObject: p.sourceObject ?? null,

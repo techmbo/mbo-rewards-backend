@@ -25,6 +25,13 @@ export const DAILY_REPORT_GRAIN =
 
 const CLICK_PAGE_SIZE = 5_000;
 
+/**
+ * How many assignment ids one lookup may carry. Distinct ids per day are bounded by the client ×
+ * campaign catalog, not by traffic, so this is almost always a single query; the chunk exists so a
+ * very large catalog cannot build an IN list past Postgres' parameter limit.
+ */
+const ASSIGNMENT_LOOKUP_CHUNK = 1_000;
+
 function dimensionKey(parts) {
   return parts.map((p) => p ?? "").join("|");
 }
@@ -264,15 +271,45 @@ export class AggregationService {
     return rows;
   }
 
+  /**
+   * Resolve every assignment this day's clicks refer to, in one set-based read per chunk.
+   *
+   * Replaces a findUnique per click. The clicks of one day point at far fewer distinct assignments
+   * than there are clicks — the same campaign is clicked many times — so the work scales with the
+   * catalog, not with traffic. Scoped strictly to the ids this day actually uses: no history is
+   * loaded, and the map lives only for this one day's execution, so nothing is cached across runs.
+   *
+   * Reading through `tx` keeps every click on ONE snapshot. The per-click version re-read at each
+   * click, so under READ COMMITTED a long day could resolve two clicks against different states of
+   * the same assignment; this cannot.
+   */
+  async #loadAssignmentsForClicks(clicks, tx) {
+    const byId = new Map();
+    const distinctIds = [
+      ...new Set(clicks.map((click) => click.clientAssignmentId).filter(Boolean).map(String)),
+    ];
+    if (!distinctIds.length) return byId;
+
+    for (let offset = 0; offset < distinctIds.length; offset += ASSIGNMENT_LOOKUP_CHUNK) {
+      const chunk = distinctIds.slice(offset, offset + ASSIGNMENT_LOOKUP_CHUNK);
+      // eslint-disable-next-line no-await-in-loop
+      const rows = await tx.clientCampaignAssignment.findMany({
+        where: { id: { in: chunk } },
+        include: { canonicalCampaign: true },
+      });
+      for (const row of rows) byId.set(String(row.id), row);
+    }
+    return byId;
+  }
+
   async #accumulateClicks(buckets, { from, to, clientId }, tx) {
     const clicks = await this.#loadAllClicks({ from, to }, tx);
+    const assignmentsById = await this.#loadAssignmentsForClicks(clicks, tx);
 
     for (const click of clicks) {
       if (!click.clientAssignmentId) continue;
-      const assignment = await tx.clientCampaignAssignment.findUnique({
-        where: { id: click.clientAssignmentId },
-        include: { canonicalCampaign: true },
-      });
+      // An id with no row resolves to null, exactly as findUnique returned null for a missing row.
+      const assignment = assignmentsById.get(String(click.clientAssignmentId)) ?? null;
       if (!assignment?.canonicalCampaign?.merchantId) continue;
       if (clientId && assignment.clientId !== clientId) continue;
 

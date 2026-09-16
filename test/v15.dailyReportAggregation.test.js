@@ -17,11 +17,27 @@ import { toAdminPerformanceDto } from "../src/modules/ops/adminContract.dto.js";
 import { AdminContractService } from "../src/modules/ops/adminContract.service.js";
 import { PERMISSIONS } from "../src/auth/permissions.js";
 
-function assignment(clientId = "client-A") {
+function assignment(clientId = "client-A", id = "ca1") {
   return {
+    id,
     clientId,
     canonicalCampaignId: "cc1",
     canonicalCampaign: { merchantId: "m1" },
+  };
+}
+
+/**
+ * Click accumulation resolves the day's assignments in one set-based read, so the fake speaks
+ * findMany. A real Prisma findMany returns the model's id on every row, which is what the lookup
+ * map keys on; findUnique is kept so a regression to per-click lookups still resolves and is
+ * caught by assertions rather than by a TypeError.
+ */
+function assignmentTx(build = assignment) {
+  return {
+    clientCampaignAssignment: {
+      findMany: async ({ where }) => (where?.id?.in ?? []).map((id) => build("client-A", id)),
+      findUnique: async ({ where }) => build("client-A", where?.id ?? "ca1"),
+    },
   };
 }
 
@@ -59,9 +75,7 @@ describe("AggregationService — DailyReport grain", () => {
       dailyReportRepo,
     });
     const tx = {
-      clientCampaignAssignment: {
-        findUnique: mock.fn(async () => assignment()),
-      },
+      ...assignmentTx(),
     };
     const result = await service.aggregateDay(new Date("2026-07-10T00:00:00.000Z"), {}, tx);
     assert.equal(result.rowsUpserted, 1);
@@ -116,7 +130,7 @@ describe("AggregationService — DailyReport grain", () => {
       },
       dailyReportRepo,
     });
-    const tx = { clientCampaignAssignment: { findUnique: async () => assignment() } };
+    const tx = assignmentTx();
     await service.aggregateRange(
       { from: new Date("2026-07-10T00:00:00.000Z"), to: new Date("2026-07-10T23:59:59.999Z") },
       tx,
@@ -148,7 +162,7 @@ describe("AggregationService — DailyReport grain", () => {
       dailyReportRepo,
     });
     await service.aggregateDay(new Date("2026-07-10"), {}, {
-      clientCampaignAssignment: { findUnique: async () => assignment() },
+      ...assignmentTx(),
     });
     const row = dailyReportRepo.upsertDimension.mock.calls[0].arguments[0];
     assert.equal(row.conversionCount, 1);
@@ -186,7 +200,7 @@ describe("AggregationService — DailyReport grain", () => {
       dailyReportRepo,
     });
     await service.aggregateDay(new Date("2026-07-10"), {}, {
-      clientCampaignAssignment: { findUnique: async () => null },
+      clientCampaignAssignment: { findMany: async () => [], findUnique: async () => null },
     });
     assert.equal(dailyReportRepo.upsertDimension.mock.calls.length, 2);
     const clients = dailyReportRepo.upsertDimension.mock.calls.map((c) => c.arguments[0].clientId).sort();
@@ -251,7 +265,7 @@ describe("AggregationService — DailyReport grain", () => {
     };
     const service = new AggregationService(fixtures);
     const tx = {
-      clientCampaignAssignment: { findUnique: async () => assignment() },
+      ...assignmentTx(),
     };
     // rebuild uses prisma when client null — call aggregateDay twice to prove upsert stability
     await service.aggregateDay(new Date("2026-07-10"), {}, tx);
@@ -282,7 +296,7 @@ describe("AggregationService — DailyReport grain", () => {
       dailyReportRepo,
     });
     const result = await service.aggregateDay(new Date("2026-07-10"), {}, {
-      clientCampaignAssignment: { findUnique: async () => null },
+      clientCampaignAssignment: { findMany: async () => [], findUnique: async () => null },
     });
     assert.equal(result.rowsUpserted, 0);
   });

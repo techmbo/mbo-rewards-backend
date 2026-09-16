@@ -5,10 +5,15 @@ import { getSyncStatus, runExclusiveSync } from "../jobs/syncState.js";
 import { getSchedulerStatus, triggerScheduledSync } from "../jobs/syncScheduler.js";
 import {
   SyncOrchestrationService,
+  UNIT_KINDS,
   assertUnitExecutable,
   summarisePlan,
   summariseSyncUnitOutcome,
 } from "../jobs/syncOrchestration.service.js";
+import {
+  executeAggregationUnit,
+  summariseAggregationUnitOutcome,
+} from "../jobs/aggregationUnit.js";
 import { SyncAccountLockService, accountLockKey } from "../jobs/syncAccountLock.service.js";
 
 const SUPPORTED_SYNC_PLATFORMS = new Set([
@@ -52,6 +57,61 @@ function accountLocksFor(req) {
 /** The account sync entrypoint; overridable per app so the worker can be driven in tests. */
 function accountSyncFor(req) {
   return req?.app?.locals?.syncPlatformAccount ?? syncPlatformAccount;
+}
+
+/**
+ * The aggregation rebuild entrypoint; overridable per app so the worker can be driven in tests.
+ *
+ * Phase 6a — a day unit rebuilds exactly its own day. `rebuild` is deliberate and audited:
+ * AggregationService.rebuild deletes the day's DailyReport rows before re-aggregating, while
+ * runForDate only upserts and would leave stale dimensions behind.
+ */
+function aggregationRebuildFor(req) {
+  const override = req?.app?.locals?.aggregationRebuild;
+  if (typeof override === "function") return override;
+  return async (input) => {
+    const { AggregationJob } = await import("../jobs/aggregation.job.js");
+    return new AggregationJob().rebuild(input);
+  };
+}
+
+/**
+ * Run one unit. A network unit syncs one bounded account scope; an aggregation unit rebuilds one
+ * day. Nothing here loops: a worker invocation is one unit.
+ */
+async function executeUnit(req, descriptor) {
+  if (descriptor.kind === UNIT_KINDS.AGGREGATION) {
+    return executeAggregationUnit(descriptor, { runRebuild: aggregationRebuildFor(req) });
+  }
+  return accountSyncFor(req)(descriptor.platform, descriptor.accountLabel || undefined, {
+    // The unit's own recorded options…
+    fastSync: Boolean(descriptor.options?.fastSync),
+    // …except promotion, which a unit NEVER runs: the global post-sync stages do not fit an
+    // invocation and are their own (not yet executable) units.
+    promoteAfter: false,
+    // The unit's bounded scope, forwarded verbatim. A pre-Phase-5 unit carries neither, and
+    // then the account sync behaves exactly as it always did.
+    sourceObject: descriptor.sourceObject || undefined,
+    ...(descriptor.windowStart && descriptor.windowEnd
+      ? { windowStart: descriptor.windowStart, windowEnd: descriptor.windowEnd }
+      : {}),
+    ...(Array.isArray(descriptor.sourceObjectCompanions) && descriptor.sourceObjectCompanions.length
+      ? { sourceObjectCompanions: [...descriptor.sourceObjectCompanions] }
+      : {}),
+    // A commission-group unit's own campaign slice: this chunk's campaigns and no others.
+    ...(Array.isArray(descriptor.campaignIds) && descriptor.campaignIds.length
+      ? { campaignIds: [...descriptor.campaignIds] }
+      : {}),
+    // A bounded catalog slice: the supplier's own offset/limit paging, so a retry re-requests
+    // exactly the pages this unit named and nothing else.
+    ...(descriptor.campaignPageOffset === null || descriptor.campaignPageOffset === undefined
+      ? {}
+      : {
+          campaignPageOffset: descriptor.campaignPageOffset,
+          campaignPageLimit: descriptor.campaignPageLimit,
+          campaignPageBudget: descriptor.campaignPageBudget,
+        }),
+  });
 }
 
 /**
@@ -362,6 +422,7 @@ export async function triggerSyncWorker(req, res, next) {
     // Defence in depth: nextUnit already withholds non-executable kinds.
     assertUnitExecutable(unit);
 
+    const isAggregation = descriptor.kind === UNIT_KINDS.AGGREGATION;
     const workerId = `worker:${process.env.VERCEL_DEPLOYMENT_ID || process.pid}:${Date.now()}`;
     const claim = await orchestration.claimUnit(unit.id, { workerId });
     if (!claim.claimed && claim.reason === "abandoned") {
@@ -396,6 +457,8 @@ export async function triggerSyncWorker(req, res, next) {
       unitId: unit.id,
       sequence: descriptor.sequence ?? null,
       kind: descriptor.kind ?? null,
+      // The calendar day an aggregation unit rebuilds; null for every other kind.
+      day: descriptor.day ?? null,
       platform: descriptor.platform ?? null,
       accountLabel: descriptor.accountLabel ?? null,
       sourceObject: descriptor.sourceObject ?? null,
@@ -426,35 +489,7 @@ export async function triggerSyncWorker(req, res, next) {
 
     let result;
     try {
-      result = await accountSyncFor(req)(descriptor.platform, descriptor.accountLabel || undefined, {
-        // The unit's own recorded options…
-        fastSync: Boolean(descriptor.options?.fastSync),
-        // …except promotion, which a unit NEVER runs: the global post-sync stages do not fit an
-        // invocation and are their own (not yet executable) units.
-        promoteAfter: false,
-        // The unit's bounded scope, forwarded verbatim. A pre-Phase-5 unit carries neither, and
-        // then the account sync behaves exactly as it always did.
-        sourceObject: descriptor.sourceObject || undefined,
-        ...(descriptor.windowStart && descriptor.windowEnd
-          ? { windowStart: descriptor.windowStart, windowEnd: descriptor.windowEnd }
-          : {}),
-        ...(Array.isArray(descriptor.sourceObjectCompanions) && descriptor.sourceObjectCompanions.length
-          ? { sourceObjectCompanions: [...descriptor.sourceObjectCompanions] }
-          : {}),
-        // A commission-group unit's own campaign slice: this chunk's campaigns and no others.
-        ...(Array.isArray(descriptor.campaignIds) && descriptor.campaignIds.length
-          ? { campaignIds: [...descriptor.campaignIds] }
-          : {}),
-        // A bounded catalog slice: the supplier's own offset/limit paging, so a retry re-requests
-        // exactly the pages this unit named and nothing else.
-        ...(descriptor.campaignPageOffset === null || descriptor.campaignPageOffset === undefined
-          ? {}
-          : {
-              campaignPageOffset: descriptor.campaignPageOffset,
-              campaignPageLimit: descriptor.campaignPageLimit,
-              campaignPageBudget: descriptor.campaignPageBudget,
-            }),
-      });
+      result = await executeUnit(req, descriptor);
     } catch (error) {
       const failed = await orchestration.failUnit(unit.id, error);
       const syncStatus = await orchestration.describeRun(run.id);
@@ -477,10 +512,19 @@ export async function triggerSyncWorker(req, res, next) {
     // the chunks exist while this unit is still RUNNING, so the parent cannot terminate between
     // the two. If it throws, the unit is never completed, its lease expires and the whole step is
     // retried — the failure is visible and recoverable rather than a silently short run.
-    const followOn = await orchestration.materialiseFollowOnUnits(run.id, descriptor, result, {
-      completingUnitId: unit.id,
-    });
-    await orchestration.completeUnit(unit.id, summariseSyncUnitOutcome(result, { accountLabel: descriptor.accountLabel }));
+    // An aggregation unit is one day and has no continuation: there is nothing to materialise,
+    // and walking to an adjacent day is exactly what a bounded unit must not do.
+    const followOn = isAggregation
+      ? { appended: 0 }
+      : await orchestration.materialiseFollowOnUnits(run.id, descriptor, result, {
+          completingUnitId: unit.id,
+        });
+    await orchestration.completeUnit(
+      unit.id,
+      isAggregation
+        ? summariseAggregationUnitOutcome(result)
+        : summariseSyncUnitOutcome(result, { accountLabel: descriptor.accountLabel }),
+    );
     const syncStatus = await orchestration.describeRun(run.id);
     return res.status(200).json({
       ok: true,

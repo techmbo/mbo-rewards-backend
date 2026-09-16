@@ -169,11 +169,16 @@ describe("plan — one bounded, ordered unit per network account, then the post-
   });
 
   it("executability is refused on BOTH grounds independently: an unbounded kind, or an explicit flag", () => {
-    // By kind alone — even without the flag, a post-sync stage is not executable in this phase.
-    for (const kind of [UNIT_KINDS.PROMOTION, UNIT_KINDS.CONVERSION_PROMOTION, UNIT_KINDS.AGGREGATION]) {
+    // By kind alone — a post-sync stage with no bounded implementation is not executable.
+    // Phase 6a made AGGREGATION bounded (one unit is one day), so it left this list.
+    for (const kind of [UNIT_KINDS.PROMOTION, UNIT_KINDS.CONVERSION_PROMOTION]) {
       assert.equal(isUnitExecutable({ kind }), false, kind);
       assert.throws(() => assertUnitExecutable({ kind }), (error) => error.code === "unit_not_executable");
     }
+    assert.equal(isUnitExecutable({ kind: UNIT_KINDS.AGGREGATION }), true, "one day is a bounded unit");
+    // …and a day planned as blocked stays blocked whatever the kind list says, so widening the
+    // list can never silently un-block an older run's placeholders.
+    assert.equal(isUnitExecutable({ kind: UNIT_KINDS.AGGREGATION, executable: false }), false);
     // By flag alone — an otherwise executable kind marked non-executable stays refused.
     assert.equal(isUnitExecutable({ kind: UNIT_KINDS.NETWORK }), true);
     assert.equal(isUnitExecutable({ kind: UNIT_KINDS.NETWORK, executable: false }), false);

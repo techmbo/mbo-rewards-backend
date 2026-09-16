@@ -618,8 +618,14 @@ describe("nothing is silently widened", () => {
 
   it("the worker never runs promotion for a bounded unit", () => {
     const worker = CONTROLLER_SRC.split("export async function triggerSyncWorker(")[1].split("\n}\n")[0];
-    assert.match(worker, /promoteAfter: false/);
+    // Phase 6a moved the per-kind execution into executeUnit; the network branch is where the
+    // account sync options are built, so that is where promotion must still be refused.
+    const executeUnit = CONTROLLER_SRC.split("async function executeUnit(")[1].split("\n}\n")[0];
+    assert.match(executeUnit, /promoteAfter: false/);
+    assert.ok(!executeUnit.includes("promoteAfter: true"));
     assert.ok(!worker.includes("promoteAfter: true"));
-    assert.ok(!/setTimeout|setInterval|void \(async/.test(worker), "no background promise, no loop");
+    for (const source of [worker, executeUnit]) {
+      assert.ok(!/setTimeout|setInterval|void \(async/.test(source), "no background promise, no loop");
+    }
   });
 });

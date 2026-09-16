@@ -44,13 +44,18 @@ describe("AggregationService", () => {
       upsertDimension: mock.fn(async (row) => row),
     };
 
+    // Click accumulation resolves the day's assignments in one set-based read. A real Prisma
+    // findMany returns the model's id on every row, which is what the lookup map keys on.
+    const assignmentRow = (id) => ({
+      id,
+      clientId: "client1",
+      canonicalCampaignId: "cc1",
+      canonicalCampaign: { merchantId: "m1" },
+    });
     const tx = {
       clientCampaignAssignment: {
-        findUnique: mock.fn(async () => ({
-          clientId: "client1",
-          canonicalCampaignId: "cc1",
-          canonicalCampaign: { merchantId: "m1" },
-        })),
+        findMany: mock.fn(async ({ where }) => (where?.id?.in ?? []).map(assignmentRow)),
+        findUnique: mock.fn(async ({ where }) => assignmentRow(where.id)),
       },
     };
 
