@@ -14,6 +14,12 @@ import {
   executeAggregationUnit,
   summariseAggregationUnitOutcome,
 } from "../jobs/aggregationUnit.js";
+import {
+  CONVERSION_PROMOTION_PAGE_SIZE,
+  executeConversionPromotionUnit,
+  nextConversionPromotionUnit,
+  summariseConversionPromotionUnitOutcome,
+} from "../jobs/conversionPromotionUnit.js";
 import { SyncAccountLockService, accountLockKey } from "../jobs/syncAccountLock.service.js";
 
 const SUPPORTED_SYNC_PLATFORMS = new Set([
@@ -76,12 +82,49 @@ function aggregationRebuildFor(req) {
 }
 
 /**
+ * The conversion-promotion page entrypoint; overridable per app so the worker can be driven in
+ * tests.
+ *
+ * Phase 6b — a unit promotes exactly ONE page. `runPage` is deliberate and audited: the service's
+ * own `run()` drains every page in a `for (;;)` loop, which is precisely the unbounded stage a
+ * bounded unit exists to replace. Only the single-page entrypoint is reachable from here.
+ */
+function conversionPromotionPageFor(req) {
+  const override = req?.app?.locals?.conversionPromotionPage;
+  if (typeof override === "function") return override;
+  return async (input) => {
+    const { ConversionPromotionService } = await import(
+      "../modules/reporting/services/conversionPromotion.service.js"
+    );
+    return new ConversionPromotionService().runPage(input);
+  };
+}
+
+/**
+ * Append the ONE unit that continues a conversion-promotion walk, or nothing when the walk is
+ * done. At most one unit per completed page: the successor's cursor is the last id this page saw,
+ * which the service filters EXCLUSIVELY (`id > cursor`), so no entity is promoted twice and none
+ * is skipped.
+ *
+ * Appending is idempotent on the run — a replayed completion computes the same unit identity and
+ * is collapsed — so a retried invocation cannot fork the walk into two tails.
+ */
+async function appendConversionPromotionContinuation(orchestration, runId, result) {
+  const next = nextConversionPromotionUnit(result, { kind: UNIT_KINDS.CONVERSION_PROMOTION });
+  if (!next) return { appended: 0 };
+  return await orchestration.appendUnits(runId, [next]);
+}
+
+/**
  * Run one unit. A network unit syncs one bounded account scope; an aggregation unit rebuilds one
  * day. Nothing here loops: a worker invocation is one unit.
  */
 async function executeUnit(req, descriptor) {
   if (descriptor.kind === UNIT_KINDS.AGGREGATION) {
     return executeAggregationUnit(descriptor, { runRebuild: aggregationRebuildFor(req) });
+  }
+  if (descriptor.kind === UNIT_KINDS.CONVERSION_PROMOTION) {
+    return executeConversionPromotionUnit(descriptor, { runPage: conversionPromotionPageFor(req) });
   }
   return accountSyncFor(req)(descriptor.platform, descriptor.accountLabel || undefined, {
     // The unit's own recorded options…
@@ -399,10 +442,10 @@ export async function triggerBoostinyCanarySync(req, res, next) {
  * Advance a durable sync run by EXACTLY ONE bounded unit, then return.
  *
  * One invocation does one unit: find the oldest active run with executable work, claim its next
- * unit (which verifies the shared durable account lock), await exactly one account sync, record
- * the outcome and refresh the parent. No loop, no recursion, no background promise, and no
- * promotion, conversion-promotion or aggregation — those stages are not executable yet and are
- * refused. Call it again to advance the next unit.
+ * unit (which verifies the shared durable account lock), await exactly one bounded piece of work,
+ * record the outcome and refresh the parent. No loop, no recursion, no background promise. A unit
+ * is one account scope, one aggregation day, or one conversion-promotion page; entity PROMOTION
+ * is still not executable and is refused. Call it again to advance the next unit.
  */
 export async function triggerSyncWorker(req, res, next) {
   try {
@@ -423,6 +466,7 @@ export async function triggerSyncWorker(req, res, next) {
     assertUnitExecutable(unit);
 
     const isAggregation = descriptor.kind === UNIT_KINDS.AGGREGATION;
+    const isConversionPromotion = descriptor.kind === UNIT_KINDS.CONVERSION_PROMOTION;
     const workerId = `worker:${process.env.VERCEL_DEPLOYMENT_ID || process.pid}:${Date.now()}`;
     const claim = await orchestration.claimUnit(unit.id, { workerId });
     if (!claim.claimed && claim.reason === "abandoned") {
@@ -475,6 +519,15 @@ export async function triggerSyncWorker(req, res, next) {
               of: descriptor.campaignChunkCount ?? null,
               campaignCount: Array.isArray(descriptor.campaignIds) ? descriptor.campaignIds.length : null,
             },
+      // Which network's walk and whether this page continues one; never the cursor id itself,
+      // which is an entity identifier and stays in the unit payload.
+      conversionPage: isConversionPromotion
+        ? {
+            networkSource: descriptor.networkSource ?? null,
+            pageSize: descriptor.pageSize ?? CONVERSION_PROMOTION_PAGE_SIZE,
+            continued: Boolean(descriptor.cursorId),
+          }
+        : null,
       // Offsets and counts only; never a supplier row.
       campaignPage:
         descriptor.campaignPageOffset === null || descriptor.campaignPageOffset === undefined
@@ -514,16 +567,24 @@ export async function triggerSyncWorker(req, res, next) {
     // retried — the failure is visible and recoverable rather than a silently short run.
     // An aggregation unit is one day and has no continuation: there is nothing to materialise,
     // and walking to an adjacent day is exactly what a bounded unit must not do.
+    //
+    // A conversion-promotion unit continues the SAME walk: if its page was full it appends
+    // exactly one successor, carrying the last id it saw as an exclusive cursor. One unit, never
+    // a second page in this invocation, and never a successor repeating this unit's own cursor.
     const followOn = isAggregation
       ? { appended: 0 }
-      : await orchestration.materialiseFollowOnUnits(run.id, descriptor, result, {
-          completingUnitId: unit.id,
-        });
+      : isConversionPromotion
+        ? await appendConversionPromotionContinuation(orchestration, run.id, result)
+        : await orchestration.materialiseFollowOnUnits(run.id, descriptor, result, {
+            completingUnitId: unit.id,
+          });
     await orchestration.completeUnit(
       unit.id,
       isAggregation
         ? summariseAggregationUnitOutcome(result)
-        : summariseSyncUnitOutcome(result, { accountLabel: descriptor.accountLabel }),
+        : isConversionPromotion
+          ? summariseConversionPromotionUnitOutcome(result)
+          : summariseSyncUnitOutcome(result, { accountLabel: descriptor.accountLabel }),
     );
     const syncStatus = await orchestration.describeRun(run.id);
     return res.status(200).json({

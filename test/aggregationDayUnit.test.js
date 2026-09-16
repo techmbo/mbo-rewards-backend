@@ -528,11 +528,16 @@ describe("the worker executes exactly one aggregation day", () => {
     assert.deepEqual(h.rebuilds, []);
   });
 
-  it("aggregation is executable but promotion and conversion promotion are not", () => {
+  it("aggregation is executable, and entity promotion is still not", () => {
     assert.ok(EXECUTABLE_UNIT_KINDS.includes(UNIT_KINDS.AGGREGATION));
     assert.ok(EXECUTABLE_UNIT_KINDS.includes(UNIT_KINDS.NETWORK));
+    // Phase 6b made CONVERSION_PROMOTION bounded (one unit is one cursor page), so it joined the
+    // list; see conversionPromotionUnit.test.js. Entity PROMOTION has no bounded implementation
+    // and is the one stage a worker still refuses.
+    assert.ok(EXECUTABLE_UNIT_KINDS.includes(UNIT_KINDS.CONVERSION_PROMOTION));
     assert.ok(!EXECUTABLE_UNIT_KINDS.includes(UNIT_KINDS.PROMOTION));
-    assert.ok(!EXECUTABLE_UNIT_KINDS.includes(UNIT_KINDS.CONVERSION_PROMOTION));
+    // Widening the list never widens what an AGGREGATION unit itself may do.
+    assert.equal(EXECUTABLE_UNIT_KINDS.length, 3);
   });
 });
 

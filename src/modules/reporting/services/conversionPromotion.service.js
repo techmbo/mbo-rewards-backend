@@ -493,6 +493,68 @@ export class ConversionPromotionService {
     }
   }
 
+  /**
+   * Promote exactly ONE page and return where it ended.
+   *
+   * The page is the keyset walk this service has always used: Entity(entityType "conversion") of
+   * one networkSource, ordered by id ascending, starting strictly after `cursorId`. The cursor is
+   * EXCLUSIVE (`id > cursor`), so consecutive pages never share a row.
+   *
+   * `hasMore` is the same condition run()'s loop stops on: a full page may have more behind it, a
+   * short page is the end. Phase 6b executes one of these per worker invocation.
+   */
+  async runPage({
+    networkSource,
+    entityIds,
+    batchSize = 100,
+    cursorId,
+  } = {}) {
+    const startedAt = Date.now();
+    const summary = {
+      processed: 0,
+      promoted: 0,
+      skipped: 0,
+      failed: 0,
+      lastCursor: null,
+      hasMore: false,
+      durationMs: 0,
+    };
+
+    const batch = await this.prisma.entity.findMany({
+      where: {
+        entityType: "conversion",
+        ...(networkSource ? { networkSource } : {}),
+        ...(entityIds?.length ? { id: { in: entityIds } } : {}),
+        ...(cursorId ? { id: { gt: cursorId } } : {}),
+      },
+      orderBy: { id: "asc" },
+      take: batchSize,
+    });
+
+    if (!batch.length) {
+      summary.durationMs = Date.now() - startedAt;
+      return summary;
+    }
+
+    for (const entity of batch) {
+      // eslint-disable-next-line no-await-in-loop
+      const outcome = await this.promoteEntity(entity);
+      summary.processed += 1;
+      if (outcome.result === "promoted") summary.promoted += 1;
+      else if (outcome.result === "failed") summary.failed += 1;
+      else summary.skipped += 1;
+    }
+
+    summary.lastCursor = batch[batch.length - 1].id;
+    summary.hasMore = batch.length >= batchSize;
+    summary.durationMs = Date.now() - startedAt;
+    return summary;
+  }
+
+  /**
+   * Drain every page. Unchanged behaviour: it now loops over runPage rather than inlining the
+   * page, so a bounded unit and this whole-walk path cannot drift apart.
+   */
   async run({
     networkSource,
     entityIds,
@@ -510,29 +572,14 @@ export class ConversionPromotionService {
 
     let cursor = cursorId;
     for (;;) {
-      const batch = await this.prisma.entity.findMany({
-        where: {
-          entityType: "conversion",
-          ...(networkSource ? { networkSource } : {}),
-          ...(entityIds?.length ? { id: { in: entityIds } } : {}),
-          ...(cursor ? { id: { gt: cursor } } : {}),
-        },
-        orderBy: { id: "asc" },
-        take: batchSize,
-      });
-
-      if (!batch.length) break;
-
-      for (const entity of batch) {
-        const outcome = await this.promoteEntity(entity);
-        summary.processed += 1;
-        if (outcome.result === "promoted") summary.promoted += 1;
-        else if (outcome.result === "failed") summary.failed += 1;
-        else summary.skipped += 1;
-      }
-
-      cursor = batch[batch.length - 1].id;
-      if (batch.length < batchSize) break;
+      // eslint-disable-next-line no-await-in-loop
+      const page = await this.runPage({ networkSource, entityIds, batchSize, cursorId: cursor });
+      summary.processed += page.processed;
+      summary.promoted += page.promoted;
+      summary.skipped += page.skipped;
+      summary.failed += page.failed;
+      if (!page.hasMore) break;
+      cursor = page.lastCursor;
     }
 
     summary.durationMs = Date.now() - startedAt;

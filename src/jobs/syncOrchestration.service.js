@@ -94,7 +94,11 @@ export const ABANDONED_UNIT_REASON = "worker lease expired before completion";
  * checks the stored flag first, so widening this can never silently un-block an older run's
  * placeholders.
  */
-export const EXECUTABLE_UNIT_KINDS = Object.freeze([UNIT_KINDS.NETWORK, UNIT_KINDS.AGGREGATION]);
+export const EXECUTABLE_UNIT_KINDS = Object.freeze([
+  UNIT_KINDS.NETWORK,
+  UNIT_KINDS.AGGREGATION,
+  UNIT_KINDS.CONVERSION_PROMOTION,
+]);
 export const UNIT_BLOCKED_REASON = "bounded_units_not_implemented";
 
 /** Platforms in the established syncAll order; account-labelled ones enumerate connected accounts. */
@@ -444,6 +448,10 @@ function unitIdentity(descriptor = {}) {
     // Two aggregation units differ only by the day they rebuild; without it every day would
     // collapse to one identity and appendUnits would keep just the first.
     descriptor.day ?? "",
+    // A conversion-promotion page is identified by its network and its exclusive cursor. Without
+    // both, every page of a walk would collapse to one identity and only the first would append.
+    descriptor.networkSource ?? "",
+    descriptor.cursorId ?? "",
   ].join("|");
 }
 
@@ -1218,6 +1226,9 @@ export class SyncOrchestrationService {
       kind: p.kind ?? null,
       // The calendar day an aggregation unit rebuilds; null for every other kind.
       day: p.day ?? null,
+      // The page a conversion-promotion unit promotes. Position only — never an entity payload.
+      networkSource: p.networkSource ?? null,
+      cursorId: p.cursorId ?? null,
       platform: p.platform ?? null,
       accountLabel: p.accountLabel ?? null,
       sourceObject: p.sourceObject ?? null,

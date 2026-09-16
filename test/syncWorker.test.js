@@ -381,16 +381,29 @@ describe("source guards — one unit, nothing in the background, nothing else ch
         assert.ok(!source.includes(forbidden), forbidden);
       }
     }
-    // The unbounded post-sync entrypoints stay out of the controller entirely. AggregationJob is
-    // reachable, but only through the bounded single-day unit: the whole-catalog stages are not.
-    for (const forbidden of ["runTrackedJob", "PromotionJob", "promotionJob", "conversionPromotion", "maybePromoteAfterSync", "syncAll"]) {
+    // The unbounded post-sync entrypoints stay out of the controller entirely. AggregationJob and
+    // ConversionPromotionService are reachable, but ONLY through their bounded entrypoints: the
+    // whole-catalog stages are not.
+    for (const forbidden of ["runTrackedJob", "PromotionJob", "promotionJob", "maybePromoteAfterSync", "syncAll"]) {
       assert.ok(!worker.includes(forbidden), forbidden);
       assert.ok(!CONTROLLER_SRC.includes(forbidden), `${forbidden} in the controller`);
     }
-    // A CALL, not the word: the module comment explains why rebuild is used instead of
-    // runForDate, and explaining it is the point.
+    // A CALL, not the word: the module comments explain why rebuild is used instead of
+    // runForDate and runPage instead of run, and explaining it is the point.
     assert.ok(!CONTROLLER_SRC.includes("runForDate("), "runForDate called in the controller");
+    // Phase 6b — the conversion-promotion service's own run() drains EVERY page in a loop. A
+    // bounded unit may only ever reach the single-page entrypoint.
+    assert.ok(
+      !/ConversionPromotionService\(\)\s*\.\s*run\(/.test(CONTROLLER_SRC),
+      "the unbounded ConversionPromotionService.run() drain is called in the controller",
+    );
+    assert.ok(
+      !/conversionPromotion(Service)?\s*\.\s*run\(/.test(CONTROLLER_SRC),
+      "an unbounded conversion-promotion drain is called in the controller",
+    );
+    assert.match(CONTROLLER_SRC, /new ConversionPromotionService\(\)\.runPage\(input\)/);
     assert.ok(!worker.includes("AggregationJob"), "the worker itself never reaches for the job");
+    assert.ok(!worker.includes("ConversionPromotionService"), "the worker itself never reaches for the service");
     // Every promise in the worker path is awaited.
     for (const source of [worker, executeUnit]) {
       for (const call of source.match(/(?<!await )(?<!return )(?<![\w.])(orchestration|accountSyncFor\(req\))\.[a-zA-Z]+\(/g) ?? []) {
