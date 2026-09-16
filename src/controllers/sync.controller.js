@@ -6,6 +6,7 @@ import { getSchedulerStatus, triggerScheduledSync } from "../jobs/syncScheduler.
 import {
   SyncOrchestrationService,
   assertUnitExecutable,
+  summarisePlan,
   summariseSyncUnitOutcome,
 } from "../jobs/syncOrchestration.service.js";
 import { SyncAccountLockService, accountLockKey } from "../jobs/syncAccountLock.service.js";
@@ -162,6 +163,36 @@ export async function triggerSyncAll(req, res, next) {
       runId: run.id,
       created: run.created,
       syncStatus,
+    });
+  } catch (error) {
+    next(formatSyncError(error));
+  }
+}
+
+/**
+ * Read-only preview of the plan a new `/sync/all` would enqueue, against the CURRENT account
+ * state. Admin-only, and a pure read in the strongest sense: it goes through the orchestration
+ * service's own planner with the same options `/sync/all` would use, and writes nothing — no
+ * JobRun row, no lock, no timestamp — and calls no supplier.
+ *
+ * The response carries aggregate planning metadata only: counts, window boundaries and the
+ * options in force. No unit payload is copied into it, so no campaign identifier, credential or
+ * supplier row can leave through this endpoint.
+ */
+export async function previewSyncPlanHandler(req, res, next) {
+  try {
+    // The same options `/sync/all` resolves from its query string, so the preview describes the
+    // run that request would actually create rather than a differently-configured one.
+    const fastSync = parseBoolQuery(req.query?.fast, false);
+    const options = { fastSync, promoteAfter: true };
+    const kind = "full";
+    const orchestration = orchestrationServiceFor(req);
+    const plan = await orchestration.previewPlan({ kind, options });
+    return res.status(200).json({
+      ok: true,
+      preview: true,
+      message: "Planned units only. Nothing was enqueued, claimed, fetched or written.",
+      plan: summarisePlan(plan, { kind, options }),
     });
   } catch (error) {
     next(formatSyncError(error));

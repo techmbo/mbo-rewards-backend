@@ -17,6 +17,7 @@ import {
 } from "../controllers/mappingRegistry.controller.js";
 import {
   getSyncStatusHandler,
+  previewSyncPlanHandler,
   triggerIncrementalSync,
   triggerSyncAll,
   triggerSyncPlatform,
@@ -356,6 +357,15 @@ router.get(
   authenticate,
   requirePermission(PERMISSIONS.SYSTEM_READ),
   getSyncStatusHandler,
+);
+// Read-only: what a new /sync/all WOULD plan against current account state. Admin-only, creates
+// nothing, and is registered before the /sync/:platform patterns so it is never captured by them.
+router.get(
+  "/sync/plan-preview",
+  authenticate,
+  requireAdminRole,
+  requirePermission(PERMISSIONS.SYSTEM_READ),
+  previewSyncPlanHandler,
 );
 router.post(
   "/sync/all",

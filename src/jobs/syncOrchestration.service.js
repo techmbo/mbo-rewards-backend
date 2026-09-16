@@ -233,6 +233,76 @@ export async function buildSyncPlan({
 export { planSourcesFor };
 
 /**
+ * Safe, aggregate description of a plan: counts and date boundaries only.
+ *
+ * Built by reading the plan's own shape — it never copies a unit payload, so a campaign id, a
+ * credential or a supplier row cannot reach a caller through it. Every number here is derivable
+ * from the plan alone, which is what makes it comparable with what `/sync/all` would enqueue.
+ */
+export function summarisePlan(plan = {}, { kind = "full", options = {} } = {}) {
+  const units = Array.isArray(plan.units) ? plan.units : [];
+  const exclusions = Array.isArray(plan.exclusions) ? plan.exclusions : [];
+  const deferred = Array.isArray(plan.deferred) ? plan.deferred : [];
+
+  const byPlatform = {};
+  const byAccount = {};
+  const bySourceObject = {};
+  const windows = new Map();
+  let windowedUnits = 0;
+  let catalogUnits = 0;
+
+  for (const unit of units) {
+    const platform = unit.platform ?? "(none)";
+    const account = `${platform}/${unit.accountLabel ?? "(none)"}`;
+    const sourceObject = unit.sourceObject ?? "(account-wide)";
+    byPlatform[platform] = (byPlatform[platform] ?? 0) + 1;
+    byAccount[account] = (byAccount[account] ?? 0) + 1;
+    bySourceObject[sourceObject] = (bySourceObject[sourceObject] ?? 0) + 1;
+    if (unit.windowStart && unit.windowEnd) {
+      windowedUnits += 1;
+      const key = `${platform}:${sourceObject}`;
+      const span = windows.get(key) ?? { platform, sourceObject, windows: 0, earliest: unit.windowStart, latest: unit.windowEnd };
+      span.windows += 1;
+      if (unit.windowStart < span.earliest) span.earliest = unit.windowStart;
+      if (unit.windowEnd > span.latest) span.latest = unit.windowEnd;
+      windows.set(key, span);
+    } else {
+      catalogUnits += 1;
+    }
+  }
+
+  return {
+    kind,
+    options: { fastSync: Boolean(options.fastSync), promoteAfter: options.promoteAfter !== false },
+    totalUnits: units.length,
+    // A deferred source materialises its units later, so the initial total is a floor.
+    totalUnitsMayIncrease: deferred.length > 0,
+    windowedUnits,
+    catalogUnits,
+    byPlatform,
+    byAccount,
+    bySourceObject,
+    // Earliest and latest day each windowed source would cover, and how many windows tile it.
+    windowSpans: [...windows.values()].sort((a, b) =>
+      a.platform < b.platform ? -1 : a.platform > b.platform ? 1 : a.sourceObject < b.sourceObject ? -1 : 1,
+    ),
+    deferredSourceCount: deferred.length,
+    deferredSources: deferred.map((entry) => ({
+      platform: entry.platform,
+      accountLabel: entry.accountLabel,
+      sourceObject: entry.sourceObject,
+      after: entry.after,
+    })),
+    exclusions: exclusions.map((entry) => ({
+      platform: entry.platform,
+      accountLabel: entry.accountLabel,
+      sourceObject: entry.sourceObject,
+      reason: entry.reason,
+    })),
+  };
+}
+
+/**
  * Project the run from its units. `postSyncStages` is the PARENT's record of what was requested:
  *   "none"     — promotion was not requested; the run is done when its units are done
  *   "deferred" — promotion WAS requested but its bounded units do not exist yet
@@ -545,6 +615,31 @@ export class SyncOrchestrationService {
     };
     const parent = typeof this.db.$transaction === "function" ? await this.db.$transaction(run) : await run(this.db);
     return { id: parent.id, kind, trigger, totalUnits: planned.length, excludedSources: exclusions, deferredSources, created: true };
+  }
+
+  /**
+   * The plan `/sync/all` WOULD produce right now, without producing it.
+   *
+   * Deliberately calls buildSyncPlan with the same arguments createRun does — same kind, same
+   * options, same account and account-state loaders, one clock for the whole plan — so a preview
+   * cannot drift from what an enqueue would really create. It is a pure read: no JobRun row is
+   * created, updated or deleted, no lock is taken, no timestamp is written.
+   */
+  async previewPlan({ kind = "full", options = {} } = {}) {
+    const resolvedOptions = {
+      fastSync: Boolean(options.fastSync),
+      promoteAfter: options.promoteAfter !== false,
+    };
+    const plan = await buildSyncPlan({
+      kind,
+      fastSync: options.fastSync,
+      promoteAfter: options.promoteAfter !== false,
+      includePostSyncUnits: options.includePostSyncUnits === true,
+      listAccounts: this.listAccounts,
+      loadAccountState: this.loadAccountState,
+      now: this.now(),
+    });
+    return { ...plan, kind, options: resolvedOptions };
   }
 
   /** Every active run doing the same work, earliest first. The first is the canonical one. */
