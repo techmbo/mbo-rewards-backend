@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { prisma } from "../../database/prisma.js";
 import { logger } from "../../platform/logging/logger.js";
 import { buildEventDateFilter } from "../../core/dateRange.js";
@@ -25,7 +26,56 @@ import { rollupRawPayloadOutcomes } from "../networkOps/syncObservability.contra
 import { sourceObjectSync } from "../networkOps/sourceObjectSync.service.js";
 import { resolveConversionEntityExternalId } from "../order/orderConversionIngestion.contract.js";
 
-function resolveExternalId(rawData, fallbackPrefix, index, entityType = null) {
+/** How much of a campaign name the readable part of a reporting id carries. */
+const REPORTING_NAME_LIMIT = 80;
+
+/**
+ * Everything a reporting row was grouped by that the readable part of its id cannot carry.
+ *
+ * A reporting row is one supplier aggregate over the dimensions we asked for — for Optimise that
+ * is campaignId, campaignName, advertiserName and date, plus invoiceDate on the invoice report.
+ * The readable id holds only the report type, a truncated campaign name and ONE date, so three
+ * kinds of distinct facts used to land on the same identity: two campaigns sharing a name, two
+ * names sharing their first 80 characters, and an invoice row whose conversion date matches
+ * another's but whose invoice date does not.
+ *
+ * Returns null when a row carries nothing beyond what the readable part already states, so ids
+ * that were never ambiguous keep exactly the value they had.
+ */
+function reportingDiscriminator(rawData) {
+  const parts = {};
+  const campaignName = String(rawData.campaignName ?? "");
+
+  const campaignId = rawData.campaignId ?? rawData.campaign_id ?? null;
+  if (campaignId != null && String(campaignId).trim() !== "") {
+    parts.campaignId = String(campaignId).trim();
+  }
+  const advertiserName = rawData.advertiserName ?? null;
+  if (advertiserName != null && String(advertiserName).trim() !== "") {
+    parts.advertiserName = String(advertiserName).trim();
+  }
+  // Only an extra dimension when the readable date key took `date`; an invoice-only row already
+  // states its invoice date there.
+  if (rawData.date && rawData.invoiceDate) {
+    parts.invoiceDate = String(rawData.invoiceDate);
+  }
+  if (campaignName.length > REPORTING_NAME_LIMIT) {
+    parts.campaignName = campaignName;
+  }
+
+  const keys = Object.keys(parts).sort();
+  if (!keys.length) return null;
+  return createHash("sha1")
+    .update(JSON.stringify(keys.map((key) => [key, parts[key]])))
+    .digest("hex")
+    .slice(0, 12);
+}
+
+/**
+ * Build the staging identity for one supplier row. Exported so identity rules can be tested
+ * directly: a weak rule here collapses distinct supplier facts into one Entity.
+ */
+export function resolveExternalId(rawData, fallbackPrefix, index, entityType = null) {
   if (entityType === "conversion") {
     return resolveConversionEntityExternalId(rawData ?? {}, fallbackPrefix);
   }
@@ -78,7 +128,9 @@ function resolveExternalId(rawData, fallbackPrefix, index, entityType = null) {
 
   if (rawData?.report_type && rawData?.campaignName && (rawData?.date || rawData?.invoiceDate)) {
     const dateKey = rawData.date || rawData.invoiceDate;
-    return `${fallbackPrefix}-${rawData.report_type}-${String(rawData.campaignName).slice(0, 80)}-${dateKey}`;
+    const base = `${fallbackPrefix}-${rawData.report_type}-${String(rawData.campaignName).slice(0, REPORTING_NAME_LIMIT)}-${dateKey}`;
+    const discriminator = reportingDiscriminator(rawData);
+    return discriminator ? `${base}-${discriminator}` : base;
   }
 
   if (rawData?.campaignName && rawData?.date) {
