@@ -14,6 +14,7 @@ import { batchUpsertEntities } from "./batchEntityUpsert.js";
 import { normalizeEntity } from "./normalizers.js";
 import {
   persistRawPayload,
+  linkRawPayloadsToEntities,
   persistRawPayloadsForPreparedRecords,
 } from "./rawPayload.service.js";
 import { cloneRawJson } from "../networkOps/rawPayload.contract.js";
@@ -482,6 +483,8 @@ export async function upsertManyRawEntities({
   const dbWriteMs = Date.now() - dbWriteStart;
 
   // Link latest raw rows to staged Entity ids (best-effort, non-blocking).
+  // The raw rows were just written above, so their ids come from this batch's own outcomes: no
+  // second lookup per row, and no second schema observation of payloads already observed.
   try {
     const entities = await prisma.entity.findMany({
       where: {
@@ -492,20 +495,20 @@ export async function upsertManyRawEntities({
       select: { id: true, externalId: true },
     });
     const idByExternal = new Map(entities.map((e) => [e.externalId, e.id]));
-    for (const prepared of preparedRecords) {
+    const links = [];
+    for (let i = 0; i < preparedRecords.length; i += 1) {
+      const prepared = preparedRecords[i];
       const entityId = idByExternal.get(prepared.externalId);
-      if (!entityId) continue;
-      await persistRawPayload({
-        networkSource: prepared.networkSource,
-        entityType: prepared.entityType,
-        externalId: prepared.externalId,
-        payload: prepared.originalPayload,
+      const rawRecord = rawOutcomes[i]?.record;
+      if (!entityId || !rawRecord?.id) continue;
+      links.push({
+        id: rawRecord.id,
         entityId,
-        processingStatus: "STAGED",
-        metadata: { sourceAccountKey: sourceAccountKey ?? null },
-        ...(evidence || {}),
+        currentEntityId: rawRecord.entityId ?? null,
+        processingStatus: rawRecord.processingStatus ?? "RECEIVED",
       });
     }
+    await linkRawPayloadsToEntities(links);
   } catch {
     // Entity linkage is enrichment only.
   }

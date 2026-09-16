@@ -3,7 +3,12 @@ import { prisma } from "../../database/prisma.js";
 import { parseNetworkSource, parseSourceAccountLabel } from "../supplier/entityIdentity.js";
 import { cloneRawJson, RAW_BODY_KIND } from "../networkOps/rawPayload.contract.js";
 import { getSourceEvidence } from "../networkOps/sourceEvidence.context.js";
-import { observeSourceSchemaFromPersist } from "../../field-system/sourceSchemaObserver.service.js";
+import {
+  observeSourceSchema,
+  observeSourceSchemaFromPersist,
+  resolvePayloadForObservation,
+} from "../../field-system/sourceSchemaObserver.service.js";
+import { runWithConcurrency } from "../../core/concurrency.js";
 
 /**
  * Deterministic canonical JSON serialization for hashing.
@@ -159,6 +164,13 @@ export async function persistRawPayload(
     bodyKind = null,
     bodyRef = null,
     payloadText = null,
+    /**
+     * Observing the source schema costs one stats upsert plus one fieldRegistry upsert per
+     * distinct field path, and the observer aggregates across payloads by design. A batch caller
+     * therefore turns this off and observes the whole batch once, using the `observation` the
+     * outcome carries back.
+     */
+    observeSchema = true,
   },
   client = null,
 ) {
@@ -190,21 +202,26 @@ export async function persistRawPayload(
   const version = mapperVersion ?? resolveMapperVersion(networkSource, entityType, metadata);
   const networkValue = evidence.network || (networkSource ? String(networkSource) : null);
 
+  function observationFor(outcome) {
+    return {
+      network: networkValue,
+      networkSource,
+      sourceObject: evidence.sourceObject || resourceKey,
+      entityType,
+      resourceKey,
+      body,
+      apiVersion: evidence.apiVersion,
+      incrementOccurrence: Boolean(outcome?.created),
+    };
+  }
+
   async function finalizeOutcome(outcome) {
+    const observation = observationFor(outcome);
+    // A batch caller observes the whole batch in one aggregated call instead; hand it everything
+    // it needs rather than letting it re-derive the body, resource key or evidence.
+    if (!observeSchema) return { ...outcome, observation };
     try {
-      await observeSourceSchemaFromPersist(
-        {
-          network: networkValue,
-          networkSource,
-          sourceObject: evidence.sourceObject || resourceKey,
-          entityType,
-          resourceKey,
-          body,
-          apiVersion: evidence.apiVersion,
-          incrementOccurrence: Boolean(outcome?.created),
-        },
-        db,
-      );
+      await observeSourceSchemaFromPersist(observation, db);
     } catch {
       // Source schema registry must not block immutable raw lineage.
     }
@@ -326,22 +343,77 @@ export async function findLatestRawPayloadForEntity(entityId, client = null) {
  * Persist immutable raw payloads. Call this before Entity staging / mapping.
  * Per-row failures are isolated unless required is true.
  */
+/**
+ * Observe a whole batch's source schema in one pass.
+ *
+ * The observer already aggregates across payloads: it sums per-path occurrence counts and takes
+ * totalPayloadsObserved from the list length, so one call over N payloads writes exactly what N
+ * single-payload calls wrote — the same paths, the same counts, the same fingerprint from the
+ * last payload — in 1 + (distinct field paths) queries instead of N * (1 + paths).
+ *
+ * Created and duplicate payloads are observed separately because only a created payload
+ * increments occurrence counts, which is how the per-row path behaved.
+ */
+async function observeBatchSchema(outcomes, db) {
+  const groups = new Map();
+  for (const outcome of outcomes) {
+    const observation = outcome?.observation;
+    const payload = observation ? resolvePayloadForObservation(observation.body) : null;
+    if (!payload) continue;
+    const key = [
+      observation.network,
+      observation.sourceObject,
+      observation.entityType,
+      observation.resourceKey,
+      observation.apiVersion,
+      observation.incrementOccurrence ? "1" : "0",
+    ].join("\u0000");
+    if (!groups.has(key)) groups.set(key, { observation, payloads: [] });
+    groups.get(key).payloads.push(payload);
+  }
+
+  for (const { observation, payloads } of groups.values()) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await observeSourceSchema(
+        {
+          network: observation.network || observation.networkSource,
+          sourceObject: observation.sourceObject,
+          entityType: observation.entityType,
+          resourceKey: observation.resourceKey,
+          payloads,
+          apiVersion: observation.apiVersion,
+          incrementOccurrence: observation.incrementOccurrence,
+        },
+        db,
+      );
+    } catch {
+      // Source schema registry must not block immutable raw lineage.
+    }
+  }
+}
+
 export async function persistRawPayloadsForPreparedRecords(
   preparedRecords,
-  { metadata = null, required = false, evidence = null } = {},
+  { metadata = null, required = false, evidence = null, observeSchema = true, db = null } = {},
 ) {
+  const client = db ?? prisma;
   const results = [];
   for (const record of preparedRecords) {
     try {
-      const outcome = await persistRawPayload({
-        networkSource: record.networkSource,
-        entityType: record.entityType,
-        externalId: record.externalId,
-        payload: record.rawData,
-        metadata,
-        processingStatus: "RECEIVED",
-        ...(evidence || {}),
-      });
+      const outcome = await persistRawPayload(
+        {
+          networkSource: record.networkSource,
+          entityType: record.entityType,
+          externalId: record.externalId,
+          payload: record.rawData,
+          metadata,
+          processingStatus: "RECEIVED",
+          observeSchema: false,
+          ...(evidence || {}),
+        },
+        client,
+      );
       if (required && !outcome?.record?.id) {
         const err = new Error("Immutable raw payload was not stored");
         err.code = "RAW_PAYLOAD_REQUIRED";
@@ -354,5 +426,35 @@ export async function persistRawPayloadsForPreparedRecords(
       results.push({ record: null, created: false, failed: true, error });
     }
   }
+  if (observeSchema) await observeBatchSchema(results, client);
   return results;
+}
+
+/**
+ * Attach staged Entity ids to raw payloads already written by this batch.
+ *
+ * Same rule the per-row path applied: only fill an EMPTY entityId, and only lift RECEIVED to
+ * STAGED. A payload that already points at an entity is left exactly as it is, so re-staging can
+ * never repoint immutable lineage. The ids come from the batch's own outcomes, so no lookup is
+ * repeated, and the updates are independent rows, safe to run with bounded concurrency.
+ */
+export async function linkRawPayloadsToEntities(links, { concurrency = 8, db = prisma } = {}) {
+  const pending = links.filter((link) => link?.id && link?.entityId && !link?.currentEntityId);
+  if (!pending.length) return 0;
+  let updated = 0;
+  await runWithConcurrency(pending, concurrency, async (link) => {
+    try {
+      await db.rawPayload.update({
+        where: { id: link.id },
+        data: {
+          entityId: link.entityId,
+          processingStatus: link.processingStatus === "RECEIVED" ? "STAGED" : link.processingStatus,
+        },
+      });
+      updated += 1;
+    } catch {
+      // Entity linkage is enrichment only.
+    }
+  });
+  return updated;
 }

@@ -20,7 +20,10 @@ function aggregateObservations(payloads) {
       const prev = byPath.get(field.fieldPath);
       if (prev) {
         prev.occurrenceDelta += 1;
-        if (!prev.sampleValue && field.sampleValue) prev.sampleValue = field.sampleValue;
+        // Last non-empty sample wins, matching what a sequence of single-payload observations
+        // leaves behind: each upsert overwrites sampleValue, so the final payload's example is
+        // the one that survives. Aggregating a batch must land on the same value.
+        if (field.sampleValue) prev.sampleValue = field.sampleValue;
       } else {
         byPath.set(field.fieldPath, { ...field, occurrenceDelta: 1 });
       }

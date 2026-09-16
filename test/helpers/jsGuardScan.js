@@ -69,12 +69,33 @@ function scan(source, { keepStrings = false } = {}) {
   return out.join("");
 }
 
-/** Extract a top-level `async function <name>(...)` declaration, braces included. */
+/**
+ * Extract a top-level `async function <name>(...)` declaration, braces included.
+ *
+ * The parameter list is skipped by balancing parentheses first: a destructured parameter opens a
+ * brace of its own, and taking that as the body would silently return the signature instead.
+ */
 export function functionBody(source, name) {
   const start = source.indexOf(`async function ${name}(`);
   if (start < 0) throw new Error(`function ${name} not found`);
   const structure = scan(source);
-  const open = structure.indexOf("{", start);
+
+  const paramsOpen = structure.indexOf("(", start);
+  let parens = 0;
+  let paramsClose = -1;
+  for (let i = paramsOpen; i < structure.length; i += 1) {
+    if (structure[i] === "(") parens += 1;
+    else if (structure[i] === ")") {
+      parens -= 1;
+      if (parens === 0) {
+        paramsClose = i;
+        break;
+      }
+    }
+  }
+  if (paramsClose < 0) throw new Error(`function ${name} has an unbalanced parameter list`);
+
+  const open = structure.indexOf("{", paramsClose);
   let depth = 0;
   for (let i = open; i < structure.length; i += 1) {
     if (structure[i] === "{") depth += 1;

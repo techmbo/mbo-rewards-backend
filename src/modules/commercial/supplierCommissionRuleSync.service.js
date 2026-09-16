@@ -10,6 +10,33 @@ import { parseNetworkSource, parseSourceAccountLabel } from "../supplier/entityI
 import { enrichSupplierCommissionRuleRecord } from "./supplierCommissionRule.contract.js";
 import { collectEmbeddedCommissionRulesFromCampaigns } from "./supplierCommissionRuleFanOut.js";
 import { SupplierCommissionRuleService } from "./services/supplierCommissionRule.service.js";
+import { runWithConcurrency } from "../../core/concurrency.js";
+
+/**
+ * How many commission-rule outcomes may be persisted at once.
+ *
+ * upsertNormalizedFact opens an interactive transaction whose reads and writes are filtered to a
+ * single (supplier, sourceAccountLabel, outcomeKey). Two outcomes therefore never touch the same
+ * rows, so persisting different outcomes concurrently cannot change any of them. Rules that share
+ * an outcomeKey ARE each other's version history and stay strictly ordered.
+ *
+ * The bound is deliberately small: every in-flight transaction holds a pooled connection.
+ */
+export const SUPPLIER_COMMISSION_RULE_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.SUPPLIER_COMMISSION_RULE_CONCURRENCY || 8),
+);
+
+/** Group rules by outcomeKey, preserving the order rules were fanned out in. */
+export function groupRulesByOutcomeKey(rules) {
+  const groups = new Map();
+  for (const rule of rules) {
+    const key = String(rule?.outcomeKey ?? "");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(rule);
+  }
+  return [...groups.values()];
+}
 
 function resolveCampaignId(raw = {}) {
   return raw.sourceCampaignId ?? raw.id ?? raw.campaignId ?? raw.campaign_id ?? raw.CampaignId ?? raw.campaignID ?? raw.productId ?? raw.product_id ?? null;
@@ -104,7 +131,7 @@ export async function upsertCommissionRulesForPreparedCampaigns(
   const ruleService = deps.ruleService ?? new SupplierCommissionRuleService({ prisma: db });
   let upserted = 0;
 
-  for (const rule of embedded) {
+  const persistRule = async (rule) => {
     const campaignId = resolveCampaignId(rule);
     const campaignKey = campaignId != null ? String(campaignId) : null;
     const sc = campaignKey ? campaignBySupplierId.get(campaignKey) : null;
@@ -194,7 +221,19 @@ export async function upsertCommissionRulesForPreparedCampaigns(
     });
 
     upserted += 1;
-  }
+  };
+
+  // Independent outcomes run side by side; one outcome's versions stay in order.
+  await runWithConcurrency(
+    groupRulesByOutcomeKey(embedded),
+    deps.concurrency ?? SUPPLIER_COMMISSION_RULE_CONCURRENCY,
+    async (group) => {
+      for (const rule of group) {
+        // eslint-disable-next-line no-await-in-loop
+        await persistRule(rule);
+      }
+    },
+  );
 
   return { upserted, skippedDetailedCampaigns };
 }
