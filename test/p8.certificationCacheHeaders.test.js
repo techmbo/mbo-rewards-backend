@@ -259,6 +259,11 @@ describe("certification cache headers — a 429 is not cacheable either", () => 
       "/sync/plan-preview",
       // Its 202 body is the durable run projection, the same state /sync/status returns.
       "/sync/all",
+      // TEMPORARY — Phase 6a-ter. An authenticated admin read of per-day aggregation volumes for
+      // the post-sync rebuild window; like the plan preview it describes the estate and must not
+      // sit in a shared cache, and neither must a 401/403 from its guards. Remove this entry with
+      // the route, controller, service and its test once the measurement has been taken.
+      "/sync/aggregation-measurement",
     ];
     const uses = [...routesSource.matchAll(/^\s*noStoreHeaders,\s*$/gm)];
     assert.equal(uses.length, allowed.length, "one use per approved route");
