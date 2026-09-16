@@ -91,3 +91,57 @@ test("the duplicate sweep and the catalog stamp share one decision", () => {
     "the account-wide sweep must not fire on a partial slice",
   );
 });
+
+// ---------------------------------------------------------------------------
+// Two latent defects this patch removed. Both lived in a local of an
+// un-exported function, so they are pinned where they were written.
+// ---------------------------------------------------------------------------
+
+test("syncOptimiseRegion never touches an undeclared `result`", () => {
+  // The function declares no `result`, so any bare `result` token in it is a free variable and
+  // throws a ReferenceError under ESM strict mode. It did, on every Optimise sync, right after
+  // coupon enrichment and before payments persistence, the timestamp write and the return.
+  assert.equal(
+    /(^|[^.\w$])result\s*(\.|=[^=]|\[)/.test(body),
+    false,
+    "syncOptimiseRegion must not read or assign a free `result`",
+  );
+  // The regex must be able to see the defect it guards against.
+  assert.equal(/(^|[^.\w$])result\s*(\.|=[^=]|\[)/.test("  result.x = 1;"), true);
+  // ...without tripping over the locals whose names merely end in "Result".
+  assert.equal(/(^|[^.\w$])result\s*(\.|=[^=]|\[)/.test("  campaignsResult.rows;"), false);
+});
+
+function objectLiteral(text, declaration) {
+  const start = text.indexOf(declaration);
+  assert.notEqual(start, -1, `${declaration} not found`);
+  const open = text.indexOf("{", start);
+  let depth = 0;
+  for (let i = open; i < text.length; i += 1) {
+    if (text[i] === "{") depth += 1;
+    else if (text[i] === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(open, i + 1);
+    }
+  }
+  throw new Error(`${declaration} is unbalanced`);
+}
+
+test("savedCounts holds only row counts, so totalSaved stays a number", () => {
+  // campaignPage is an object. While it lived in savedCounts, the totalSaved reduce produced a
+  // string for every bounded slice, and the "every resource failed" guard could never fire.
+  const literal = objectLiteral(body, "const savedCounts = {");
+  assert.equal(
+    literal.includes("campaignPage"),
+    false,
+    "campaignPage must not be summed with the row counts",
+  );
+  assert.ok(
+    body.includes("const totalSaved = Object.values(savedCounts).reduce("),
+    "totalSaved must still sum savedCounts",
+  );
+  assert.ok(
+    body.includes("campaignPage: campaignPagination"),
+    "the slice pagination must still reach the orchestrator on the result",
+  );
+});

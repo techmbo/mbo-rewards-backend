@@ -253,3 +253,50 @@ test("a bounded unit never advances the incremental watermark", () => {
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// The account-wide duplicate sweep. It reads every staged campaign of the
+// network, so a bounded walk must pay for it once, not once per slice.
+// ---------------------------------------------------------------------------
+
+/** One bounded walk of `slices` pages-worth of catalog, as the worker would execute it. */
+function walkSlices(slices, { failOnSlice = null } = {}) {
+  const sweeps = [];
+  for (let index = 0; index < slices; index += 1) {
+    const last = index === slices - 1;
+    const failed = failOnSlice === index;
+    const sweep = optimiseCampaignCatalogWalked({
+      persistCampaigns: true,
+      campaignsFailed: failed,
+      campaignPage: { offset: index * 800, limit: 100, maxPages: 8 },
+      campaignPagination: failed
+        ? null
+        : { offset: index * 800, nextOffset: last ? null : (index + 1) * 800, hasMore: !last },
+    });
+    if (sweep) sweeps.push(index);
+  }
+  return sweeps;
+}
+
+test("the duplicate sweep never runs on an intermediate campaign slice", () => {
+  assert.deepEqual(walkSlices(5).slice(0, -1), [], "no intermediate slice may sweep");
+});
+
+test("the duplicate sweep runs exactly once per bounded walk, on the final slice", () => {
+  for (const slices of [1, 2, 5, 16]) {
+    assert.deepEqual(
+      walkSlices(slices),
+      [slices - 1],
+      `a ${slices}-slice walk must sweep once, on the last slice`,
+    );
+  }
+});
+
+test("the duplicate sweep does not run when the final campaign fetch failed", () => {
+  assert.deepEqual(walkSlices(5, { failOnSlice: 4 }), [], "a failed final slice must not sweep");
+  assert.deepEqual(
+    walkSlices(1, { failOnSlice: 0 }),
+    [],
+    "a single-slice walk that failed must not sweep",
+  );
+});
