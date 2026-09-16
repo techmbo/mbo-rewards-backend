@@ -10,11 +10,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { triggerSyncAll } from "../src/controllers/sync.controller.js";
+import { getSyncStatusHandler, triggerSyncAll, triggerSyncWorker } from "../src/controllers/sync.controller.js";
 import {
   ORCHESTRATION_JOB_NAME,
   UNIT_JOB_NAME,
   UNIT_KINDS,
+  DEFAULT_LEASE_MS,
   PLANNER_VERSION,
   SyncOrchestrationService,
   buildSyncPlan,
@@ -72,6 +73,16 @@ function createStore() {
       return 0;
     });
   };
+  /** Prisma's atomic `{ increment }` is how a claim counts an attempt; a plain assign would store the operator. */
+  const apply = (row, data) => {
+    for (const [key, value] of Object.entries(data)) {
+      if (value && typeof value === "object" && !(value instanceof Date) && "increment" in value) {
+        row[key] = (row[key] ?? 0) + value.increment;
+      } else {
+        row[key] = value;
+      }
+    }
+  };
   const jobRun = {
     async create({ data }) {
       seq += 1;
@@ -79,8 +90,8 @@ function createStore() {
       rows.push(row); return clone(row);
     },
     async createMany({ data }) { for (const row of data) await jobRun.create({ data: row }); return { count: data.length }; },
-    async update({ where, data }) { const row = rows.find((r) => r.id === where.id); Object.assign(row, data); return clone(row); },
-    async updateMany({ where, data }) { let count = 0; for (const row of rows) if (match(row, where)) { Object.assign(row, data); count += 1; } return { count }; },
+    async update({ where, data }) { const row = rows.find((r) => r.id === where.id); apply(row, data); return clone(row); },
+    async updateMany({ where, data }) { let count = 0; for (const row of rows) if (match(row, where)) { apply(row, data); count += 1; } return { count }; },
     async deleteMany({ where }) { let count = 0; for (let i = rows.length - 1; i >= 0; i -= 1) if (match(rows[i], where)) { rows.splice(i, 1); count += 1; } return { count }; },
     async findUnique({ where }) { const row = rows.find((r) => r.id === where.id); return row ? clone(row) : null; },
     async findFirst({ where, orderBy }) { const list = sort(rows.filter((r) => match(r, where)), orderBy); return list.length ? clone(list[0]) : null; },
@@ -92,14 +103,33 @@ function createStore() {
 function harness() {
   const { rows, prisma } = createStore();
   const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState });
-  const enqueue = async (query = {}) => {
-    const res = { statusCode: null, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
-    await triggerSyncAll({ query, app: { locals: { syncOrchestration: orchestration } } }, res, (error) => { throw error; });
+  const supplierCalls = [];
+  const locals = {
+    syncOrchestration: orchestration,
+    syncPlatformAccount: async (platform, accountLabel, options) => {
+      supplierCalls.push({ platform, accountLabel, options });
+      return { [accountLabel ?? "default"]: { campaigns: 1 } };
+    },
+  };
+  const call = async (handler, query = {}) => {
+    const headers = {};
+    const res = {
+      statusCode: null, body: null, headers,
+      set(name, value) { headers[String(name).toLowerCase()] = value; return this; },
+      status(c) { this.statusCode = c; return this; },
+      // Express answers 200 when a handler calls res.json() without res.status(); the status
+      // handler's success path does exactly that.
+      json(b) { this.body = b; if (this.statusCode === null) this.statusCode = 200; return this; },
+    };
+    await handler({ query, app: { locals } }, res, (error) => { throw error; });
     return res;
   };
+  const enqueue = (query = {}) => call(triggerSyncAll, query);
+  const worker = () => call(triggerSyncWorker);
+  const status = (query = {}) => call(getSyncStatusHandler, query);
   const parents = () => rows.filter((r) => r.jobName === ORCHESTRATION_JOB_NAME);
   const unitsOf = (runId) => rows.filter((r) => r.jobName === UNIT_JOB_NAME && r.correlationId === runId);
-  return { rows, prisma, orchestration, enqueue, parents, unitsOf };
+  return { rows, prisma, orchestration, supplierCalls, enqueue, worker, status, parents, unitsOf };
 }
 
 /**
@@ -295,6 +325,144 @@ describe("source guards", () => {
     // The version lives in the existing JobRun.payload JSON; no column, no migration.
     for (const forbidden of ["prisma.$executeRaw", "ALTER TABLE", "CREATE TABLE", "migrate"]) {
       assert.ok(!SERVICE_SRC.includes(forbidden), forbidden);
+    }
+  });
+});
+
+describe("a worker never executes another planner's run", () => {
+  it("with an older legacy run AND a current Phase 5 run active, it works the Phase 5 run", async () => {
+    const h = harness();
+    const legacyId = seedLegacyRun(h);
+    const before = snapshot(h, legacyId);
+    const enqueued = await h.enqueue();
+
+    // The legacy run is OLDER and its sequence-2 unit is a stale RUNNING claim, so the previous
+    // oldest-active-run selection would have handed exactly that unit to the worker.
+    const legacyStale = h.unitsOf(legacyId).find((u) => u.status === "RUNNING");
+    assert.ok(legacyStale, "the legacy run really does have a claimable unit");
+    assert.ok(
+      new Date(h.rows.find((r) => r.id === legacyId).createdAt) <
+        new Date(h.rows.find((r) => r.id === enqueued.body.runId).createdAt),
+      "and it really is the older run",
+    );
+
+    const res = await h.worker();
+    assert.equal(res.body.worked, true);
+    assert.equal(res.body.runId, enqueued.body.runId, "the current-planner run, not the older one");
+    assert.equal(res.body.unit.sourceObject, "campaigns", "a bounded unit, not an account-wide one");
+    assert.equal(h.supplierCalls.length, 1);
+    assert.ok(h.supplierCalls[0].options.sourceObject, "the executed unit was a bounded one");
+
+    // And the legacy run is untouched by having been passed over.
+    assert.equal(snapshot(h, legacyId), before);
+  });
+
+  it("a legacy run alone yields idle, and no supplier work runs", async () => {
+    const h = harness();
+    const legacyId = seedLegacyRun(h);
+    const before = snapshot(h, legacyId);
+
+    assert.equal(await h.orchestration.nextWorkableUnit(), null, "no current-planner work exists");
+    const res = await h.worker();
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.worked, false);
+    assert.equal(res.body.status, "idle");
+    assert.deepEqual(h.supplierCalls, [], "an account-wide legacy unit is never executed");
+
+    // Asking for work repeatedly still changes nothing about it — retirement stays deliberate.
+    await h.worker();
+    await h.worker();
+    assert.equal(snapshot(h, legacyId), before);
+    assert.equal(h.rows.find((r) => r.id === legacyId).status, "RUNNING");
+    assert.ok(h.unitsOf(legacyId).every((u) => u.status !== "CANCELLED" && u.status !== "DEAD_LETTER"));
+  });
+
+  it("status still reads the legacy run explicitly by id", async () => {
+    const h = harness();
+    const legacyId = seedLegacyRun(h);
+    await h.enqueue();
+
+    const res = await h.status({ runId: legacyId });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers["cache-control"], "no-store");
+    assert.equal(res.body.run.runId, legacyId);
+    assert.equal(res.body.run.totalUnits, 9, "old history is readable, not hidden or rewritten");
+    assert.equal(res.body.run.plannerVersion, null);
+    assert.equal(res.body.units.length, 9);
+    assert.ok(res.body.units.every((u) => u.sourceObject === null && u.window === null));
+    assert.equal(snapshot(h, legacyId), snapshot(h, legacyId), "reading is not writing");
+  });
+});
+
+describe("worker semantics among current-version runs are unchanged", () => {
+  it("a stale claim still follows the existing reclaim and dead-letter rules", async () => {
+    const h = harness();
+    seedLegacyRun(h);
+    const run = await h.orchestration.createRun({
+      kind: "full", trigger: "api", options: { promoteAfter: false },
+      units: [{ kind: UNIT_KINDS.NETWORK, platform: "boostiny", accountLabel: "default", sourceObject: "campaigns", options: {} }],
+    });
+    const unit = await h.orchestration.nextUnit(run.id);
+    await h.orchestration.claimUnit(unit.id, { workerId: "killed" });
+    const row = h.rows.find((r) => r.id === unit.id);
+
+    // Attempt 1 lease expires → reclaimed as attempt 2, then 3, then DEAD_LETTER at maxAttempts.
+    const expire = () => { row.startedAt = new Date(NOW.getTime() - (DEFAULT_LEASE_MS + 60_000)); };
+    expire();
+    assert.equal((await h.orchestration.claimUnit(unit.id, { workerId: "b" })).reclaimed, true);
+    assert.equal(h.rows.find((r) => r.id === unit.id).attempt, 2);
+    expire();
+    assert.equal((await h.orchestration.claimUnit(unit.id, { workerId: "c" })).claimed, true);
+    assert.equal(h.rows.find((r) => r.id === unit.id).attempt, 3);
+    expire();
+    const refused = await h.orchestration.claimUnit(unit.id, { workerId: "d" });
+    assert.equal(refused.claimed, false);
+    assert.equal(refused.reason, "abandoned");
+    assert.equal(h.rows.find((r) => r.id === unit.id).status, "DEAD_LETTER");
+    assert.deepEqual(h.supplierCalls, [], "no supplier work for an abandoned unit");
+  });
+
+  it("several current-version runs are worked oldest first, deterministically", async () => {
+    const h = harness();
+    seedLegacyRun(h);
+    const units = (platform) => [{ kind: UNIT_KINDS.NETWORK, platform, accountLabel: "default", sourceObject: "campaigns", options: {} }];
+    const first = await h.orchestration.createRun({ kind: "full", trigger: "api", options: { promoteAfter: false }, units: units("boostiny") });
+    const second = await h.orchestration.createRun({ kind: "full", trigger: "api", options: { promoteAfter: false }, units: units("trackier") });
+
+    const a = await h.orchestration.nextWorkableUnit();
+    assert.equal(a.run.id, first.id, "the oldest current-version run first");
+    // Asking again without working anything is stable.
+    assert.equal((await h.orchestration.nextWorkableUnit()).run.id, first.id);
+
+    const worked = await h.worker();
+    assert.equal(worked.body.runId, first.id);
+    assert.equal((await h.orchestration.nextWorkableUnit()).run.id, second.id, "then the next one");
+    assert.equal(h.supplierCalls.length, 1, "exactly one unit per invocation");
+  });
+
+  it("the account lock still excludes a second unit of the same account", async () => {
+    const h = harness();
+    seedLegacyRun(h);
+    const run = await h.orchestration.createRun({
+      kind: "full", trigger: "api", options: { promoteAfter: false },
+      units: [
+        { kind: UNIT_KINDS.NETWORK, platform: "boostiny", accountLabel: "default", sourceObject: "campaigns", options: {} },
+        { kind: UNIT_KINDS.NETWORK, platform: "boostiny", accountLabel: "default", sourceObject: "coupons", options: {} },
+      ],
+    });
+    const [one, two] = h.unitsOf(run.id);
+    assert.equal((await h.orchestration.claimUnit(one.id, { workerId: "a" })).claimed, true);
+    const sibling = await h.orchestration.claimUnit(two.id, { workerId: "b" });
+    assert.equal(sibling.claimed, false);
+    assert.equal(sibling.reason, "lock_held");
+  });
+
+  it("worker selection is version-scoped at the query, not filtered afterwards", () => {
+    const next = SERVICE_SRC.split("  async nextWorkableUnit(")[1].split("\n  }")[0];
+    assert.match(next, /compatibilityConditions\(\{ plannerVersion: PLANNER_VERSION \}\)/);
+    assert.match(next, /orderBy: \[\{ createdAt: "asc" \}, \{ id: "asc" \}\]/, "ordering is unchanged");
+    for (const forbidden of ["CANCELLED", "updateMany", "delete"]) {
+      assert.ok(!next.includes(forbidden), `selection must not mutate anything: ${forbidden}`);
     }
   });
 });

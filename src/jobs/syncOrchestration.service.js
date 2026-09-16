@@ -1177,7 +1177,18 @@ export class SyncOrchestrationService {
    */
   async nextWorkableUnit() {
     const runs = await this.db.jobRun.findMany({
-      where: { jobName: ORCHESTRATION_JOB_NAME, status: { in: ACTIVE_STATUSES } },
+      where: {
+        jobName: ORCHESTRATION_JOB_NAME,
+        status: { in: ACTIVE_STATUSES },
+        // Only runs THIS planner created. A run from an older planner is a different shape of
+        // work — its units are whole accounts, which is exactly what could not fit an invocation
+        // — and a worker must never execute one by picking up the oldest active run. The
+        // condition matches an exact stored value, so an unversioned legacy run is selected by
+        // nothing. It is left alone, not cancelled: retiring it is a deliberate administrative
+        // act, not a side effect of asking for work.
+        AND: compatibilityConditions({ plannerVersion: PLANNER_VERSION }),
+      },
+      // Unchanged among current-version runs: a TOTAL order every worker computes identically.
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     });
     for (const run of runs) {
