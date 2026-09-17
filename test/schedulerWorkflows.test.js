@@ -19,12 +19,14 @@ const DRAIN = readFileSync(DRAIN_PATH, "utf8");
 const PRODUCTION_BASE = "https://mbo-rewards-backend.vercel.app";
 
 /**
- * The schedules these workflows will carry ONCE ACTIVATED, recorded here so the intent survives
- * while the triggers do not. Activation is a separate commit, after the backend is deployed and
- * both halves of the secret exist; until then a schedule block would fire against a backend that
- * cannot authenticate it.
+ * The schedules, and which of them is LIVE.
+ *
+ * Activation is staged deliberately: the drain runs on its schedule now that the backend is
+ * deployed, both halves of the secret exist, and a manual dispatch drained five units cleanly. The
+ * starter stays dispatch-only until it is activated on its own, so exactly one thing changes at a
+ * time and a bad drain cannot also start creating runs unattended.
  */
-const TARGET_SCHEDULES = Object.freeze({ start: "17 2 * * *", drain: "*/5 * * * *" });
+const SCHEDULES = Object.freeze({ start: "17 2 * * *", drain: "*/5 * * * *" });
 
 /**
  * The trigger keys declared under `on:`, read structurally rather than by grepping the file.
@@ -143,7 +145,7 @@ describe("sync-start — one request, once a day", () => {
     assert.ok(!on.includes("cron:"), "sync-start still has a cron entry in its triggers");
     assert.equal((START.match(/^\s+- cron:/gm) ?? []).length, 0, "no active cron line anywhere");
     // The intended schedule is recorded in a comment so activation is a one-line change.
-    assert.ok(START.includes(TARGET_SCHEDULES.start), "the target schedule should stay documented");
+    assert.ok(START.includes(SCHEDULES.start), "the target schedule should stay documented");
   });
 
   it("uses the mbo-sync-start concurrency group and never cancels in progress", () => {
@@ -181,13 +183,14 @@ describe("sync-start — one request, once a day", () => {
 });
 
 describe("sync-drain — a bounded batch, one unit per request", () => {
-  it("is INERT: manually dispatchable, with no schedule trigger at all", () => {
-    const on = DRAIN.split(/^on:/m)[1].split(/^\S/m)[0];
-    assert.match(on, /workflow_dispatch:/, "manual dispatch is the only way to run it");
-    assert.ok(!on.includes("schedule:"), "sync-drain still has a schedule trigger");
-    assert.ok(!on.includes("cron:"), "sync-drain still has a cron entry in its triggers");
-    assert.equal((DRAIN.match(/^\s+- cron:/gm) ?? []).length, 0, "no active cron line anywhere");
-    assert.ok(DRAIN.includes(TARGET_SCHEDULES.drain), "the target schedule should stay documented");
+  it("is ACTIVE: scheduled every 5 minutes, and still manually dispatchable", () => {
+    const keys = triggerKeys(DRAIN);
+    assert.deepEqual(keys.sort(), ["schedule", "workflow_dispatch"], "exactly these two triggers");
+    // Exactly one cron line, and exactly the interval that was signed off. GitHub's minimum is
+    // five minutes, so a tighter expression would be silently clamped rather than honoured.
+    const crons = [...DRAIN.matchAll(/^\s+- cron: "([^"]+)"/gm)].map((m) => m[1]);
+    assert.deepEqual(crons, [SCHEDULES.drain], "one active cron, at the agreed interval");
+    assert.equal(crons[0], "*/5 * * * *");
   });
 
   it("uses the mbo-sync-drain concurrency group and never cancels in progress", () => {
@@ -273,7 +276,7 @@ describe("sync-drain — a bounded batch, one unit per request", () => {
 });
 
 describe("the workflow set as a whole", () => {
-  it("adds exactly two workflows, both inert, and touches no existing one", () => {
+  it("adds exactly two workflows and touches no existing one", () => {
     // Every other workflow in the repo is push- or dispatch-triggered; only these two are scheduled.
     const fs = readFileSync(new URL("../.github/workflows", import.meta.url).pathname ? new URL("../.github/workflows/sync-drain.yml", import.meta.url) : DRAIN_PATH, "utf8");
     assert.ok(fs.length > 0);
@@ -281,13 +284,21 @@ describe("the workflow set as a whole", () => {
     assert.match(DRAIN, /^name: Sync Drain$/m);
   });
 
-  it("NEITHER workflow can fire on its own — read structurally, not grepped", () => {
-    for (const [name, source] of [["sync-start", START], ["sync-drain", DRAIN]]) {
-      const keys = triggerKeys(source);
-      assert.deepEqual(keys, ["workflow_dispatch"], `${name} declares a trigger other than workflow_dispatch`);
-      assert.ok(!keys.includes("schedule"), `${name} is scheduled`);
-      assert.ok(!keys.includes("push"), `${name} runs on push`);
-      assert.ok(!keys.includes("pull_request"), `${name} runs on pull_request`);
+  it("exactly ONE workflow is scheduled — the drain — read structurally, not grepped", () => {
+    const start = triggerKeys(START);
+    const drain = triggerKeys(DRAIN);
+
+    // The starter is still inert. Creating runs unattended is a separate decision from draining
+    // them, and activating both at once would remove the ability to tell which one misbehaved.
+    assert.deepEqual(start, ["workflow_dispatch"], "sync-start gained a trigger it should not have");
+    assert.ok(!start.includes("schedule"), "sync-start is scheduled");
+    assert.equal((START.match(/^\s+- cron:/gm) ?? []).length, 0, "sync-start has an active cron line");
+
+    // The drain is live, and on nothing else: a push or pull_request trigger would run the real
+    // production scheduler on every commit.
+    assert.deepEqual(drain.sort(), ["schedule", "workflow_dispatch"]);
+    for (const name of ["push", "pull_request", "workflow_run", "repository_dispatch"]) {
+      assert.ok(!drain.includes(name), `sync-drain runs on ${name}`);
     }
   });
 

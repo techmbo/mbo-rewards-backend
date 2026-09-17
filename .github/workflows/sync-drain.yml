@@ -13,18 +13,17 @@
 # PUBLIC REPOSITORY. No response body, header, or environment is ever printed.
 name: Sync Drain
 
-# INERT until activation. The schedule trigger is genuinely ABSENT rather than commented out. This
-# workflow would otherwise fire every five minutes the moment it lands on the default branch, and
-# with no secret configured it would fail on every tick.
+# ACTIVE. The preconditions for activation were met before this trigger was added: the backend is
+# deployed, CRON_SECRET exists in Vercel production, MBO_SYNC_CRON_SECRET exists in GitHub, and a
+# manual dispatch drained exactly five units successfully.
 #
-# Activation is a separate commit, after the backend is deployed, CRON_SECRET exists in Vercel
-# production, MBO_SYNC_CRON_SECRET exists in GitHub, and a manual dispatch has been seen to work.
-# The schedule to restore at that point is:
-#
-#     schedule:
-#       - cron: "*/5 * * * *"   # GitHub's minimum interval, always UTC. Scheduled triggers are
-#                               # best-effort and can be delayed; harmless, the work is durable.
+# sync-start.yml remains workflow_dispatch-only and is activated separately.
 on:
+  schedule:
+    # Every 5 minutes — GitHub's minimum interval. Always UTC. Scheduled triggers are best-effort
+    # and can be delayed under platform load; harmless here, because the work is durable and the
+    # next tick simply resumes where this one stopped.
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 # At most one drain at a time. cancel-in-progress:false because cancelling mid-call would abandon
