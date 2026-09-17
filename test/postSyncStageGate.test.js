@@ -33,7 +33,7 @@ import {
 } from "../src/jobs/postSyncStages.js";
 import { PROMOTION_PAGE_SIZE } from "../src/jobs/promotionUnit.js";
 import { CONVERSION_PROMOTION_PAGE_SIZE } from "../src/jobs/conversionPromotionUnit.js";
-import { resolvePostSyncAggregationWindow } from "../src/modules/reporting/services/aggregationDimensionMeasurement.service.js";
+import { AGGREGATION_AFTER_SYNC_DAYS } from "../src/jobs/syncConfig.js";
 
 const GATE_SRC = readFileSync(new URL("../src/jobs/postSyncStages.js", import.meta.url), "utf8");
 
@@ -458,9 +458,21 @@ describe("Phase 6d — the aggregation window is pinned to the run, not the cloc
   });
 
   it("the window matches the legacy post-sync rule exactly, for any anchor", () => {
+    // The legacy rule, restated here independently: `to` is the anchor day in UTC, `from` is that
+    // minus AGGREGATION_AFTER_SYNC_DAYS, and the range is inclusive. It used to be checked against
+    // the temporary Phase 6a-ter measurement service; that service has been removed now the
+    // measurement is taken, so the guarantee is pinned against the rule itself rather than lost.
+    const legacyWindow = (anchor) => {
+      const to = new Date(anchor);
+      const from = new Date(anchor);
+      from.setUTCDate(from.getUTCDate() - Math.max(1, AGGREGATION_AFTER_SYNC_DAYS));
+      return { from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10), days: Math.max(1, AGGREGATION_AFTER_SYNC_DAYS) + 1 };
+    };
     for (const iso of ["2026-09-16T04:12:00.000Z", "2026-01-01T00:00:00.000Z", "2026-03-01T23:59:59.000Z", "2024-02-29T12:00:00.000Z"]) {
-      assert.deepEqual(aggregationWindowFor(new Date(iso)), resolvePostSyncAggregationWindow(new Date(iso)), iso);
+      assert.deepEqual(aggregationWindowFor(new Date(iso)), legacyWindow(new Date(iso)), iso);
     }
+    // The production run's own anchor, which is what the certified run actually rebuilt.
+    assert.deepEqual(legacyWindow(RUN_STARTED_AT), { from: "2026-09-02", to: "2026-09-16", days: 15 });
     // A month and a year boundary are walked correctly, not by string arithmetic.
     assert.deepEqual(aggregationDaysFor(new Date("2026-01-05T00:00:00.000Z")).slice(0, 2), ["2025-12-22", "2025-12-23"]);
     assert.throws(() => aggregationWindowFor("not-a-date"), /immutable start timestamp/);

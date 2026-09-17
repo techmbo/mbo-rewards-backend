@@ -24,7 +24,6 @@ import {
   triggerBoostinyCanarySync,
   triggerSyncWorker,
 } from "../controllers/sync.controller.js";
-import { aggregationMeasurementHandler } from "../controllers/aggregationMeasurement.controller.js";
 import { getConnections, oauthCallback, oauthConnect } from "../controllers/oauth.controller.js";
 import {
   connectMarketplaceAccount,
@@ -373,18 +372,6 @@ router.get(
   requireAdminRole,
   requirePermission(PERMISSIONS.SYSTEM_READ),
   previewSyncPlanHandler,
-);
-// TEMPORARY — Phase 6a-ter. Read-only per-day aggregation dimension measurement for the post-sync
-// rebuild window. Same admin gate as the plan preview, no-store first so every response carries it,
-// no audit middleware because that would be a write. Delete this block with the controller,
-// service and test once the measurement has been taken.
-router.get(
-  "/sync/aggregation-measurement",
-  noStoreHeaders,
-  authenticate,
-  requireAdminRole,
-  requirePermission(PERMISSIONS.SYSTEM_READ),
-  aggregationMeasurementHandler,
 );
 // Its 202 carries the same durable run projection /sync/status returns — run ids, per-account
 // unit counts and sync state — so it is no more shared-cacheable than the status endpoint.
