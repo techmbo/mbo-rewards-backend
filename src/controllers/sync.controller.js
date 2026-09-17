@@ -50,7 +50,7 @@ function parseBoolQuery(value, defaultValue = false) {
  * The durable orchestration service. Overridable per app (tests, or a future worker sharing one
  * instance) through app.locals; otherwise the default, backed by the runtime Prisma client.
  */
-function orchestrationServiceFor(req) {
+export function orchestrationServiceFor(req) {
   return req?.app?.locals?.syncOrchestration ?? new SyncOrchestrationService();
 }
 

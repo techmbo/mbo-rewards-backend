@@ -38,6 +38,8 @@ import {
   removeAdminCoupon,
 } from "../controllers/couponCms.controller.js";
 import { listMapperErrorsHandler, retryMapperErrorHandler } from "../controllers/mapperErrors.controller.js";
+import { cronSyncDrainHandler, cronSyncStartHandler } from "../controllers/internalCron.controller.js";
+import { requireCronSecret } from "../middleware/cronAuth.js";
 import { runPromotionHandler, retryPromotionHandler } from "../controllers/promotion.controller.js";
 import { listSuppliersHandler, getSupplierHandler } from "../controllers/suppliers.controller.js";
 import { networkOpsDashboardHandler } from "../controllers/networkOpsDashboard.controller.js";
@@ -351,6 +353,15 @@ router.get(
   requirePermission(PERMISSIONS.LOGS_READ),
   listAccessLogsHandler,
 );
+
+// ---------------------------------------------------------------------------
+// Internal scheduler routes. Machine-authenticated by a shared secret and NOTHING else: no user
+// JWT, no role, no permission — a scheduler is not a person, and a user token would expire under
+// it. Each performs exactly ONE bounded action. The human /sync routes below are untouched and
+// keep their own authenticate + role + permission chain.
+// ---------------------------------------------------------------------------
+router.post("/internal/cron/sync-start", requireCronSecret, cronSyncStartHandler);
+router.post("/internal/cron/sync-drain", requireCronSecret, cronSyncDrainHandler);
 
 router.get(
   "/sync/status",
