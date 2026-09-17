@@ -1,0 +1,111 @@
+# Daily durable full-sync starter.
+#
+# One bounded action: ask the backend to plan and enqueue the day's run. It executes NO unit, so
+# this workflow can never do supplier work — draining is sync-drain.yml's job.
+#
+# The request is idempotent at the backend: an active run with a matching planner version and
+# options is reused rather than duplicated, so a manual dispatch on top of the scheduled run is
+# harmless.
+#
+# PUBLIC REPOSITORY. Every line of this log is world-readable, so nothing here prints a response
+# body, an environment dump, or any header. The secret reaches curl through an env var and a file,
+# never through an argument, a query string or an echo.
+name: Sync Start
+
+# INERT until activation. The schedule trigger is genuinely ABSENT rather than commented out, so
+# there is no path by which this can fire on its own — a commented cron is one careless uncomment
+# away from running against a backend that has no CRON_SECRET yet.
+#
+# Activation is a separate commit, after the backend is deployed, CRON_SECRET exists in Vercel
+# production, MBO_SYNC_CRON_SECRET exists in GitHub, and a manual dispatch has been seen to work.
+# The schedule to restore at that point is:
+#
+#     schedule:
+#       - cron: "17 2 * * *"    # 02:17 UTC daily; minute 17 not 0, the top of the hour is the
+#                               # busiest and most delayed slot on shared runners.
+on:
+  workflow_dispatch:
+
+# One start at a time. cancel-in-progress:false because cancelling mid-request would abandon a
+# request whose run may already have been created.
+concurrency:
+  group: mbo-sync-start
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  start:
+    name: Enqueue the daily run
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Request one durable run
+        env:
+          CRON_SECRET: ${{ secrets.MBO_SYNC_CRON_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASE="https://mbo-rewards-backend.vercel.app"
+          BODY="$(mktemp)"
+          trap 'rm -f "$BODY"' EXIT
+
+          if [ -z "${CRON_SECRET:-}" ]; then
+            echo "::error::MBO_SYNC_CRON_SECRET is not set for this repository."
+            exit 1
+          fi
+
+          # EXACTLY ONE request. No retry loop, no while loop, no background process.
+          # --silent so curl never narrates; the body goes to a file and the status to a variable.
+          CODE="$(curl --silent --show-error \
+            --output "$BODY" --write-out '%{http_code}' \
+            --max-time 60 \
+            --request POST \
+            --header "Authorization: Bearer ${CRON_SECRET}" \
+            --header "Content-Type: application/json" \
+            "${BASE}/api/internal/cron/sync-start" || echo "000")"
+
+          case "$CODE" in
+            429)
+              # The inherited global limiter answered. Transient by nature: tomorrow's tick retries.
+              echo "::notice::Rate limited (HTTP 429). Not retrying in this run."
+              exit 0
+              ;;
+            401|403)
+              echo "::error::Authentication rejected (HTTP ${CODE}). Check MBO_SYNC_CRON_SECRET against CRON_SECRET."
+              exit 1
+              ;;
+            000)
+              echo "::error::Request failed or timed out before a response was received."
+              exit 1
+              ;;
+            2??) ;;
+            *)
+              echo "::error::Unexpected HTTP ${CODE} from sync-start."
+              exit 1
+              ;;
+          esac
+
+          # Parse ONLY whitelisted fields. A body that is not valid JSON fails the job, and is
+          # never printed — on a public repo an error page could contain anything.
+          if ! jq -e . "$BODY" >/dev/null 2>&1; then
+            echo "::error::sync-start returned a malformed JSON body (HTTP ${CODE})."
+            exit 1
+          fi
+
+          OK="$(jq -r '.ok // empty' "$BODY")"
+          RUN_ID="$(jq -r '.runId // "unknown"' "$BODY")"
+          CREATED="$(jq -r '.created // false' "$BODY")"
+          REUSED="$(jq -r '.reused // false' "$BODY")"
+          STATUS="$(jq -r '.status // "unknown"' "$BODY")"
+          PLANNER="$(jq -r '.plannerVersion // "unknown"' "$BODY")"
+
+          if [ "$OK" != "true" ]; then
+            echo "::error::sync-start reported ok=false (HTTP ${CODE}, status ${STATUS})."
+            exit 1
+          fi
+
+          echo "run ${RUN_ID}: status=${STATUS} created=${CREATED} reused=${REUSED} plannerVersion=${PLANNER}"
+          echo "::notice::Daily run ${STATUS} (planner v${PLANNER}). Draining is handled by the sync-drain schedule."

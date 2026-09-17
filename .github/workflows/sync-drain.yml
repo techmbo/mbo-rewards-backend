@@ -1,0 +1,157 @@
+# Durable worker drainer.
+#
+# Each HTTP request advances the run by AT MOST ONE durable unit — that is the backend's contract,
+# not this workflow's choice. This workflow only decides how many requests to make and when to
+# stop. There is no loop inside the serverless invocation; the whole of Phase 6 exists to keep it
+# that way.
+#
+# The batch is bounded twice over: a fixed maximum of 5 calls, and a 240-second wall-clock budget
+# checked BEFORE starting each call. The budget is what makes it self-tuning — when units are fast
+# all five run, and when a unit approaches the platform's 300-second ceiling the run does one call
+# and exits cleanly rather than overrunning its 5-minute tick.
+#
+# PUBLIC REPOSITORY. No response body, header, or environment is ever printed.
+name: Sync Drain
+
+# INERT until activation. The schedule trigger is genuinely ABSENT rather than commented out. This
+# workflow would otherwise fire every five minutes the moment it lands on the default branch, and
+# with no secret configured it would fail on every tick.
+#
+# Activation is a separate commit, after the backend is deployed, CRON_SECRET exists in Vercel
+# production, MBO_SYNC_CRON_SECRET exists in GitHub, and a manual dispatch has been seen to work.
+# The schedule to restore at that point is:
+#
+#     schedule:
+#       - cron: "*/5 * * * *"   # GitHub's minimum interval, always UTC. Scheduled triggers are
+#                               # best-effort and can be delayed; harmless, the work is durable.
+on:
+  workflow_dispatch:
+
+# At most one drain at a time. cancel-in-progress:false because cancelling mid-call would abandon
+# a unit this workflow already claimed, leaving it to expire by lease instead of finishing. With
+# this setting at most one run is pending per group, so a slow run cannot build a backlog.
+concurrency:
+  group: mbo-sync-drain
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  drain:
+    name: Advance the durable run
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Drain up to five units
+        env:
+          CRON_SECRET: ${{ secrets.MBO_SYNC_CRON_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASE="https://mbo-rewards-backend.vercel.app"
+          MAX_CALLS=5
+          BUDGET_SECONDS=240
+          CALL_TIMEOUT=310
+
+          BODY="$(mktemp)"
+          trap 'rm -f "$BODY"' EXIT
+
+          if [ -z "${CRON_SECRET:-}" ]; then
+            echo "::error::MBO_SYNC_CRON_SECRET is not set for this repository."
+            exit 1
+          fi
+
+          STARTED_AT="$SECONDS"
+          WORKED=0
+
+          # BOUNDED for-loop. Never a while loop, never recursion, never a background process.
+          for CALL in $(seq 1 "$MAX_CALLS"); do
+            ELAPSED=$(( SECONDS - STARTED_AT ))
+            if [ "$ELAPSED" -ge "$BUDGET_SECONDS" ]; then
+              echo "::notice::Wall-clock budget reached after ${ELAPSED}s; stopping before call ${CALL}."
+              break
+            fi
+
+            CODE="$(curl --silent --show-error \
+              --output "$BODY" --write-out '%{http_code}' \
+              --max-time "$CALL_TIMEOUT" \
+              --request POST \
+              --header "Authorization: Bearer ${CRON_SECRET}" \
+              --header "Content-Type: application/json" \
+              "${BASE}/api/internal/cron/sync-drain" || echo "000")"
+
+            case "$CODE" in
+              429)
+                echo "::notice::Rate limited (HTTP 429) on call ${CALL}. Stopping; the next tick resumes."
+                exit 0
+                ;;
+              401|403)
+                echo "::error::Authentication rejected (HTTP ${CODE}). Check MBO_SYNC_CRON_SECRET against CRON_SECRET."
+                exit 1
+                ;;
+              000)
+                echo "::error::Call ${CALL} timed out or failed before a response was received."
+                exit 1
+                ;;
+              5??)
+                echo "::error::Server error (HTTP ${CODE}) on call ${CALL}."
+                exit 1
+                ;;
+              200|409) ;;
+              *)
+                echo "::error::Unexpected HTTP ${CODE} on call ${CALL}."
+                exit 1
+                ;;
+            esac
+
+            # Fail closed on an unparseable body, INCLUDING on 409: "busy" is a contract the body
+            # states, not something inferred from a status code alone.
+            if ! jq -e . "$BODY" >/dev/null 2>&1; then
+              echo "::error::Call ${CALL} returned a malformed JSON body (HTTP ${CODE})."
+              exit 1
+            fi
+
+            STATUS="$(jq -r '.status // "unknown"' "$BODY")"
+            SEQ="$(jq -r '.unit.sequence // "-"' "$BODY")"
+            KIND="$(jq -r '.unit.kind // "-"' "$BODY")"
+            NETWORK="$(jq -r '.unit.promotionPage.networkSource // .unit.conversionPage.networkSource // "-"' "$BODY")"
+            ETYPE="$(jq -r '.unit.promotionPage.entityType // "-"' "$BODY")"
+            DAY="$(jq -r '.unit.day // "-"' "$BODY")"
+            USTATUS="$(jq -r '.unit.status // "-"' "$BODY")"
+            DONE="$(jq -r '.syncStatus.completedUnits // "-"' "$BODY")"
+            PENDING="$(jq -r '.syncStatus.pendingUnits // "-"' "$BODY")"
+            FAILED="$(jq -r '.syncStatus.failedUnits // "-"' "$BODY")"
+            STAGE="$(jq -r '.syncStatus.postSyncStage // "-"' "$BODY")"
+
+            echo "call ${CALL}: ${STATUS} seq=${SEQ} kind=${KIND} network=${NETWORK} entityType=${ETYPE} day=${DAY} unit=${USTATUS} completed=${DONE} pending=${PENDING} failed=${FAILED} stage=${STAGE}"
+
+            case "$STATUS" in
+              idle)
+                echo "::notice::No executable unit is ready. Stopping after ${CALL} call(s)."
+                exit 0
+                ;;
+              busy)
+                echo "::notice::Another worker or a manual sync holds the lock. Stopping; the next tick resumes."
+                exit 0
+                ;;
+              unit_completed|unit_deferred|unit_retry)
+                WORKED=$(( WORKED + 1 ))
+                ;;
+              unit_abandoned)
+                echo "::warning::A unit was abandoned after losing its worker and had no attempts left. Stopping; this needs review."
+                exit 0
+                ;;
+              unit_failed)
+                echo "::error::A unit dead-lettered (stage ${STAGE}). Stopping and failing: the run needs attention."
+                exit 1
+                ;;
+              *)
+                echo "::error::Unrecognised worker outcome on call ${CALL}."
+                exit 1
+                ;;
+            esac
+          done
+
+          echo "::notice::Drained ${WORKED} unit(s) in $(( SECONDS - STARTED_AT ))s."
