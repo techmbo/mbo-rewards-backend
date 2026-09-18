@@ -992,6 +992,10 @@ async function syncOptimiseRegion(region, accountLabel) {
   // A bounded unit walks the supplier's own offset/limit paging for at most its page budget and
   // reports where the next slice begins; an unbounded call keeps the existing whole-catalog walk.
   let campaignPagination = null;
+  // Handed to the source-object wrapper so the slice's own completeness evidence survives to the
+  // NetworkSyncRun. Without it the run saw rows only, and a slice that knew more pages remained
+  // was indistinguishable from the terminal page of the walk.
+  const campaignPaginationRef = {};
   const fetchCampaignRows = campaignPage
     ? async () => {
         const page = await adapter.fetchCampaignsPage(campaignPage);
@@ -1002,6 +1006,7 @@ async function syncOptimiseRegion(region, accountLabel) {
           nextOffset: page.nextOffset,
           hasMore: page.hasMore,
         };
+        campaignPaginationRef.value = campaignPagination;
         return page.rows;
       }
     : () => adapter.fetchCampaigns();
@@ -1018,7 +1023,7 @@ async function syncOptimiseRegion(region, accountLabel) {
     voucherCodesResult,
   ] = await Promise.all([
     refreshCampaigns
-      ? fetchOptimiseSourceObject("campaigns", credentials, fetchCampaignRows, {}, srcCtx)
+      ? fetchOptimiseSourceObject("campaigns", credentials, fetchCampaignRows, { paginationRef: campaignPaginationRef }, srcCtx)
       : fetchOptimiseSourceObject(
           "campaigns",
           credentials,

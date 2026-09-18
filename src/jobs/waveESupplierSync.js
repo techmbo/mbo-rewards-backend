@@ -25,6 +25,7 @@ import {
   evidenceFromRunSummary,
 } from "./sourceObjectRuns.js";
 import { resultRows } from "../modules/networkOps/sourceObjectSync.service.js";
+import { unavailableOutcome, withFetchFailureSignal } from "./sourceFetchOutcome.js";
 
 /**
  * Wave E — Impact / Partnerize / Awin sync via registry + RawPayload staging.
@@ -231,7 +232,13 @@ export async function syncImpactAccount(accountLabel = "default") {
       ...runCtx,
       sourceObject: "catalogs",
       endpoint: "GET /Catalogs/Items",
-      execute: () => adapter.fetchProducts({}, stats),
+      // fetchProducts swallows any transport/auth/server error and answers []. Without this the
+      // run could not tell a 403 from an empty catalog: both were SUCCESS with recordsFetched 0.
+      execute: () =>
+        withFetchFailureSignal(stats, "productFetchSkipped", () => adapter.fetchProducts({}, stats), {
+          errorCode: "IMPACT_CATALOGS_FETCH_FAILED",
+          endpoint: "GET /Catalogs/Items",
+        }),
     });
     sourceObjectRuns.push(summarizeSourceObjectRun(run));
     products = resultRows(run).map(normalizeImpactCatalogItem);
@@ -376,7 +383,29 @@ export async function syncPartnerizeAccount(accountLabel = "default") {
       ...runCtx,
       sourceObject: "campaigns",
       endpoint: "GET campaigns",
-      execute: () => adapter.fetchCampaigns({}, stats),
+      // Three states used to collapse into one SUCCESS. They are kept apart here:
+      //   A hard API error       -> PARTIAL, because the catalog was NOT read
+      //   B publisher not linked -> SUCCESS + unavailable metadata; nothing is broken, it is a
+      //     configuration state, and calling it a failure would devalue PARTIAL
+      //   C genuinely empty      -> plain SUCCESS with zero rows
+      execute: async () => {
+        const hintBefore = stats.campaignFetchHint;
+        const outcome = await withFetchFailureSignal(
+          stats,
+          "campaignFetchFailed",
+          () => adapter.fetchCampaigns({}, stats),
+          { errorCode: "PARTNERIZE_CAMPAIGNS_FETCH_FAILED", endpoint: "GET campaigns" },
+        );
+        if (outcome?.partial) return outcome;
+        const unlinked = stats.campaignFetchHint !== undefined && stats.campaignFetchHint !== hintBefore;
+        return unlinked
+          ? unavailableOutcome(outcome, {
+              reason: stats.campaignFetchHint,
+              code: "PARTNERIZE_PUBLISHER_NOT_LINKED",
+              endpoint: "GET campaigns",
+            })
+          : outcome;
+      },
     });
     sourceObjectRuns.push(summarizeSourceObjectRun(run));
     campaigns = resultRows(run).map(normalizePartnerizeCampaign);

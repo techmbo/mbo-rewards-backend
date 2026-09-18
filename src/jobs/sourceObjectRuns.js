@@ -5,6 +5,7 @@
 
 import { prisma } from "../database/prisma.js";
 import { toSyncObservabilityDto } from "../modules/networkOps/syncObservability.contract.js";
+import { pagedOutcome } from "./sourceFetchOutcome.js";
 import {
   executeSourceObjectRun,
   resultRows,
@@ -206,7 +207,14 @@ export async function fetchOptimiseSourceObject(
     execute: async () => {
       const result = await fetchOptimiseResource(resource, credentials, fn, options);
       if (result.error) throw result.error;
-      return result.rows;
+      // The walk's own completeness evidence used to stop here: only `rows` was returned, so a
+      // slice that KNEW more pages remained reported an indistinguishable SUCCESS. It lives in a
+      // closure the fetch fn fills rather than on the resource result, so it is handed in through
+      // a ref and read back once fn() has run. A sliced walk is expected and healthy, so this is
+      // metadata and never `partial`: it exists so a later reader can answer "was this slice the
+      // terminal page of the catalog walk?" without re-deriving it.
+      const pagination = options.paginationRef?.value ?? null;
+      return pagination ? pagedOutcome(result.rows, pagination) : result.rows;
     },
   });
 

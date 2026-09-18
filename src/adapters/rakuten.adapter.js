@@ -1006,16 +1006,25 @@ export function createRakutenAdapter({
     const maxPages = finitePositive(params?.maxPages, 1000);
     delete baseParams.maxPages;
 
+    // Exhausted NATURALLY (the supplier said there is no more) versus exhausted by OUR cap are
+    // two different facts, and only the first means the snapshot is complete. The loop used to
+    // return the same bare array either way, so a truncated catalog reported SUCCESS.
+    let exhausted = false;
     for (let pageCount = 0; pageCount < maxPages; pageCount += 1) {
       // eslint-disable-next-line no-await-in-loop
       const payload = await getJson(path, { ...baseParams, page, limit }, stats);
       const rows = extractRakutenCollection(payload, keys);
       const meta = extractRakutenPagination(payload, { page, limit });
       out.push(...rows);
-      if (!rows.length) break;
-      if (meta.total != null && meta.page * meta.limit >= meta.total) break;
-      if (!meta.next && rows.length < meta.limit) break;
+      if (!rows.length) { exhausted = true; break; }
+      if (meta.total != null && meta.page * meta.limit >= meta.total) { exhausted = true; break; }
+      if (!meta.next && rows.length < meta.limit) { exhausted = true; break; }
       page = meta.page + 1;
+    }
+    // Recorded on the stats side-channel the adapter is already handed, so the return type stays
+    // an array for every existing caller. The live source handler reads it back.
+    if (!exhausted && stats) {
+      stats.pageCapReached = `${path} stopped at the ${maxPages}-page cap`;
     }
     return out;
   }

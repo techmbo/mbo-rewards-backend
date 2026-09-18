@@ -24,6 +24,7 @@ import {
   evidenceFromRunSummary,
 } from "./sourceObjectRuns.js";
 import { resultRows } from "../modules/networkOps/sourceObjectSync.service.js";
+import { withFetchFailureSignal } from "../jobs/sourceFetchOutcome.js";
 
 function validDate(value) {
   if (!value) return null;
@@ -244,7 +245,12 @@ export async function syncRakutenAccount(accountLabel = "default") {
       ...runCtx,
       sourceObject: "advertisers",
       endpoint: "GET /v2/advertisers",
-      execute: () => adapter.fetchAdvertisers({}, stats),
+      // A cap exit inside fetchPagedJson means the catalog was TRUNCATED, not exhausted.
+      execute: () =>
+        withFetchFailureSignal(stats, "pageCapReached", () => adapter.fetchAdvertisers({}, stats), {
+          errorCode: "RAKUTEN_PAGE_CAP_REACHED",
+          endpoint: "GET /v2/advertisers",
+        }),
     });
     sourceObjectRuns.push(summarizeSourceObjectRun(run));
     advertisers = resultRows(run).map(normalizedAdvertiser);
@@ -256,7 +262,12 @@ export async function syncRakutenAccount(accountLabel = "default") {
       ...runCtx,
       sourceObject: "partnerships",
       endpoint: "GET /v1/partnerships",
-      execute: () => adapter.fetchPartnerships({}, stats),
+      // A cap exit inside fetchPagedJson means the catalog was TRUNCATED, not exhausted.
+      execute: () =>
+        withFetchFailureSignal(stats, "pageCapReached", () => adapter.fetchPartnerships({}, stats), {
+          errorCode: "RAKUTEN_PAGE_CAP_REACHED",
+          endpoint: "GET /v1/partnerships",
+        }),
     });
     sourceObjectRuns.push(summarizeSourceObjectRun(run));
     partnerships = resultRows(run).map(normalizedPartnership);
@@ -268,7 +279,12 @@ export async function syncRakutenAccount(accountLabel = "default") {
       ...runCtx,
       sourceObject: "offers",
       endpoint: "GET /v1/offers",
-      execute: () => adapter.fetchOffers({}, stats),
+      // A cap exit inside fetchPagedJson means the catalog was TRUNCATED, not exhausted.
+      execute: () =>
+        withFetchFailureSignal(stats, "pageCapReached", () => adapter.fetchOffers({}, stats), {
+          errorCode: "RAKUTEN_PAGE_CAP_REACHED",
+          endpoint: "GET /v1/offers",
+        }),
     });
     sourceObjectRuns.push(summarizeSourceObjectRun(run));
     offers = resultRows(run).map(normalizedOffer);
@@ -280,7 +296,12 @@ export async function syncRakutenAccount(accountLabel = "default") {
       ...runCtx,
       sourceObject: "commissioning_lists",
       endpoint: "GET /v1/commissioninglists",
-      execute: () => adapter.fetchCommissioningLists({}, stats),
+      // A cap exit inside fetchPagedJson means the catalog was TRUNCATED, not exhausted.
+      execute: () =>
+        withFetchFailureSignal(stats, "pageCapReached", () => adapter.fetchCommissioningLists({}, stats), {
+          errorCode: "RAKUTEN_PAGE_CAP_REACHED",
+          endpoint: "GET /v1/commissioninglists",
+        }),
     });
     sourceObjectRuns.push(summarizeSourceObjectRun(run));
     commissioningLists = resultRows(run).map(normalizedCommissionList);
