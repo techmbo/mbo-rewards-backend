@@ -447,9 +447,11 @@ describe("source guards — one unit, nothing in the background, nothing else ch
     assert.ok(!ROUTES_SRC.includes('router.get(\n  "/sync/worker"'), "no GET worker route");
   });
 
-  it("/sync/incremental, /sync/status, the canary and the scheduler are untouched", () => {
+  it("/sync/incremental is retired at 410, and /sync/status, the canary and the scheduler are untouched", () => {
     const incremental = handlerOf("triggerIncrementalSync");
-    assert.match(incremental, /triggerScheduledSync\(\{ reason: "api" \}\)/);
+    assert.match(incremental, /res\.status\(410\)/);
+    assert.match(incremental, /code: LEGACY_INCREMENTAL_RETIRED_CODE/);
+    assert.ok(!incremental.includes("triggerScheduledSync"), "the legacy launcher is gone");
     assert.ok(!incremental.includes("nextWorkableUnit") && !incremental.includes("withLock"));
     // Phase 4 made status durable; it must still carry the in-memory block and never mutate.
     const status = CONTROLLER_SRC.split("export async function getSyncStatusHandler")[1].split("\nexport ")[0];

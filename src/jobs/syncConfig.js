@@ -65,17 +65,11 @@ export const DEFAULT_DAYS_BACK = 180;
  */
 export const SYNC_OVERLAP_DAYS = readInt("SYNC_OVERLAP_DAYS", 2);
 
-/** Enable in-process auto-fetch scheduler (default true outside tests). */
-export const ENABLE_SCHEDULER = readBool(
-  "ENABLE_SCHEDULER",
-  process.env.NODE_ENV !== "test",
-);
-
-/** Auto-fetch interval in minutes (default 360 = 6 hours). */
-export const SYNC_INTERVAL_MINUTES = readInt("SYNC_INTERVAL_MINUTES", 360);
-
-/** Delay before the first scheduled sync after server start (default 2 minutes). */
-export const SYNC_SCHEDULER_INITIAL_DELAY_MS = readInt("SYNC_SCHEDULER_INITIAL_DELAY_MS", 120_000);
+/*
+ * ENABLE_SCHEDULER, SYNC_INTERVAL_MINUTES and SYNC_SCHEDULER_INITIAL_DELAY_MS were removed with
+ * the in-process scheduler. Nothing reads them, so leaving them set in an environment is inert.
+ * Scheduling is external now: GitHub Actions today, AWS EventBridge for production later.
+ */
 
 /** After successful sync + promotion, rebuild DailyReport for this many trailing days. */
 export const AGGREGATION_AFTER_SYNC_DAYS = readInt("AGGREGATION_AFTER_SYNC_DAYS", 14);

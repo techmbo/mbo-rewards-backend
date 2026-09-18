@@ -77,7 +77,9 @@ describe("handler wiring — only the manual per-network route reads promote", (
     assert.ok(!/\bq\.promote\b|req\.query\?\.promote/.test(all));
     assert.match(all, /getOrCreateRun\(\{/);
     const incremental = handlerOf("triggerIncrementalSync");
-    assert.match(incremental, /triggerScheduledSync\(\{ reason: "api" \}\)/);
+    assert.match(incremental, /res\.status\(410\)/);
+    assert.match(incremental, /code: LEGACY_INCREMENTAL_RETIRED_CODE/);
+    assert.ok(!incremental.includes("triggerScheduledSync"), "the legacy launcher is gone");
     assert.ok(!incremental.includes("promote"));
   });
 });

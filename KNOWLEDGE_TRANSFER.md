@@ -802,7 +802,8 @@ Base mount: **`/api`** (`backend/src/routes/index.js`). Full OpenAPI: `GET /api/
 | Method | Path | Perm |
 |--------|------|------|
 | GET | `/sync/status` | `system:read` |
-| POST | `/sync/all`, `/sync/incremental`, `/sync/:platform`, `/sync/:platform/:accountLabel` | `sync:trigger` |
+| POST | `/sync/all`, `/sync/:platform`, `/sync/:platform/:accountLabel` | `sync:trigger` |
+| POST | `/sync/incremental` | `sync:trigger` — **RETIRED (Phase 8A)**: always answers `410 Gone` with `code: "legacy_incremental_retired"`. It used to launch a fire-and-forget `syncAll` and answer 202 before the work happened. Use `/sync/all` plus `/sync/worker`. |
 | GET | `/marketplace/accounts` | `integrations:read` |
 | POST | `/marketplace/accounts/:platform/connect` | `integrations:manage` |
 | DELETE | `/marketplace/accounts/:platform/:accountLabel` | `integrations:manage` |
@@ -909,9 +910,19 @@ Typical error shape: `{ ok: false, message }`. Auth success: `{ ok: true, access
 3. Normalize → bulk upsert `Entity`.
 4. Discover JSON paths → `FieldRegistry`.
 5. If `AUTO_PROMOTE_AFTER_SYNC=true`, promote into supplier business objects.
-6. Scheduler: `ENABLE_SCHEDULER`, interval `SYNC_INTERVAL_MINUTES` (default 6h).
+6. Scheduling is EXTERNAL. The in-process scheduler was retired in Phase 8A, along with
+   `ENABLE_SCHEDULER`, `SYNC_INTERVAL_MINUTES` and `SYNC_SCHEDULER_INITIAL_DELAY_MS`; setting any
+   of them now does nothing. It held a `setInterval` that armed once per process — meaning once
+   per instance — guarded only by module memory, which is safe on a serverless host that never
+   lives long enough to fire it and unsafe on anything that does.
 
-CLI: `backend` `npm run sync` (`scripts/run-sync.js`).
+   Today GitHub Actions calls the machine-authed `/api/internal/cron/sync-start` and
+   `/api/internal/cron/sync-drain` routes. **Permanent production scheduling will move to AWS
+   EventBridge.** Either way the scheduler only ever asks the durable planner/worker to plan a run
+   and to advance it one bounded unit per request; it executes nothing itself.
+
+CLI: `backend` `npm run sync` (`scripts/run-sync.js`) — operator-invoked, awaits the run, and is
+deliberately left on the legacy `syncAll` path for now.
 
 ---
 

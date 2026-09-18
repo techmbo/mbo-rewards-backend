@@ -4,7 +4,6 @@ import { prisma } from "./database/prisma.js";
 import { logger } from "./platform/logging/logger.js";
 import { closeRedis } from "./platform/cache/redis.js";
 import { validateEnvironment } from "./platform/config/env.js";
-import { startSyncScheduler, stopSyncScheduler } from "./jobs/syncScheduler.js";
 import { warmListCaches } from "./platform/cache/warmListCaches.js";
 
 const port = Number(process.env.PORT || 4000);
@@ -19,7 +18,6 @@ try {
 const app = createApp();
 const server = app.listen(port, () => {
   logger.info({ port }, "API server started");
-  startSyncScheduler();
   warmListCaches().catch((err) => {
     logger.warn({ err: err?.message }, "list cache warmup skipped");
   });
@@ -27,7 +25,6 @@ const server = app.listen(port, () => {
 
 async function shutdown(signal) {
   logger.info({ signal }, "shutting down");
-  stopSyncScheduler();
   server.close(async () => {
     await closeRedis();
     await prisma.$disconnect();

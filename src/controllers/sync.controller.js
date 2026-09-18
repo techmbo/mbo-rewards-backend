@@ -2,7 +2,7 @@ import { syncPlatformAccount } from "../jobs/sync.job.js";
 import { normalizeBoostinyCanaryOptions } from "../modules/commercial/boostinyCommissionCanary.js";
 import { formatSyncError, getSyncErrorMessage } from "../jobs/syncErrors.js";
 import { getSyncStatus, runExclusiveSync } from "../jobs/syncState.js";
-import { getSchedulerStatus, triggerScheduledSync } from "../jobs/syncScheduler.js";
+import { getSchedulerStatus } from "../jobs/syncScheduler.js";
 import {
   SyncOrchestrationService,
   UNIT_KINDS,
@@ -706,16 +706,31 @@ export async function triggerSyncWorker(req, res, next) {
   }
 }
 
-/** Ops helper — trigger the same incremental path the scheduler uses. */
+/** The refusal code this route answers with. Exported so callers and tests pin the same string. */
+export const LEGACY_INCREMENTAL_RETIRED_CODE = "legacy_incremental_retired";
+
+/**
+ * Retired. This route used to hand its work to the in-process scheduler's launcher and answer 202
+ * immediately, which made it the one fire-and-forget sync path reachable in production: the
+ * serverless invocation could be frozen or reclaimed the moment after the response was written,
+ * mid-run, leaving partial supplier writes and no durable record of what had been done.
+ *
+ * 410 rather than a removal or a 404. The route stays registered behind its existing auth chain so
+ * a caller learns the endpoint is gone on purpose instead of reading a missing path as a typo, and
+ * the audit entry is still written.
+ *
+ * Deliberately NOT an internal redirect to a durable incremental run. The planner already knows
+ * the "incremental" kind, but kind takes part in run-reuse compatibility, so an incremental
+ * request would not fold into an active full run — two active parent runs could coexist and
+ * contend for account locks. That is a decision about run identity, and it does not belong in a
+ * retirement patch.
+ */
 export async function triggerIncrementalSync(_req, res) {
-  const launch = triggerScheduledSync({ reason: "api" });
-  return res.status(202).json({
-    ok: true,
-    status: launch.started ? "running" : "skipped",
-    message: launch.started
-      ? "Incremental sync started. Poll /sync/status for progress."
-      : launch.reason,
-    syncStatus: launch.status,
-    scheduler: getSchedulerStatus(),
+  return res.status(410).json({
+    ok: false,
+    code: LEGACY_INCREMENTAL_RETIRED_CODE,
+    message:
+      "This endpoint is retired. Incremental work now runs through durable orchestration: "
+      + "POST /api/sync/all plans a run, and each unit is advanced by POST /api/sync/worker.",
   });
 }

@@ -417,11 +417,13 @@ describe("source guards — enqueue only, and the other routes untouched", () =>
     assert.match(CONTROLLER_SRC, /SyncOrchestrationService/);
   });
 
-  it("/sync/incremental, the manual per-network route and the canary are unchanged", () => {
+  it("/sync/incremental is retired at 410, and the manual per-network route and the canary are unchanged", () => {
     const incremental = handlerOf("triggerIncrementalSync");
-    assert.match(incremental, /triggerScheduledSync\(\{ reason: "api" \}\)/);
-    assert.match(incremental, /res\.status\(202\)/);
-    assert.ok(!incremental.includes("getOrCreateRun"), "incremental is not part of phase 2");
+    assert.match(incremental, /res\.status\(410\)/);
+    assert.match(incremental, /code: LEGACY_INCREMENTAL_RETIRED_CODE/);
+    assert.ok(!incremental.includes("triggerScheduledSync"), "the legacy launcher is gone");
+    // Retirement is not a redirect: Phase 8A refuses, it does not plan a durable incremental run.
+    assert.ok(!incremental.includes("getOrCreateRun"), "retirement does not enqueue a durable run");
     const platform = handlerOf("triggerSyncPlatform");
     // Phase 3: still awaited, now under the shared durable account lock.
     assert.match(platform, /await locks\.withLock\(/);

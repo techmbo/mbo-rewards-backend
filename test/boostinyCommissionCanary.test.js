@@ -361,11 +361,13 @@ describe("sync wiring — Boostiny only, before any commission write, never sche
     for (const leak of ["name", "payout", "supplierCampaignId"]) assert.ok(!report.includes(leak), leak);
   });
 
-  it("the ordinary and scheduled paths are unchanged when no canary is set", () => {
+  it("the ordinary path is unchanged when no canary is set, and there is no scheduled path left to disturb", () => {
     assert.match(boostiny, /commissionRuleSkipCampaignIds: \[\.\.\.payoutGroupCampaignIds\],/);
     assert.match(boostiny, /\} else if \(refreshCampaigns && includeSourceObject\(requested, "campaigns"\)\) \{/);
     assert.match(code, /const boostiny = await syncBoostiny\(\);/);
-    assert.match(codeOf(SCHEDULER_SRC), /syncAll\(\{/);
+    // Phase 8A retired the in-process scheduler. The old assertion checked that it still reached
+    // syncAll when no canary was set; the successor check is that it no longer reaches it at all.
+    assert.ok(!codeOf(SCHEDULER_SRC).includes("syncAll"), "the retired scheduler runs no sync");
   });
 });
 

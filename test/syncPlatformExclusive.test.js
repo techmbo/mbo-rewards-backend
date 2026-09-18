@@ -127,8 +127,9 @@ describe("triggerSyncPlatform — handler wiring", () => {
     assert.match(all, /res\.status\(202\)/);
     assert.ok(!all.includes("respondWithExclusiveSync("), "the manual per-network helper is not used by full sync");
     const incremental = CONTROLLER_SRC.split("export async function triggerIncrementalSync")[1].split("\nexport ")[0];
-    assert.match(incremental, /triggerScheduledSync\(\{ reason: "api" \}\)/);
-    assert.match(incremental, /res\.status\(202\)/);
+    assert.match(incremental, /res\.status\(410\)/);
+    assert.match(incremental, /code: LEGACY_INCREMENTAL_RETIRED_CODE/);
+    assert.ok(!incremental.includes("triggerScheduledSync"), "the legacy launcher is gone");
     const canary = CONTROLLER_SRC.split("export async function triggerBoostinyCanarySync")[1].split("\nexport ")[0];
     // The canary now takes the shared durable account lock, so the await sits on withLock,
     // which awaits the function that calls runExclusiveSync. Still fully awaited, never detached.

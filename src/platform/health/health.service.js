@@ -51,18 +51,14 @@ async function checkSmtp() {
   return { status: "dev", message: "OTP logged to console in development" };
 }
 
+// The in-process scheduler is retired, so this reports a fixed retired state rather than a
+// cadence. Nothing in the process schedules sync any more: an external scheduler calls the
+// machine-authed /api/internal/cron routes, which drive the durable planner/worker.
 async function checkScheduler() {
   const scheduler = getSchedulerStatus();
-  if (!scheduler.enabled) {
-    return {
-      status: "manual",
-      message: "ENABLE_SCHEDULER=false — sync via API/CLI only",
-      ...scheduler,
-    };
-  }
   return {
-    status: scheduler.running ? "enabled" : "configured",
-    message: `Auto-fetch every ${scheduler.intervalMinutes} minutes (incremental)`,
+    status: "retired",
+    message: "In-process scheduler retired — sync runs via durable orchestration",
     ...scheduler,
   };
 }
