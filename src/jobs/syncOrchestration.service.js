@@ -124,6 +124,8 @@ const ACCOUNT_LABELLED_PLATFORMS = ["boostiny", "optimise_sea", "optimise_mena",
 const SINGLE_ACCOUNT_PLATFORMS = ["impact", "partnerize", "awin", "admitad", "rakuten", "cj"];
 
 const ACTIVE_STATUSES = ["PENDING", "RUNNING"];
+/** Stable, operator-facing reason recorded on an administratively cancelled run and its units. */
+export const ADMIN_CANCELLED_REASON = "cancelled_by_operator";
 const TERMINAL_STATUSES = ["COMPLETED", "FAILED", "CANCELLED", "DEAD_LETTER"];
 
 function text(value) {
@@ -375,7 +377,7 @@ export function summarisePlan(plan = {}, { kind = "full", options = {} } = {}) {
  * bounded units not materialised) — the denominator is unknown, and no weighting is invented.
  */
 function summarizeUnits(units, { postSyncStages = "none", postSyncMayAppend = false } = {}) {
-  const counters = { totalUnits: units.length, completedUnits: 0, failedUnits: 0, pendingUnits: 0, runningUnits: 0, blockedUnits: 0, supersededUnits: 0 };
+  const counters = { totalUnits: units.length, completedUnits: 0, failedUnits: 0, cancelledUnits: 0, pendingUnits: 0, runningUnits: 0, blockedUnits: 0, supersededUnits: 0 };
   let partial = false;
   let latestError = null;
   let latestWarning = null;
@@ -386,7 +388,11 @@ function summarizeUnits(units, { postSyncStages = "none", postSyncMayAppend = fa
       if (unit.result?.outcome?.partialSuccess) partial = true;
       const warnings = unit.result?.outcome?.warnings;
       if (Array.isArray(warnings) && warnings.length) latestWarning = String(warnings[warnings.length - 1]);
-    } else if (unit.status === "DEAD_LETTER" || unit.status === "FAILED" || unit.status === "CANCELLED") {
+    } else if (unit.status === "CANCELLED") {
+      // A deliberate administrative stop is NOT a failure. Counting it as one made a cancelled run
+      // read as a sync that broke, with one "failure" per unit the operator chose not to run.
+      counters.cancelledUnits += 1;
+    } else if (unit.status === "DEAD_LETTER" || unit.status === "FAILED") {
       counters.failedUnits += 1;
       if (unit.lastError) latestError = unit.lastError;
     } else if (unit.status === "RUNNING") {
@@ -405,7 +411,8 @@ function summarizeUnits(units, { postSyncStages = "none", postSyncMayAppend = fa
       if (unit.lastError && !latestError) latestError = unit.lastError;
     }
   }
-  const terminal = counters.completedUnits + counters.failedUnits;
+  // Cancelled units are terminal even though they are not failures: nothing will run them.
+  const terminal = counters.completedUnits + counters.failedUnits + counters.cancelledUnits;
   const unitsPercentComplete = counters.totalUnits > 0 ? Math.min(100, Math.round((terminal / counters.totalUnits) * 100)) : 0;
   const settled = terminal + counters.blockedUnits + counters.supersededUnits === counters.totalUnits && counters.totalUnits > 0;
   // 1 — an unrecoverable unit failure beats any outstanding post-sync work.
@@ -880,6 +887,95 @@ export class SyncOrchestrationService {
     return typeof this.db.$transaction === "function" ? this.db.$transaction(cancel) : cancel(this.db);
   }
 
+  /**
+   * ADMINISTRATIVE cancellation. Deliberately NOT collapseDuplicateRun.
+   *
+   * collapseDuplicateRun refuses a run whose units have left PENDING ("work_started"), because as
+   * internal race resolution it must never cancel a run that is really doing something. That is
+   * exactly the run an operator needs this for, so the restriction is dropped here and replaced by
+   * a different safety rule: a RUNNING unit is LEFT RUNNING.
+   *
+   * Why leave it: a live worker owns that unit's account lock. Forcing the row terminal would hand
+   * the lock to another run while supplier writes were still landing — a real race traded for a
+   * tidy row. Instead the worker is contained. It cannot append units (appendUnits refuses a
+   * terminal run), cannot advance post-sync (advancePostSync refuses one), and cannot complete or
+   * fail its unit (both now check the parent). Its claim expires by lease like any other.
+   *
+   * So cancellation is EVENTUAL, not instantaneous, and the caller is told how many units are
+   * still running rather than being implied a dead stop.
+   *
+   * Current planner only. A foreign-planner run may be executing under code that does not honour
+   * these guards, so cancelling it is not proven safe: it is refused, and nothing about it — not
+   * its parent, not its units, not the barrier rows it may hold — is touched.
+   *
+   * This stops FUTURE orchestration. It does not roll back supplier, staging or promotion work
+   * that already committed; nothing here attempts to.
+   */
+  async cancelRun(runId, { reason = ADMIN_CANCELLED_REASON, actor = null } = {}) {
+    if (!runId) return { cancelled: false, code: "run_not_found" };
+    const parent = await this.db.jobRun.findUnique({ where: { id: runId } });
+    if (!parent || parent.jobName !== ORCHESTRATION_JOB_NAME) {
+      return { cancelled: false, code: "run_not_found" };
+    }
+    if ((parent.payload?.plannerVersion ?? null) !== PLANNER_VERSION) {
+      return { cancelled: false, code: "run_foreign_planner_version", runId };
+    }
+    if (TERMINAL_STATUSES.includes(parent.status)) {
+      return { cancelled: false, code: "run_already_terminal", runId, status: parent.status };
+    }
+
+    const cancelledAt = this.now();
+    const cancellation = { reason, cancelledAt: cancelledAt.toISOString(), actor: actor ?? null };
+    const apply = async (tx) => {
+      // Conditional: a concurrent cancel, or a run finishing on its own, makes this a no-op rather
+      // than a resurrection. Whichever writer lands first wins and the other reports terminal.
+      const { count } = await tx.jobRun.updateMany({
+        where: { id: runId, jobName: ORCHESTRATION_JOB_NAME, status: { in: ACTIVE_STATUSES } },
+        data: {
+          status: "CANCELLED",
+          completedAt: cancelledAt,
+          lastError: reason,
+          payload: { ...(parent.payload ?? {}), cancellation },
+        },
+      });
+      if (count === 0) return { cancelled: false, code: "run_already_terminal", runId };
+      // PENDING units hold no lock and have no worker: safe to terminalise now.
+      const { count: unitsCancelled } = await tx.jobRun.updateMany({
+        where: { jobName: UNIT_JOB_NAME, correlationId: runId, status: "PENDING" },
+        data: { status: "CANCELLED", completedAt: cancelledAt, lastError: reason },
+      });
+      return { cancelled: true, code: "run_cancelled", runId, unitsCancelled };
+    };
+    const result = typeof this.db.$transaction === "function" ? await this.db.$transaction(apply) : await apply(this.db);
+    if (!result.cancelled) return result;
+
+    const stillRunning = await this.db.jobRun.findMany({
+      where: { jobName: UNIT_JOB_NAME, correlationId: runId, status: "RUNNING" },
+    });
+
+    // The DERIVED freeze already released: it only scans PENDING/RUNNING parents, and this one is
+    // now CANCELLED. The intent MARKER is separate and lease-bounded, so it would lapse on its own
+    // within the worker lease — clearing it here is for promptness, not correctness, so a failure
+    // to clear must not fail the cancellation.
+    let freezeIntentCleared = 0;
+    try {
+      freezeIntentCleared = await this.barrier.clearFreezeIntent();
+    } catch {
+      freezeIntentCleared = 0;
+    }
+    // Staging participants and account locks are deliberately NOT touched: both are held by live
+    // workers and both are owned by their leases.
+
+    return {
+      ...result,
+      status: "CANCELLED",
+      cancelledAt: cancellation.cancelledAt,
+      unitsLeftRunning: stillRunning.length,
+      freezeIntentCleared,
+      cancellation,
+    };
+  }
+
   /** Collapse every active compatible duplicate after the canonical one. Idempotent. */
   async #collapseDuplicatesOf(canonicalRunId, { options, plannerVersion = null }) {
     const active = await this.listActiveCompatibleRuns({ options, plannerVersion });
@@ -922,6 +1018,26 @@ export class SyncOrchestrationService {
     // and resuming it would quietly do different work than the caller asked for.
     const plannerVersion = PLANNER_VERSION;
     const existing = await this.findActiveRun({ kind, options, plannerVersion });
+    if (!existing) {
+      // Nothing satisfies this request. Before creating a parent, refuse if an INCOMPATIBLE one is
+      // already active — otherwise a non-fast request beside an active fast run silently produces
+      // a second orchestration parent, which duplicates supplier work and makes /sync/status
+      // ambiguous (the unfiltered reader returns the oldest active run and hides the other).
+      //
+      // Refuse rather than auto-cancel or upgrade. Auto-cancelling infers a destructive act from a
+      // request to START something, and "untouched" is a read followed by a write that a worker
+      // can claim between. Upgrading would relabel a run whose completed units already ran under
+      // the other breadth, making its own record false.
+      const blocker = await this.#activeIncompatibleRun({ plannerVersion });
+      if (blocker) {
+        const error = new Error("An active sync run is incompatible with this request.");
+        error.code = "active_run_incompatible";
+        error.statusCode = 409;
+        error.retryable = true;
+        error.activeRunId = blocker.id;
+        throw error;
+      }
+    }
     if (existing) {
       // Collapse duplicates of the run being REUSED, keyed by the options that run actually
       // recorded rather than the ones this request asked for. When a fast request is satisfied by
@@ -947,6 +1063,47 @@ export class SyncOrchestrationService {
 
     await this.#collapseDuplicatesOf(created.id, { options, plannerVersion });
     return { ...created, options: { fastSync: Boolean(options.fastSync), promoteAfter: options.promoteAfter !== false } };
+  }
+
+  /**
+   * An active run that this request can NEITHER reuse NOR safely coexist with, or null.
+   *
+   * Two kinds. A current-planner run whose breadth or options do not satisfy the request — today
+   * that is exactly "active fast, non-fast requested", since every other combination is reusable.
+   * And ANY active foreign-planner run: its unit shape is different and its worker semantics may
+   * predate the cancellation guards, so creating a current-planner parent beside it would put two
+   * orchestration systems on the same accounts. It is reported, never mutated.
+   */
+  async #activeIncompatibleRun({ plannerVersion }) {
+    const active = await this.db.jobRun.findMany({
+      where: { jobName: ORCHESTRATION_JOB_NAME, status: { in: ACTIVE_STATUSES } },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+    // CURRENT-planner runs only. Reaching here means findActiveRun already declined every one of
+    // them, so any that remains is genuinely incompatible — today that is exactly "active fast,
+    // non-fast requested", since every other combination is reusable under Phase 8B.
+    //
+    // A FOREIGN-planner run is deliberately NOT a blocker. The planner-version design guarantees a
+    // current run can be created and worked beside a legacy one, and this phase refuses to cancel
+    // a foreign run, so blocking on one would leave the estate unable to sync at all with no route
+    // to recover. It is surfaced instead — see activeForeignPlannerRun — so it is never silent.
+    return active.find((run) => (run.payload?.plannerVersion ?? null) === plannerVersion) ?? null;
+  }
+
+  /**
+   * The oldest active run from a DIFFERENT planner version, or null. Read-only and never mutated.
+   *
+   * Surfaced on enqueue so a current-planner run created beside a legacy one is reported rather
+   * than silently coexisting with it. An operator seeing this knows two orchestration vocabularies
+   * are live on the same accounts and can retire the old one deliberately.
+   */
+  async activeForeignPlannerRun() {
+    const active = await this.db.jobRun.findMany({
+      where: { jobName: ORCHESTRATION_JOB_NAME, status: { in: ACTIVE_STATUSES } },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+    const foreign = active.find((run) => (run.payload?.plannerVersion ?? null) !== PLANNER_VERSION);
+    return foreign ? { id: foreign.id, plannerVersion: foreign.payload?.plannerVersion ?? null } : null;
   }
 
   /**
@@ -1248,15 +1405,67 @@ export class SyncOrchestrationService {
     return { abandoned: true, unitId, attempt: unit?.attempt ?? null, reason };
   }
 
+  /**
+   * Record a unit's success — conditionally.
+   *
+   * This used to be an unconditional update by id, which was the one way an in-flight worker could
+   * defeat an administrative cancellation: it would flip its own CANCELLED unit back to COMPLETED
+   * under a CANCELLED parent, leaving the run's record contradicting itself. Two guards close it:
+   * the unit must still be the RUNNING row this worker claimed, and the parent must still be
+   * active.
+   *
+   * A cancelled parent is NOT an error. The worker's supplier work already committed — that cannot
+   * be unwound — so the honest outcome is "the run this belonged to was stopped", recorded on the
+   * unit's own result for an operator to find, with no status change and no parent refresh.
+   */
   async completeUnit(unitId, outcome = null) {
     const unit = await this.db.jobRun.findUnique({ where: { id: unitId } });
     if (!unit) return null;
-    const updated = await this.db.jobRun.update({
-      where: { id: unitId },
+    const parentActive = await this.#parentIsActive(unit.correlationId);
+    if (!parentActive) {
+      await this.#recordTerminalParentOutcome(unit, outcome, "completed_after_run_terminal");
+      return this.db.jobRun.findUnique({ where: { id: unitId } });
+    }
+    const { count } = await this.db.jobRun.updateMany({
+      where: { id: unitId, jobName: UNIT_JOB_NAME, status: "RUNNING" },
       data: { status: "COMPLETED", progress: 100, completedAt: this.now(), lastError: null, result: { ...(unit.result ?? {}), outcome: outcome ?? null } },
     });
+    if (count !== 1) {
+      // Someone else terminalised it between the read and the write (a cancel, or a reclaim that
+      // abandoned it). Leave it alone and do not refresh a parent on its behalf.
+      await this.#recordTerminalParentOutcome(unit, outcome, "completed_after_unit_terminal");
+      return this.db.jobRun.findUnique({ where: { id: unitId } });
+    }
     await this.refreshRun(unit.correlationId);
-    return updated;
+    return this.db.jobRun.findUnique({ where: { id: unitId } });
+  }
+
+  /** True when the unit's parent is still PENDING/RUNNING. A missing parent counts as inactive. */
+  async #parentIsActive(runId) {
+    if (!runId) return false;
+    const parent = await this.db.jobRun.findUnique({ where: { id: runId } });
+    if (!parent || parent.jobName !== ORCHESTRATION_JOB_NAME) return false;
+    return ACTIVE_STATUSES.includes(parent.status);
+  }
+
+  /**
+   * Keep the worker's outcome without changing the unit's lifecycle.
+   *
+   * Written to `result` only, and only while the row is unchanged, so a late worker leaves a trace
+   * an operator can read rather than silently discarding what it did. It never resurrects a
+   * terminal row and never touches the parent.
+   */
+  async #recordTerminalParentOutcome(unit, outcome, reason) {
+    await this.db.jobRun.updateMany({
+      where: { id: unit.id, jobName: UNIT_JOB_NAME },
+      data: {
+        result: {
+          ...(unit.result ?? {}),
+          outcome: outcome ?? null,
+          discardedOutcome: { reason, at: this.now().toISOString() },
+        },
+      },
+    });
   }
 
   /** Retryable while attempts remain (back to PENDING, no sleep); DEAD_LETTER otherwise. */
@@ -1305,19 +1514,36 @@ export class SyncOrchestrationService {
     return this.db.jobRun.findUnique({ where: { id: unitId } });
   }
 
+  /**
+   * Record a unit's failure — conditionally, for the same reason completeUnit is.
+   *
+   * The retry branch is the sharper hazard: it sets status back to PENDING, so an unguarded write
+   * would make a CANCELLED unit look runnable again. It is inert today only because
+   * nextWorkableUnit filters parents by ACTIVE_STATUSES, which is a guarantee living in a
+   * different function. Guard it here too rather than rely on that.
+   */
   async failUnit(unitId, error) {
     const unit = await this.db.jobRun.findUnique({ where: { id: unitId } });
     if (!unit) return null;
     const message = String(error?.message ?? error ?? "unit failed").slice(0, 2000);
+    const parentActive = await this.#parentIsActive(unit.correlationId);
+    if (!parentActive) {
+      await this.#recordTerminalParentOutcome(unit, null, "failed_after_run_terminal");
+      return this.db.jobRun.findUnique({ where: { id: unitId } });
+    }
     const retry = (unit.attempt ?? 0) < (unit.maxAttempts ?? this.maxAttempts);
-    const updated = await this.db.jobRun.update({
-      where: { id: unitId },
+    const { count } = await this.db.jobRun.updateMany({
+      where: { id: unitId, jobName: UNIT_JOB_NAME, status: "RUNNING" },
       data: retry
         ? { status: "PENDING", lastError: message }
         : { status: "DEAD_LETTER", lastError: message, completedAt: this.now() },
     });
+    if (count !== 1) {
+      await this.#recordTerminalParentOutcome(unit, null, "failed_after_unit_terminal");
+      return this.db.jobRun.findUnique({ where: { id: unitId } });
+    }
     await this.refreshRun(unit.correlationId);
-    return updated;
+    return this.db.jobRun.findUnique({ where: { id: unitId } });
   }
 
   /** Recompute the parent's counters/progress from its units; finalise when every unit is terminal. */
@@ -1443,6 +1669,7 @@ export class SyncOrchestrationService {
         totalUnits: summary.totalUnits,
         completedUnits: summary.completedUnits,
         failedUnits: summary.failedUnits,
+        cancelledUnits: summary.cancelledUnits,
         pendingUnits: summary.pendingUnits,
         runningUnits: summary.runningUnits,
         blockedUnits: summary.blockedUnits,
@@ -1590,9 +1817,16 @@ export class SyncOrchestrationService {
     const postSyncRequested = postSyncStages !== "none";
     const postSyncMayAppend = postSyncMayAppendUnits(units, { postSyncRequested });
     const summary = summarizeUnits(units, { postSyncStages, postSyncMayAppend });
-    const status = TERMINAL_STATUSES.includes(parent.status) && !summary.finished
-      ? (parent.status === "COMPLETED" ? "success" : "failed")
-      : summary.status;
+    // A cancelled run is reported as cancelled at every point, finished or not. It used to fall
+    // into the "not COMPLETED, therefore failed" branch, so a deliberate stop read as a broken
+    // sync. Cancellation STOPS future orchestration; it does not undo committed work, and it is
+    // not a failure of the work that did run.
+    const cancellation = parent.payload?.cancellation ?? null;
+    const status = parent.status === "CANCELLED"
+      ? "cancelled"
+      : TERMINAL_STATUSES.includes(parent.status) && !summary.finished
+        ? (parent.status === "COMPLETED" ? "success" : "failed")
+        : summary.status;
     const current = unitView(summary.current);
     const kind = parent.payload?.kind ?? null;
     const deferredSources = (parent.payload?.deferredSources ?? []).map((entry) => ({
@@ -1613,6 +1847,7 @@ export class SyncOrchestrationService {
       totalUnits: summary.totalUnits,
       completedUnits: summary.completedUnits,
       failedUnits: summary.failedUnits,
+      cancelledUnits: summary.cancelledUnits,
       pendingUnits: summary.pendingUnits,
       runningUnits: summary.runningUnits,
       blockedUnits: summary.blockedUnits,
@@ -1670,6 +1905,10 @@ export class SyncOrchestrationService {
       latestError: safeUnitError(summary.latestError ?? parent.lastError ?? null),
       latestWarning: safeUnitError(summary.latestWarning),
       options: parent.payload?.options ?? null,
+      // Safe cancellation metadata only: why, when, and who asked. No supplier data.
+      cancellation: cancellation
+        ? { reason: cancellation.reason ?? null, cancelledAt: cancellation.cancelledAt ?? null, actor: cancellation.actor ?? null }
+        : null,
       // Backward-compatible names used by the in-memory status readers.
       jobName: kind === "incremental" ? "scheduledSyncAll" : kind === "manual" ? "sync:manual" : "syncAll",
       totalAccounts: summary.totalUnits,

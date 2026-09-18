@@ -165,6 +165,39 @@ describe("POST /sync/all — durable enqueue", () => {
     assert.equal(h.unitsOf(first.body.runId).length, await plannedUnits(), "no duplicate units");
   });
 
+  it("an active FOREIGN-planner run does not block a current run, and is surfaced rather than silent", async () => {
+    const h = harness();
+    // A legacy parent, mid-flight, from a planner generation this code does not speak.
+    h.rows.push({
+      id: "legacy-1", jobName: ORCHESTRATION_JOB_NAME, status: "RUNNING", priority: 100, attempt: 0,
+      maxAttempts: 1, correlationId: "legacy-1", startedAt: new Date("2026-09-01T00:00:00.000Z"),
+      completedAt: null, createdAt: new Date("2026-09-01T00:00:00.000Z"),
+      payload: { kind: "full", trigger: "api", plannerVersion: 3, options: { fastSync: false, promoteAfter: true } },
+      result: null, lastError: null, progress: 0,
+    });
+    const before = JSON.stringify(h.rows.find((r) => r.id === "legacy-1"));
+
+    const res = await h.call({});
+
+    // Phase 8C deliberately does NOT block on a foreign run: the planner-version design allows a
+    // current run beside a legacy one, and cancelling a foreign run is refused, so blocking would
+    // leave the estate unable to sync with no way out.
+    assert.equal(res.statusCode, 202);
+    assert.equal(res.body.created, true, "the current-planner run was created");
+    assert.notEqual(res.body.runId, "legacy-1");
+    // …but it is never silent.
+    assert.deepEqual(res.body.foreignPlannerRunActive, { runId: "legacy-1", plannerVersion: 3 });
+    // …and the foreign run is not touched in any way.
+    assert.equal(JSON.stringify(h.rows.find((r) => r.id === "legacy-1")), before, "byte-for-byte unchanged");
+  });
+
+  it("with no foreign run active the field is absent, not a null", async () => {
+    const h = harness();
+    const res = await h.call({});
+    assert.equal(res.statusCode, 202);
+    assert.ok(!("foreignPlannerRunActive" in res.body), "no noise on the ordinary path");
+  });
+
   it("a fast request folds into an active non-fast run, and says so truthfully", async () => {
     const h = harness();
     const normal = await h.call({});
@@ -181,16 +214,22 @@ describe("POST /sync/all — durable enqueue", () => {
     assert.equal(again.body.reusedBroaderRun, false);
   });
 
-  it("the reverse is NOT folded: a non-fast request beside an active fast run still creates its own", async () => {
-    // Phase 8B deliberately keeps this behaviour. Refusing, or waiting, needs the cancellation and
-    // recovery route that does not exist yet, so the pre-existing outcome is preserved on purpose.
+  it("the reverse is REFUSED: a non-fast request beside an active fast run gets 409, not a second parent", async () => {
+    // Phase 8C closes the gap 8B left open. A fast run cannot satisfy a non-fast request, and
+    // creating a second parent duplicates supplier work and makes status ambiguous — so the
+    // request is refused and the operator decides: wait, or cancel the active run explicitly.
     const h = harness();
     const fast = await h.call({ fast: "true" });
-    const normal = await h.call({});
-    assert.equal(normal.body.created, true, "a fast run cannot satisfy a non-fast request");
-    assert.notEqual(normal.body.runId, fast.body.runId);
-    assert.equal(normal.body.reusedBroaderRun, false);
-    assert.equal(h.parents().length, 2, "known Phase 8C gap: two active parents");
+    const refused = await h.call({});
+    assert.equal(refused.statusCode, 409);
+    assert.equal(refused.body.ok, false);
+    assert.equal(refused.body.code, "active_run_incompatible");
+    assert.equal(refused.body.activeRunId, fast.body.runId, "the caller is told WHICH run blocks it");
+    assert.equal(h.parents().length, 1, "no second parent was created");
+    // Nothing was cancelled or relabelled on the operator's behalf.
+    const parent = h.rows.find((r) => r.id === fast.body.runId);
+    assert.equal(parent.status, "RUNNING");
+    assert.equal(parent.payload.options.fastSync, true, "the active run was not upgraded");
   });
 
   it("creates the parent and units transactionally, through the phase 1 service", async () => {
@@ -302,16 +341,19 @@ describe("service — run reuse requires compatible execution options", () => {
     const service = serviceFor(prisma);
     const a = await service.getOrCreateRun({ kind: "full", trigger: "api", options: { fastSync: false, promoteAfter: true } });
     const b = await service.getOrCreateRun({ kind: "full", trigger: "api", options: { fastSync: true, promoteAfter: true } });
-    const c = await service.getOrCreateRun({ kind: "full", trigger: "api", options: { fastSync: false, promoteAfter: false } });
     assert.equal(a.created, true);
     // b asks for less than a, and a is active, so b is answered with a rather than duplicating it.
     assert.equal(b.created, false, "a fast request folds into the active non-fast run");
     assert.equal(b.id, a.id);
-    // c differs on promoteAfter, which is never relaxed, so it is genuinely its own run.
-    assert.equal(c.created, true);
-    assert.equal(new Set([a.id, c.id]).size, 2, "two distinct runs: breadth folds, promoteAfter does not");
+    // c differs on promoteAfter, which is never relaxed — but Phase 8C allows only ONE active
+    // parent, so it is refused rather than created beside a. "Incompatible" and "second parent"
+    // are now the same answer whatever the incompatible dimension is.
+    await assert.rejects(
+      () => service.getOrCreateRun({ kind: "full", trigger: "api", options: { fastSync: false, promoteAfter: false } }),
+      (error) => error.code === "active_run_incompatible" && error.statusCode === 409 && error.activeRunId === a.id,
+    );
 
-    for (const [run, options] of [[a, { fastSync: false, promoteAfter: true }], [c, { fastSync: false, promoteAfter: false }]]) {
+    for (const [run, options] of [[a, { fastSync: false, promoteAfter: true }]]) {
       const again = await service.getOrCreateRun({ kind: "full", trigger: "scheduler", options });
       assert.equal(again.id, run.id);
       assert.equal(again.created, false);

@@ -18,6 +18,7 @@ import {
 import {
   getSyncStatusHandler,
   previewSyncPlanHandler,
+  cancelSyncRunHandler,
   triggerIncrementalSync,
   triggerSyncAll,
   triggerSyncPlatform,
@@ -400,6 +401,18 @@ router.post(
   requirePermission(PERMISSIONS.SYNC_TRIGGER),
   auditAction("sync.incremental", "sync"),
   triggerIncrementalSync,
+);
+// Administrative stop for one durable run. Registered BEFORE the dynamic /sync/:platform
+// patterns; it cannot be captured by them anyway (four segments against their two), but the order
+// keeps that independent of how many segments they grow. Same chain as /sync/worker: a cancel is
+// at least as consequential as advancing a unit.
+router.post(
+  "/sync/runs/:runId/cancel",
+  authenticate,
+  requireAdminRole,
+  requirePermission(PERMISSIONS.SYNC_TRIGGER),
+  auditAction("sync.run.cancel", (req) => `sync:run:${req.params.runId}`),
+  cancelSyncRunHandler,
 );
 router.post(
   "/sync/worker",

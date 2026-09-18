@@ -945,11 +945,80 @@ endpoint and no separate run kind; `/api/sync/incremental` is permanently retire
 | non-fast | `fast=true` | **reuses the non-fast run** — response carries `reusedBroaderRun: true` |
 | fast | `fast=true` | reuses it |
 | non-fast | non-fast | reuses it |
-| fast | non-fast | creates a second run — a known gap, see Phase 8C |
+| fast | non-fast | **409 `active_run_incompatible`** — closed in Phase 8C, see below |
 
 `promoteAfter` and `plannerVersion` are never relaxed: they change what the work *is*, not how
 much of it there is. Duplicate collapse — which cancels runs — uses a separate, strictly exact
 predicate, so reusing a broader run can never cancel it.
+
+### One active run, and how to stop it (Phase 8C)
+
+**At most one active orchestration parent PER PLANNER GENERATION.** The guarantee is scoped to the
+current planner version (`PLANNER_VERSION`), not to the `job_runs` table as a whole: a request that
+cannot reuse the active *current-planner* run is refused rather than creating a second one.
+
+```
+POST /api/sync/all            → 409 { code: "active_run_incompatible", activeRunId }
+```
+
+Not auto-cancelled and not "upgraded": auto-cancelling would infer a destructive act from a request
+to *start* something, and relabelling a run whose completed units already ran under the other
+breadth would make its own record false. The operator decides — wait, or cancel explicitly.
+
+A run from a **different planner version is isolated, not compatible.** It is never reused, never
+cancelled, never mutated — and it does not block a current-planner run either. The planner-version
+design allows a current run to be created and worked beside a legacy one, and cancelling a foreign
+run is refused (below), so blocking on one would leave the estate unable to sync with no way out.
+
+It is surfaced instead, and never silently: a 202 from `/sync/all` carries
+`foreignPlannerRunActive: { runId, plannerVersion }` whenever one is active, and the field is
+absent otherwise. Two orchestration vocabularies live on the same accounts in that state; the
+worker only ever executes current-planner units, so they do not interleave, but an operator should
+know and retire the old run deliberately.
+
+There is deliberately **no foreign force-cancel route**. If foreign runs ever actually appear and
+need retiring, that is separate work — and only if needed.
+
+#### Cancelling a run
+
+```
+POST /api/sync/runs/:runId/cancel     authenticate + admin + sync:trigger + audited
+```
+
+| Outcome | HTTP | `code` |
+|---|---|---|
+| cancelled | 200 | `run_cancelled` |
+| already terminal (idempotent) | 200 | `run_already_terminal` |
+| unknown id / not an orchestration parent | 404 | `run_not_found` |
+| different planner version — nothing touched | 409 | `run_foreign_planner_version` |
+
+**Cancellation STOPS future orchestration. It does not roll back supplier, staging or promotion
+work already committed.** A cancelled run is stopped, not undone.
+
+It is also **eventual, not instantaneous**. The transition is:
+
+| Row | On cancel |
+|---|---|
+| parent PENDING/RUNNING | → `CANCELLED`, with `payload.cancellation` = {reason, cancelledAt, actor} |
+| unit PENDING | → `CANCELLED` |
+| unit RUNNING | **left RUNNING** — a live worker owns its account lock |
+| unit terminal | untouched |
+
+A RUNNING unit is left alone deliberately: forcing it terminal would hand its account lock to
+another run while supplier writes were still landing. The worker is contained instead — under a
+cancelled parent it cannot complete or fail its unit, append follow-on units, or advance a
+post-sync stage — and its claim expires by lease. The response reports `unitsLeftRunning` rather
+than implying a dead stop.
+
+**Staging and locks are owned by leases, not by cancellation.** `derivedFreeze` only scans
+PENDING/RUNNING parents, so a cancelled run releases the Entity-staging freeze immediately. The
+freeze-intent marker is cleared for promptness (it would lapse on its own within the worker lease).
+Staging participants and account locks are deliberately **not** forcibly released — both are held
+by live workers.
+
+A cancelled run reports `status: "cancelled"`, never `failed`, and its cancelled units count under
+`cancelledUnits` rather than inflating `failedUnits`. It stays queryable by `runId`, and is what
+`/sync/status` returns once nothing is active.
 
 ---
 

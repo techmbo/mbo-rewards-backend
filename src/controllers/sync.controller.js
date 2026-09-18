@@ -4,6 +4,7 @@ import { formatSyncError, getSyncErrorMessage } from "../jobs/syncErrors.js";
 import { getSyncStatus, runExclusiveSync } from "../jobs/syncState.js";
 import { getSchedulerStatus } from "../jobs/syncScheduler.js";
 import {
+  ADMIN_CANCELLED_REASON,
   SyncOrchestrationService,
   UNIT_KINDS,
   assertUnitExecutable,
@@ -301,6 +302,10 @@ export async function triggerSyncAll(req, res, next) {
     // fast would and more. Say so rather than letting the caller read the 202 as "your fast run
     // is running": the run they were given refreshes catalogs their request would have skipped.
     const reusedBroaderRun = !run.created && Boolean(fastSync) && run.options?.fastSync === false;
+    // A legacy run may still be active. The planner-version design lets this run be created and
+    // worked beside it, and Phase 8C refuses to cancel a foreign-planner run, so it is reported
+    // rather than blocked — two orchestration vocabularies on one estate should never be silent.
+    const foreignPlannerRun = await orchestration.activeForeignPlannerRun();
     return res.status(202).json({
       ok: true,
       status: syncStatus?.status ?? "running",
@@ -312,9 +317,26 @@ export async function triggerSyncAll(req, res, next) {
       runId: run.id,
       created: run.created,
       reusedBroaderRun,
+      ...(foreignPlannerRun
+        ? { foreignPlannerRunActive: { runId: foreignPlannerRun.id, plannerVersion: foreignPlannerRun.plannerVersion } }
+        : {}),
       syncStatus,
     });
   } catch (error) {
+    // Answered here rather than through formatSyncError, which carries code/statusCode/retryable
+    // but not activeRunId — and the whole point of this refusal is telling the caller WHICH run
+    // blocks them. Widening the generic formatter for one field would leak that concern into
+    // every sync error.
+    if (error?.code === "active_run_incompatible") {
+      return res.status(409).json({
+        ok: false,
+        code: "active_run_incompatible",
+        message:
+          "Another sync run is already active and cannot satisfy this request. Wait for it to "
+          + "finish, or cancel it explicitly with POST /api/sync/runs/:runId/cancel.",
+        activeRunId: error.activeRunId ?? null,
+      });
+    }
     next(formatSyncError(error));
   }
 }
@@ -706,6 +728,77 @@ export async function triggerSyncWorker(req, res, next) {
       // Which post-sync stage this completion opened, and how many first pages or days it seeded.
       // Counts and a stage name only — never a network's data.
       ...(staged?.appended ? { postSyncStaged: { stage: staged.stage, units: staged.appended } } : {}),
+      syncStatus,
+    });
+  } catch (error) {
+    next(formatSyncError(error));
+  }
+}
+
+/**
+ * Administratively stop a durable run.
+ *
+ * STOPS FUTURE ORCHESTRATION ONLY. Supplier, staging and promotion work that already committed is
+ * not rolled back and no attempt is made to unwind it — a cancelled run is stopped, not undone.
+ *
+ * Eventual, not instantaneous: units a worker is currently running are left RUNNING and expire by
+ * lease, so `unitsLeftRunning` is reported rather than implying a dead stop. The worker is
+ * contained meanwhile — it cannot complete or fail its unit, append follow-on units, or advance a
+ * post-sync stage under a cancelled parent.
+ *
+ * Current planner only, by design: a foreign-planner run may be executing under code that predates
+ * those guards, so cancelling it is not proven safe and it is refused untouched.
+ */
+export async function cancelSyncRunHandler(req, res, next) {
+  try {
+    const runId = typeof req.params?.runId === "string" ? req.params.runId.trim() : "";
+    if (!runId) {
+      return res.status(404).json({ ok: false, code: "run_not_found", message: "No run id was supplied." });
+    }
+    const orchestration = orchestrationServiceFor(req);
+    const actor = req.user?.id ?? null;
+    const outcome = await orchestration.cancelRun(runId, { reason: ADMIN_CANCELLED_REASON, actor });
+
+    if (outcome.code === "run_not_found") {
+      return res.status(404).json({ ok: false, code: "run_not_found", message: "No orchestration run with that id." });
+    }
+    if (outcome.code === "run_foreign_planner_version") {
+      return res.status(409).json({
+        ok: false,
+        code: "run_foreign_planner_version",
+        message: "That run was planned by a different planner version and was left untouched.",
+        runId,
+      });
+    }
+    // Idempotent: cancelling an already-terminal run is a success, not an error.
+    if (outcome.code === "run_already_terminal") {
+      const syncStatus = await orchestration.describeRun(runId);
+      return res.status(200).json({
+        ok: true,
+        code: "run_already_terminal",
+        message: "That run had already finished; nothing was changed.",
+        runId,
+        status: syncStatus?.status ?? null,
+        cancelledAt: syncStatus?.cancellation?.cancelledAt ?? null,
+        unitsCancelled: 0,
+        unitsLeftRunning: 0,
+        syncStatus,
+      });
+    }
+
+    const syncStatus = await orchestration.describeRun(runId);
+    return res.status(200).json({
+      ok: true,
+      code: "run_cancelled",
+      message:
+        "The run is cancelled: no further units will be planned or executed. Work already committed "
+        + "to suppliers, staging or promotion is NOT rolled back. Units still running finish or "
+        + "expire by lease.",
+      runId,
+      status: syncStatus?.status ?? "cancelled",
+      cancelledAt: outcome.cancelledAt ?? null,
+      unitsCancelled: outcome.unitsCancelled ?? 0,
+      unitsLeftRunning: outcome.unitsLeftRunning ?? 0,
       syncStatus,
     });
   } catch (error) {
