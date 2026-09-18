@@ -18,6 +18,13 @@ name: Sync Drain
 # manual dispatch drained exactly five units successfully.
 #
 # sync-start.yml remains workflow_dispatch-only and is activated separately.
+#
+# Scheduler registration refresh: 2026-09-18. The schedule below was activated on 2026-09-17
+# and GitHub emitted no scheduled run in the 78 minutes that followed, across 15 eligible
+# five-minute boundaries, although the workflow was active, the file was on the default
+# branch, the cron was valid, and a workflow_dispatch of this same file succeeded. This
+# comment exists only to put a fresh commit against this file so GitHub re-registers the
+# schedule. Nothing executable changed with it.
 on:
   schedule:
     # Every 5 minutes — GitHub's minimum interval. Always UTC. Scheduled triggers are best-effort
