@@ -234,7 +234,12 @@ export async function buildSyncPlan({
   const units = [];
   const exclusions = [];
   const deferred = [];
-  const networkOptions = { fastSync: kind === "incremental" ? true : Boolean(fastSync), promoteAfter: false };
+  // fastSync comes from options and ONLY from options. It used to be forced true when
+  // kind was "incremental", which made the run payload disagree with its own units: the
+  // payload recorded the caller's raw value while every unit carried the coerced one.
+  // The kinds plan an identical unit set either way, so the coercion bought nothing and
+  // cost the reuse key its accuracy.
+  const networkOptions = { fastSync: Boolean(fastSync), promoteAfter: false };
   const planAccount = async (platform, entry) => {
     const lastSuccessfulSync =
       entry.lastSuccessfulSync === undefined
@@ -618,11 +623,47 @@ export function summariseSyncUnitOutcome(result, { accountLabel = null } = {}) {
  * A null `plannerVersion` means "do not filter on it", used by the read-only status lookups that
  * must still be able to see a legacy run.
  */
-function compatibilityConditions({ kind = null, options = null, plannerVersion = null } = {}) {
+/**
+ * EXACT identity: two runs are the same work, so one is a duplicate of the other.
+ *
+ * This is the predicate behind duplicate COLLAPSE, which cancels runs, so it must never be
+ * loosened. A non-fast run and a fast run are not duplicates — one does strictly more — and
+ * treating them as such would cancel the broader run and silently lose its catalog refresh.
+ *
+ * kind is deliberately absent. It no longer changes what a run plans (see buildSyncPlan), so two
+ * runs that differ only by that label are the same work under different names.
+ */
+function identityConditions({ options = null, plannerVersion = null } = {}) {
   const conditions = [];
-  if (kind) conditions.push({ payload: { path: ["kind"], equals: kind } });
   if (options) {
     conditions.push({ payload: { path: ["options", "fastSync"], equals: Boolean(options.fastSync) } });
+    conditions.push({ payload: { path: ["options", "promoteAfter"], equals: options.promoteAfter !== false } });
+  }
+  if (plannerVersion !== null && plannerVersion !== undefined) {
+    conditions.push({ payload: { path: ["plannerVersion"], equals: plannerVersion } });
+  }
+  return conditions;
+}
+
+/**
+ * REUSE: which active run may satisfy this request. Asymmetric, because breadth is asymmetric.
+ *
+ * fastSync only skips a catalog re-fetch whose TTL has not expired; windowed pulls and the
+ * post-sync stages happen either way. A non-fast run therefore does everything a fast run would
+ * and more, so a fast request may be satisfied by a non-fast run — expressed by omitting the
+ * condition entirely rather than by an OR, since "either value will do" is no constraint at all.
+ * A non-fast request is NOT satisfied by a fast run, which may have skipped the very refresh it
+ * asked for, so there the condition stays exact.
+ *
+ * promoteAfter and plannerVersion are never relaxed: they change what the work IS, not how much
+ * of it there is.
+ */
+function compatibilityConditions({ options = null, plannerVersion = null } = {}) {
+  const conditions = [];
+  if (options) {
+    if (!options.fastSync) {
+      conditions.push({ payload: { path: ["options", "fastSync"], equals: false } });
+    }
     conditions.push({ payload: { path: ["options", "promoteAfter"], equals: options.promoteAfter !== false } });
   }
   if (plannerVersion !== null && plannerVersion !== undefined) {
@@ -655,7 +696,10 @@ export class SyncOrchestrationService {
    * whose units do different work than they asked for.
    */
   async findActiveRun({ kind = null, options = null, plannerVersion = null } = {}) {
-    const conditions = compatibilityConditions({ kind, options, plannerVersion });
+    // kind is accepted and ignored: it no longer changes what a run plans, so it cannot decide
+    // whether an active run satisfies this request.
+    void kind;
+    const conditions = compatibilityConditions({ options, plannerVersion });
     return this.db.jobRun.findFirst({
       where: {
         jobName: ORCHESTRATION_JOB_NAME,
@@ -778,9 +822,15 @@ export class SyncOrchestrationService {
     return { ...plan, kind, options: resolvedOptions };
   }
 
-  /** Every active run doing the same work, earliest first. The first is the canonical one. */
+  /**
+   * Every active run doing EXACTLY the same work, earliest first. The first is the canonical one.
+   *
+   * Exact, not breadth-aware: this feeds duplicate collapse, which cancels runs. Reusing a
+   * broader run is safe; cancelling one as a "duplicate" of a narrower request is not.
+   */
   async listActiveCompatibleRuns({ kind = null, options = null, plannerVersion = null } = {}) {
-    const conditions = compatibilityConditions({ kind, options, plannerVersion });
+    void kind;
+    const conditions = identityConditions({ options, plannerVersion });
     return this.db.jobRun.findMany({
       where: {
         jobName: ORCHESTRATION_JOB_NAME,
@@ -831,8 +881,8 @@ export class SyncOrchestrationService {
   }
 
   /** Collapse every active compatible duplicate after the canonical one. Idempotent. */
-  async #collapseDuplicatesOf(canonicalRunId, { kind, options, plannerVersion = null }) {
-    const active = await this.listActiveCompatibleRuns({ kind, options, plannerVersion });
+  async #collapseDuplicatesOf(canonicalRunId, { options, plannerVersion = null }) {
+    const active = await this.listActiveCompatibleRuns({ options, plannerVersion });
     for (const run of active) {
       if (run.id === canonicalRunId) continue;
       // eslint-disable-next-line no-await-in-loop
@@ -873,7 +923,12 @@ export class SyncOrchestrationService {
     const plannerVersion = PLANNER_VERSION;
     const existing = await this.findActiveRun({ kind, options, plannerVersion });
     if (existing) {
-      await this.#collapseDuplicatesOf(existing.id, { kind, options, plannerVersion });
+      // Collapse duplicates of the run being REUSED, keyed by the options that run actually
+      // recorded rather than the ones this request asked for. When a fast request is satisfied by
+      // a broader non-fast run, that difference is the whole point: keying the collapse off the
+      // request would sweep the reused run's own identity class with the wrong predicate.
+      const canonicalOptions = existing.payload?.options ?? options;
+      await this.#collapseDuplicatesOf(existing.id, { options: canonicalOptions, plannerVersion });
       return this.#reuseView(existing, kind);
     }
 
@@ -881,7 +936,7 @@ export class SyncOrchestrationService {
 
     // Resolve a possible concurrent creation. This read happens after our own rows are committed,
     // so a racer that committed before us is visible here.
-    const canonical = (await this.listActiveCompatibleRuns({ kind, options, plannerVersion }))[0] ?? null;
+    const canonical = (await this.listActiveCompatibleRuns({ options, plannerVersion }))[0] ?? null;
     if (canonical && canonical.id !== created.id) {
       const collapse = await this.collapseDuplicateRun(created.id, { canonicalRunId: canonical.id });
       if (collapse.collapsed) return { ...this.#reuseView(canonical, kind), collapsedRunId: created.id };
@@ -890,7 +945,7 @@ export class SyncOrchestrationService {
       return { ...created, options: { fastSync: Boolean(options.fastSync), promoteAfter: options.promoteAfter !== false } };
     }
 
-    await this.#collapseDuplicatesOf(created.id, { kind, options, plannerVersion });
+    await this.#collapseDuplicatesOf(created.id, { options, plannerVersion });
     return { ...created, options: { fastSync: Boolean(options.fastSync), promoteAfter: options.promoteAfter !== false } };
   }
 

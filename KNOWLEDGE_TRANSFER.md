@@ -803,7 +803,7 @@ Base mount: **`/api`** (`backend/src/routes/index.js`). Full OpenAPI: `GET /api/
 |--------|------|------|
 | GET | `/sync/status` | `system:read` |
 | POST | `/sync/all`, `/sync/:platform`, `/sync/:platform/:accountLabel` | `sync:trigger` |
-| POST | `/sync/incremental` | `sync:trigger` — **RETIRED (Phase 8A)**: always answers `410 Gone` with `code: "legacy_incremental_retired"`. It used to launch a fire-and-forget `syncAll` and answer 202 before the work happened. Use `/sync/all` plus `/sync/worker`. |
+| POST | `/sync/incremental` | `sync:trigger` — **PERMANENTLY RETIRED (Phase 8A)**: always answers `410 Gone` with `code: "legacy_incremental_retired"`. It used to launch a fire-and-forget sync and answer 202 before the work happened. The durable incremental form is `POST /api/sync/all?fast=true`. |
 | GET | `/marketplace/accounts` | `integrations:read` |
 | POST | `/marketplace/accounts/:platform/connect` | `integrations:manage` |
 | DELETE | `/marketplace/accounts/:platform/:accountLabel` | `integrations:manage` |
@@ -923,6 +923,33 @@ Typical error shape: `{ ok: false, message }`. Auth success: `{ ok: true, access
 
 CLI: `backend` `npm run sync` (`scripts/run-sync.js`) — operator-invoked, awaits the run, and is
 deliberately left on the legacy `syncAll` path for now.
+
+### Durable incremental sync (Phase 8B)
+
+**`POST /api/sync/all?fast=true` is the incremental form.** There is no separate incremental
+endpoint and no separate run kind; `/api/sync/incremental` is permanently retired at 410.
+
+`fast=true` changes one thing: a catalog re-fetch whose 24-hour TTL has not expired is skipped
+(`CAMPAIGN_REFRESH_HOURS`, `COUPON_REFRESH_HOURS`). Everything else is identical —
+
+- the planner produces the **same unit set**, window for window, because `fastSync` never reaches
+  unit planning; date windows come from `lastSuccessfulSync` either way,
+- **windowed data still runs**: conversions, transactions, actions, reports, events, invoices,
+- **post-sync stages still run**: promotion, conversion-promotion and aggregation are governed by
+  `promoteAfter`, not by breadth.
+
+**Full is broader than fast.** A non-fast run does everything a fast run would and more, so:
+
+| Active run | New request | Outcome |
+|---|---|---|
+| non-fast | `fast=true` | **reuses the non-fast run** — response carries `reusedBroaderRun: true` |
+| fast | `fast=true` | reuses it |
+| non-fast | non-fast | reuses it |
+| fast | non-fast | creates a second run — a known gap, see Phase 8C |
+
+`promoteAfter` and `plannerVersion` are never relaxed: they change what the work *is*, not how
+much of it there is. Duplicate collapse — which cancels runs — uses a separate, strictly exact
+predicate, so reusing a broader run can never cancel it.
 
 ---
 

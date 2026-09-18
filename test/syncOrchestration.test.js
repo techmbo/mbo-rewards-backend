@@ -235,8 +235,11 @@ describe("run lifecycle — durable parent + child JobRun rows, no module memory
     assert.equal(second.created, false);
     assert.equal(first.created, true);
     assert.equal(rows.filter((r) => r.jobName === ORCHESTRATION_JOB_NAME).length, 1);
+    // kind no longer changes what a run plans, and a non-fast run is a superset of a fast one,
+    // so an "incremental" request is answered with the active run rather than duplicating it.
     const incremental = await service.getOrCreateRun({ kind: "incremental", trigger: "scheduler", options: { fastSync: true } });
-    assert.notEqual(incremental.id, first.id, "a different kind is a different run");
+    assert.equal(incremental.id, first.id, "kind is not a run identity any more");
+    assert.equal(incremental.created, false);
   });
 
   it("a failed unit insert leaves no half-planned run behind (transactional create)", async () => {

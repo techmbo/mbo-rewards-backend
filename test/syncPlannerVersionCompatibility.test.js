@@ -267,12 +267,14 @@ describe("compatibility among versioned runs", () => {
     );
   });
 
-  it("incompatible OPTIONS are still incompatible, version or not", async () => {
+  it("breadth folds but promoteAfter does not, version or not", async () => {
     const h = harness();
     const slow = await h.enqueue();
     const fast = await h.enqueue({ fast: "true" });
-    assert.notEqual(fast.body.runId, slow.body.runId);
-    assert.equal(fast.body.created, true);
+    // Same planner version, and the non-fast run is a superset: the fast request resumes it.
+    assert.equal(fast.body.runId, slow.body.runId);
+    assert.equal(fast.body.created, false);
+    assert.equal(fast.body.reusedBroaderRun, true);
   });
 });
 

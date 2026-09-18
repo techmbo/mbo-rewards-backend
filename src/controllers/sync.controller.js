@@ -297,14 +297,21 @@ export async function triggerSyncAll(req, res, next) {
     const orchestration = orchestrationServiceFor(req);
     const run = await orchestration.getOrCreateRun({ kind: "full", trigger: "api", options });
     const syncStatus = await orchestration.describeRun(run.id);
+    // A fast request can be satisfied by a broader non-fast run, because non-fast does everything
+    // fast would and more. Say so rather than letting the caller read the 202 as "your fast run
+    // is running": the run they were given refreshes catalogs their request would have skipped.
+    const reusedBroaderRun = !run.created && Boolean(fastSync) && run.options?.fastSync === false;
     return res.status(202).json({
       ok: true,
       status: syncStatus?.status ?? "running",
       message: run.created
         ? "Full sync run created. Poll /sync/status for progress."
-        : "A matching full sync run is already active; resuming it.",
+        : reusedBroaderRun
+          ? "A broader non-fast run is already active; resuming that instead of starting a fast one."
+          : "A matching full sync run is already active; resuming it.",
       runId: run.id,
       created: run.created,
+      reusedBroaderRun,
       syncStatus,
     });
   } catch (error) {

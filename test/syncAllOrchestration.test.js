@@ -165,17 +165,32 @@ describe("POST /sync/all — durable enqueue", () => {
     assert.equal(h.unitsOf(first.body.runId).length, await plannedUnits(), "no duplicate units");
   });
 
-  it("an INCOMPATIBLE request is never silently folded into the active run", async () => {
+  it("a fast request folds into an active non-fast run, and says so truthfully", async () => {
     const h = harness();
     const normal = await h.call({});
     const fast = await h.call({ fast: "true" });
-    assert.equal(fast.body.created, true, "a fast run is not the same work as a full run");
-    assert.notEqual(fast.body.runId, normal.body.runId);
-    assert.equal(h.parents().length, 2);
-    // …and each subsequent request resumes its own matching run.
-    assert.equal((await h.call({ fast: "true" })).body.runId, fast.body.runId);
-    assert.equal((await h.call({})).body.runId, normal.body.runId);
-    assert.equal(h.parents().length, 2);
+    assert.equal(fast.body.created, false, "the broader run already does this work");
+    assert.equal(fast.body.runId, normal.body.runId);
+    assert.equal(fast.body.reusedBroaderRun, true, "the caller is told it got more than it asked for");
+    assert.match(fast.body.message, /broader non-fast run/i);
+    assert.equal(h.parents().length, 1, "no second parent");
+    // A plain resume of the same breadth is a resume, not a broader-run substitution.
+    const again = await h.call({});
+    assert.equal(again.body.runId, normal.body.runId);
+    assert.equal(again.body.created, false);
+    assert.equal(again.body.reusedBroaderRun, false);
+  });
+
+  it("the reverse is NOT folded: a non-fast request beside an active fast run still creates its own", async () => {
+    // Phase 8B deliberately keeps this behaviour. Refusing, or waiting, needs the cancellation and
+    // recovery route that does not exist yet, so the pre-existing outcome is preserved on purpose.
+    const h = harness();
+    const fast = await h.call({ fast: "true" });
+    const normal = await h.call({});
+    assert.equal(normal.body.created, true, "a fast run cannot satisfy a non-fast request");
+    assert.notEqual(normal.body.runId, fast.body.runId);
+    assert.equal(normal.body.reusedBroaderRun, false);
+    assert.equal(h.parents().length, 2, "known Phase 8C gap: two active parents");
   });
 
   it("creates the parent and units transactionally, through the phase 1 service", async () => {
@@ -210,16 +225,76 @@ describe("POST /sync/all — durable enqueue", () => {
 describe("service — run reuse requires compatible execution options", () => {
   const serviceFor = (prisma) => new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState });
 
-  it("findActiveRun matches kind AND the execution options that change the work", async () => {
+  it("findActiveRun is breadth-aware on fastSync and exact on everything else", async () => {
     const { prisma } = createFakePrisma();
     const service = serviceFor(prisma);
     const base = await service.createRun({ kind: "full", trigger: "api", options: { fastSync: false, promoteAfter: true } });
 
     assert.equal((await service.findActiveRun({ kind: "full", options: { fastSync: false, promoteAfter: true } }))?.id, base.id);
-    assert.equal(await service.findActiveRun({ kind: "full", options: { fastSync: true, promoteAfter: true } }), null, "fastSync differs");
+    // A non-fast run does everything a fast run would and more, so it satisfies a fast request.
+    assert.equal(
+      (await service.findActiveRun({ kind: "full", options: { fastSync: true, promoteAfter: true } }))?.id,
+      base.id,
+      "a fast request is satisfied by the broader non-fast run",
+    );
+    // promoteAfter is never relaxed: it changes what the work IS.
     assert.equal(await service.findActiveRun({ kind: "full", options: { fastSync: false, promoteAfter: false } }), null, "promoteAfter differs");
-    assert.equal(await service.findActiveRun({ kind: "incremental", options: { fastSync: false, promoteAfter: true } }), null, "kind differs");
+    // kind no longer changes what a run plans, so it no longer decides reuse.
+    assert.equal(
+      (await service.findActiveRun({ kind: "incremental", options: { fastSync: false, promoteAfter: true } }))?.id,
+      base.id,
+      "kind is not a reuse dimension any more",
+    );
     assert.equal((await service.findActiveRun({}))?.id, base.id, "no filter still finds the active run");
+  });
+
+  it("the parent payload records the same fastSync its own units carry", async () => {
+    // buildSyncPlan used to coerce fastSync true when kind was "incremental" while createRun kept
+    // recording the caller's raw value, so the run advertised one breadth and executed another.
+    // That made the reuse key and /sync/status both lie. Every combination must now agree.
+    for (const [kind, options, expected] of [
+      ["full", { fastSync: false, promoteAfter: true }, false],
+      ["full", { fastSync: true, promoteAfter: true }, true],
+      ["incremental", { promoteAfter: true }, false],
+      ["incremental", { fastSync: true, promoteAfter: true }, true],
+    ]) {
+      const { prisma, rows } = createFakePrisma();
+      // eslint-disable-next-line no-await-in-loop
+      const run = await serviceFor(prisma).createRun({ kind, trigger: "api", options });
+      const parent = rows.find((r) => r.id === run.id);
+      assert.equal(parent.payload.options.fastSync, expected, `parent payload for ${kind}`);
+      const units = rows.filter((r) => r.correlationId === run.id && r.payload?.kind === UNIT_KINDS.NETWORK);
+      assert.ok(units.length > 0, "the plan produced network units");
+      const carried = [...new Set(units.map((u) => u.payload.options.fastSync))];
+      assert.deepEqual(carried, [expected], `every unit for ${kind} carries the payload's breadth`);
+    }
+  });
+
+  it("the asymmetry holds in reverse: a non-fast request is NOT satisfied by an active fast run", async () => {
+    const { prisma } = createFakePrisma();
+    const service = serviceFor(prisma);
+    const fast = await service.createRun({ kind: "full", trigger: "api", options: { fastSync: true, promoteAfter: true } });
+
+    assert.equal((await service.findActiveRun({ options: { fastSync: true, promoteAfter: true } }))?.id, fast.id);
+    assert.equal(
+      await service.findActiveRun({ options: { fastSync: false, promoteAfter: true } }),
+      null,
+      "a fast run may have skipped the catalog refresh a non-fast request asked for",
+    );
+  });
+
+  it("duplicate collapse stays EXACT, so reusing a broader run can never cancel it", async () => {
+    const { prisma, rows } = createFakePrisma();
+    const service = serviceFor(prisma);
+    const broad = await service.getOrCreateRun({ kind: "full", trigger: "api", options: { fastSync: false, promoteAfter: true } });
+    // A fast request reuses it. The collapse pass that follows must not treat the broader run —
+    // or anything else — as this request's duplicate.
+    const reuse = await service.getOrCreateRun({ kind: "full", trigger: "api", options: { fastSync: true, promoteAfter: true } });
+    assert.equal(reuse.id, broad.id);
+    assert.equal(reuse.created, false);
+    const parent = rows.find((r) => r.id === broad.id);
+    assert.equal(parent.status, "RUNNING", "the reused run was not cancelled as a duplicate");
+    assert.notEqual(parent.lastError, "duplicate_active_run");
   });
 
   it("getOrCreateRun creates a separate run for each incompatible option set and resumes matching ones", async () => {
@@ -229,11 +304,14 @@ describe("service — run reuse requires compatible execution options", () => {
     const b = await service.getOrCreateRun({ kind: "full", trigger: "api", options: { fastSync: true, promoteAfter: true } });
     const c = await service.getOrCreateRun({ kind: "full", trigger: "api", options: { fastSync: false, promoteAfter: false } });
     assert.equal(a.created, true);
-    assert.equal(b.created, true);
+    // b asks for less than a, and a is active, so b is answered with a rather than duplicating it.
+    assert.equal(b.created, false, "a fast request folds into the active non-fast run");
+    assert.equal(b.id, a.id);
+    // c differs on promoteAfter, which is never relaxed, so it is genuinely its own run.
     assert.equal(c.created, true);
-    assert.equal(new Set([a.id, b.id, c.id]).size, 3, "three distinct runs");
+    assert.equal(new Set([a.id, c.id]).size, 2, "two distinct runs: breadth folds, promoteAfter does not");
 
-    for (const [run, options] of [[a, { fastSync: false, promoteAfter: true }], [b, { fastSync: true, promoteAfter: true }], [c, { fastSync: false, promoteAfter: false }]]) {
+    for (const [run, options] of [[a, { fastSync: false, promoteAfter: true }], [c, { fastSync: false, promoteAfter: false }]]) {
       const again = await service.getOrCreateRun({ kind: "full", trigger: "scheduler", options });
       assert.equal(again.id, run.id);
       assert.equal(again.created, false);
