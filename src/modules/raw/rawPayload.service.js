@@ -408,6 +408,13 @@ export async function persistRawPayloadsForPreparedRecords(
      * swallowed, so supplying one cannot change what this function does or returns.
      */
     onPhase = null,
+    /**
+     * The lineage state these rows enter in. RECEIVED is the normal ingest path: the row is
+     * evidence of a payload that is ABOUT to become an Entity, and the Entity write lifts it to
+     * STAGED. FAILED is for evidence of a payload that will deliberately never become an Entity,
+     * so nothing will ever lift it and it must not be left looking like work still in progress.
+     */
+    processingStatus = "RECEIVED",
   } = {},
 ) {
   const reportPhase = (phase, count, ms) => {
@@ -436,7 +443,7 @@ export async function persistRawPayloadsForPreparedRecords(
           externalId: record.externalId,
           payload: record.rawData,
           metadata,
-          processingStatus: "RECEIVED",
+          processingStatus,
           observeSchema: false,
           ...(evidence || {}),
         },

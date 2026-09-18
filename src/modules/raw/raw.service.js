@@ -30,6 +30,7 @@ import {
   persistRawPayload,
   linkRawPayloadsToEntities,
   persistRawPayloadsForPreparedRecords,
+  hashPayload,
 } from "./rawPayload.service.js";
 import { cloneRawJson } from "../networkOps/rawPayload.contract.js";
 import { collectEmbeddedCouponsFromCampaigns } from "../coupons/couponVoucherFanOut.js";
@@ -191,6 +192,86 @@ export function buildOptimiseCampaignExternalId(networkSource, rawData, index) {
   const campaignId = resolveOptimiseCampaignId(rawData);
   if (campaignId) return `${networkSource}-campaign-${campaignId}`;
   return `${networkSource}-campaign-index-${index}`;
+}
+
+/**
+ * Awin coupon identity — Phase 9A.0b-v1.
+ *
+ * Awin promotion rows carry NO top-level `id`, `_id`, `advertiserId`, `voucherCode` or `code`, so
+ * every one of them fell through resolveExternalId's chain to the positional
+ * `awin-coupon-${index}` — an identity that is remapped by any change in supplier ordering — or,
+ * where a flat code had been assumed, to the bare voucher code, which two advertisers can share
+ * and which therefore collapses two promotions into one Entity.
+ *
+ * Production FieldRegistry shows what the rows actually carry: `promotionId` (number, non-null,
+ * 100% of observed rows) and nested `advertiser.id` (number, non-null, 100%). `voucher.code` is
+ * present on 28.25% and nullable, so it is content and never identity.
+ *
+ * promotionId alone is not used: nothing proves it unique ACROSS advertisers, and the composite
+ * costs nothing. Both parts are required — there is no positional, voucher-code or generic-id
+ * fallback for an Awin coupon, because every one of those is the defect this replaces.
+ */
+export function buildAwinCouponExternalId(rawData) {
+  const advertiser = rawData?.advertiser?.id;
+  const promotion = rawData?.promotionId;
+  const advertiserId = advertiser == null ? "" : String(advertiser).trim();
+  const promotionId = promotion == null ? "" : String(promotion).trim();
+  // Both parts must be bare digits. FieldRegistry observed both as `number` on 100% of production
+  // rows, so this rejects nothing real — and it is what makes the evidence id below provably
+  // un-collidable: a canonical id's third hyphen-separated segment is ALWAYS numeric, so an id
+  // whose third segment is the word `unresolved` cannot be produced here by any input.
+  if (!AWIN_ID_PART.test(advertiserId) || !AWIN_ID_PART.test(promotionId)) return null;
+  return `awin-coupon-${advertiserId}-${promotionId}`;
+}
+
+/** Bare digits only. See buildAwinCouponExternalId for why this is required, not merely expected. */
+const AWIN_ID_PART = /^[0-9]+$/;
+
+/** The third segment of every evidence-only id. Never numeric, so never a canonical id. */
+const AWIN_UNRESOLVED_SEGMENT = "unresolved";
+
+/**
+ * The evidence-only identity for an Awin promotion whose canonical identity cannot be resolved.
+ *
+ * Such a row must not become an Entity — a weak identity collapses or churns real promotions. But
+ * it must not vanish either: RawPayload is the append-only supplier evidence store, and a row the
+ * supplier actually sent is evidence whether or not we could name it.
+ *
+ * The id is derived from the payload alone, so it is deterministic: the same promotion re-fetched
+ * produces the same id, lands on the same (supplier, account, resource, externalId, payloadHash)
+ * unique key, and is recognised as a duplicate rather than written twice.
+ *
+ * Nothing about it is invented. It does not fall back to the voucher code, which two advertisers
+ * can share; it does not substitute a positional index, which supplier ordering silently remaps;
+ * and it does not fabricate an advertiser.id or promotionId. It says only "this payload, unnamed".
+ */
+export function buildUnresolvedAwinCouponEvidenceExternalId(rawData) {
+  return `awin-coupon-${AWIN_UNRESOLVED_SEGMENT}-${hashPayload(rawData ?? {})}`;
+}
+
+/** True for an id minted by the evidence path. Never true for a canonical Awin coupon id. */
+export function isUnresolvedAwinCouponEvidenceId(externalId) {
+  const local = String(externalId ?? "").split(":").pop();
+  return local.startsWith(`awin-coupon-${AWIN_UNRESOLVED_SEGMENT}-`);
+}
+
+/**
+ * Whether a row is an Awin PROMOTION row, as opposed to a voucher fanned out of a campaign payload.
+ *
+ * collectEmbeddedCouponsFromCampaigns synthesises coupon rows from `vouchers`/`voucher_codes`
+ * arrays and stamps `record_source: "coupon"` on each. Those rows carry neither `advertiser.id`
+ * nor `promotionId` and already have a stable identity of their own, so applying the Awin rule to
+ * them would fail them closed and drop rows that stage correctly today.
+ */
+export function usesAwinCouponIdentity(networkSource, rawData) {
+  if (String(networkSource ?? "").toLowerCase() !== "awin") return false;
+  return rawData?.record_source == null;
+}
+
+/** One coupon row's staging identity, used by BOTH coupon staging paths so they cannot diverge. */
+function resolveCouponEntityExternalId(networkSource, rawData, externalIdPrefix, index) {
+  if (usesAwinCouponIdentity(networkSource, rawData)) return buildAwinCouponExternalId(rawData);
+  return resolveExternalId(rawData, externalIdPrefix, index, "coupon");
 }
 
 export async function cleanupOptimiseCampaignDuplicates(networkSource, sourceAccountKey) {
@@ -517,6 +598,23 @@ async function upsertCouponRows({
   preparedEntries = null,
 }) {
   const results = [];
+  /**
+   * Two identity sources, deliberately not one.
+   *
+   * `preparedEntries` is the batch's own prepared records, and the prepare pass in
+   * stageManyRawEntities already applied the Awin rule and already refused the rows that fail it.
+   * Re-resolving here would recompute an identity that is by construction the same one, which is
+   * the repetition Fix B1 removed — and would risk disagreeing with the RawPayload lineage the
+   * batch has already written under those ids.
+   *
+   * The fallback is for the one caller that genuinely has only raw rows: the vouchers fanned out
+   * of campaign payloads, which are synthesised after the prepare pass and so are in nobody's
+   * prepared records. It resolves identity through the same resolver the prepare pass uses, so the
+   * two paths cannot diverge on what an Awin coupon is called. Its refusal branch is unreachable
+   * today — those rows carry record_source, which takes them off the Awin rule and onto
+   * resolveExternalId, which always answers — and it is kept because that is a property of the
+   * current fan-out, not a guarantee.
+   */
   const prepared = preparedEntries
     ? preparedEntries.map((entry) => ({
         rawData: entry.record.originalPayload,
@@ -524,15 +622,32 @@ async function upsertCouponRows({
         preparedRecord: entry.record,
         alreadyReceived: entry.alreadyReceived === true,
       }))
-    : rows.map((rawData, index) => ({
-        rawData: rawData ?? {},
-        externalId: withAccountScopedExternalId(
-          resolveExternalId(rawData ?? {}, externalIdPrefix, index),
-          sourceAccountKey,
-        ),
-        preparedRecord: null,
-        alreadyReceived: false,
-      }));
+    : rows
+        .map((rawData, index) => {
+          const row = rawData ?? {};
+          const resolvedId = resolveCouponEntityExternalId(
+            networkSource,
+            row,
+            externalIdPrefix,
+            index,
+          );
+          if (!resolvedId) {
+            // Fail closed, exactly as a conversion without a network id does: a weak identity here
+            // would collapse or churn rows, which is worse than not staging the row at all.
+            logger.warn(
+              { networkSource, entityType: "coupon", index },
+              "coupon row skipped — missing supplier identity (weak dedupe forbidden)",
+            );
+            return null;
+          }
+          return {
+            rawData: row,
+            externalId: withAccountScopedExternalId(resolvedId, sourceAccountKey),
+            preparedRecord: null,
+            alreadyReceived: false,
+          };
+        })
+        .filter(Boolean);
 
   if (!alreadyObserved) {
     // Batch observation also writes each row's RECEIVED lineage, exactly as the caller's own
@@ -626,12 +741,44 @@ async function stageManyRawEntities({
     };
 
     const prepareStart = Date.now();
+    /**
+     * Coupon rows whose canonical identity could not be resolved.
+     *
+     * They are kept OUT of preparedRecords, so no Entity is created for them and they never reach
+     * upsertCouponRows or upsertCouponFromSync. They are not discarded: each one is persisted
+     * below as immutable RawPayload evidence in the FAILED state, under an id derived from the
+     * payload rather than guessed from it.
+     */
+    const unresolvedCouponEvidence = [];
     const preparedRecords = rows
       .map((rawData, index) => {
         const original = cloneRawJson(rawData ?? {});
         const resolvedId = useOptimiseCampaignIds
           ? buildOptimiseCampaignExternalId(networkSource, original, index)
-          : resolveExternalId(original, externalIdPrefix, index, entityType);
+          : entityType === "coupon"
+            ? resolveCouponEntityExternalId(networkSource, original, externalIdPrefix, index)
+            : resolveExternalId(original, externalIdPrefix, index, entityType);
+        if (entityType === "coupon" && !resolvedId) {
+          // Fail closed for the Entity, open for the evidence. The refusal is the same one
+          // upsertCouponRows makes, so lineage and the Entity cannot disagree about which rows
+          // were staged — but the payload itself is still recorded, as FAILED, below.
+          logger.warn(
+            { networkSource, entityType, index },
+            "coupon row skipped — missing supplier identity (weak dedupe forbidden)",
+          );
+          if (usesAwinCouponIdentity(networkSource, original)) {
+            unresolvedCouponEvidence.push({
+              networkSource,
+              entityType,
+              externalId: withAccountScopedExternalId(
+                buildUnresolvedAwinCouponEvidenceExternalId(original),
+                sourceAccountKey,
+              ),
+              rawData: original,
+            });
+          }
+          return null;
+        }
         if (entityType === "conversion" && !resolvedId) {
           logger.warn(
             {
@@ -677,6 +824,34 @@ async function stageManyRawEntities({
         { err: error?.message || String(error), networkSource, entityType, rows: preparedRecords.length },
         "raw payload persist before entity staging failed",
       );
+    }
+
+    // Evidence for the rows that will deliberately never become Entities. Written as FAILED, with
+    // no entityId, and never linked afterwards: the relink pass below walks preparedRecords, which
+    // these are not in. Re-ingesting the same payload produces the same id and the same hash, so
+    // persistRawPayload recognises the duplicate and does not write a second row.
+    if (unresolvedCouponEvidence.length) {
+      try {
+        await persistRawPayloadsForPreparedRecords(unresolvedCouponEvidence, {
+          metadata: {
+            sourceAccountKey: sourceAccountKey ?? null,
+            // A reason code, not a payload excerpt: no coupon code, advertiser name or URL.
+            failureReason: "identity_resolution_failed",
+          },
+          evidence,
+          processingStatus: "FAILED",
+        });
+      } catch (error) {
+        logger.warn(
+          {
+            err: error?.message || String(error),
+            networkSource,
+            entityType,
+            rows: unresolvedCouponEvidence.length,
+          },
+          "unresolved coupon evidence persist failed",
+        );
+      }
     }
 
   let batchUpsertMs = 0;
