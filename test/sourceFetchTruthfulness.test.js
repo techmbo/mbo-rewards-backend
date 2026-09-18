@@ -116,8 +116,12 @@ describe("9A.0a-i — Rakuten: cap exhaustion is not natural exhaustion", () => 
 
 describe("9A.0a-i — Impact: a swallowed hard failure is no longer a success", () => {
   it("the catalogs run wraps fetchProducts with the failure signal", () => {
+    // 9A.0a-iii widened the wrapper: catalogs now has a SECOND way of coming back short (the
+    // page cap), so the failure key moved into withSourceOutcome's failureKeys. The claim under
+    // test is unchanged — a swallowed productFetchSkipped still reaches the run.
     const block = WAVEE_SRC.split('sourceObject: "catalogs",')[1].split("});")[0];
-    assert.match(block, /withFetchFailureSignal\(stats, "productFetchSkipped"/);
+    assert.match(block, /withSourceOutcome\(stats, \(\) => adapter\.fetchProducts/);
+    assert.match(block, /failureKeys: \["productFetchSkipped"\]/);
     assert.match(block, /IMPACT_CATALOGS_FETCH_FAILED/);
   });
 
@@ -214,7 +218,7 @@ describe("9A.0a-i — Partnerize: three states stay three states", () => {
 
 describe("9A.0a-i — Optimise: slice completeness survives to the run", () => {
   it("the run reads the pagination ref the walk fills", () => {
-    const execute = RUNS_SRC.split("execute: async () => {")[1].split("\n    },")[0];
+    const execute = RUNS_SRC.split("const result = await fetchOptimiseResource(")[1].split("\n      }),")[0];
     assert.match(execute, /const pagination = options\.paginationRef\?\.value \?\? null;/);
     assert.match(execute, /pagination \? pagedOutcome\(result\.rows, pagination\) : result\.rows/);
   });

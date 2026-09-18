@@ -22,6 +22,7 @@ import {
   evidenceFromRunSummary,
 } from "./sourceObjectRuns.js";
 import { resultRows } from "../modules/networkOps/sourceObjectSync.service.js";
+import { withSourceOutcome } from "./sourceFetchOutcome.js";
 
 function validDate(value) {
   if (!value) return null;
@@ -161,7 +162,11 @@ export async function syncAdmitadAccount(accountLabel = "default") {
       ...runCtx,
       sourceObject: "programs",
       endpoint: "GET /advcampaigns/",
-      execute: () => adapter.fetchCampaigns({}, stats),
+      execute: () =>
+        withSourceOutcome(stats, () => adapter.fetchCampaigns({}, stats), {
+          truncationCode: "ADMITAD_PROGRAMS_PAGE_CAP",
+          endpoint: "GET /advcampaigns/",
+        }),
     });
     sourceObjectRuns.push(summarizeSourceObjectRun(run));
     campaigns = resultRows(run);
@@ -173,7 +178,11 @@ export async function syncAdmitadAccount(accountLabel = "default") {
       ...runCtx,
       sourceObject: "coupons",
       endpoint: "GET /coupons/",
-      execute: () => adapter.fetchCoupons({}, stats),
+      execute: () =>
+        withSourceOutcome(stats, () => adapter.fetchCoupons({}, stats), {
+          truncationCode: "ADMITAD_COUPONS_PAGE_CAP",
+          endpoint: "GET /coupons/",
+        }),
     });
     sourceObjectRuns.push(summarizeSourceObjectRun(run));
     coupons = resultRows(run);

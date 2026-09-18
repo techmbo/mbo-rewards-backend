@@ -2,6 +2,16 @@ import { createHttpClient, requestWithRetry } from "../core/httpClient.js";
 import { createRateLimiter } from "../core/rateLimiter.js";
 import { asArray } from "../core/normalize.js";
 import { SUPPLIER_CAPABILITIES } from "./contract.js";
+import { EXHAUSTION, recordExhaustion } from "../core/paginationExhaustion.js";
+
+/**
+ * The hard ceiling on pages one fetchPaginated walk will request.
+ *
+ * Unchanged in value and in position: the loop capped itself at 500 before this phase too. What
+ * changes is that the exit is now named, so a walk cut short by our own bound stops reporting the
+ * same SUCCESS as a walk that reached the end of the result set.
+ */
+const IMPACT_MAX_PAGE_COUNT = 500;
 
 /**
  * Impact Publisher (MediaPartner) adapter — Wave E.
@@ -32,11 +42,28 @@ function extractCollection(data, keys = []) {
   return [];
 }
 
-function hasNextPage(data, page, pageSize, rowsCount) {
-  if (data?.["@nextpageuri"] || data?.nextpageuri || data?.NextPageUri) return true;
-  if (data?.["@numpages"] != null) return page < Number(data["@numpages"]);
-  if (data?.NumPages != null) return page < Number(data.NumPages);
-  return rowsCount >= pageSize;
+/**
+ * Whether another page follows, and — when it does not — WHICH signal said so.
+ *
+ * The decision was always made here; only the verdict left the function, so every stop looked
+ * alike. numpages is Impact's own count of the result set: exhausting it is the supplier
+ * asserting the end. The trailing `rowsCount >= pageSize` is a heuristic and is labelled as one.
+ */
+function nextPageDecision(data, page, pageSize, rowsCount) {
+  if (data?.["@nextpageuri"] || data?.nextpageuri || data?.NextPageUri) {
+    return { hasNext: true, reason: null };
+  }
+  if (data?.["@numpages"] != null) {
+    const hasNext = page < Number(data["@numpages"]);
+    return { hasNext, reason: hasNext ? null : EXHAUSTION.SUPPLIER_TOTAL_REACHED };
+  }
+  if (data?.NumPages != null) {
+    const hasNext = page < Number(data.NumPages);
+    return { hasNext, reason: hasNext ? null : EXHAUSTION.SUPPLIER_TOTAL_REACHED };
+  }
+  const hasNext = rowsCount >= pageSize;
+  if (hasNext) return { hasNext: true, reason: null };
+  return { hasNext: false, reason: rowsCount === 0 ? EXHAUSTION.EMPTY_PAGE : EXHAUSTION.SHORT_PAGE };
 }
 
 /**
@@ -72,6 +99,7 @@ export function createImpactAdapter({
     const pages = [];
     let page = Number(query.Page ?? query.page ?? 1);
     const pageSize = Number(query.PageSize ?? query.pageSize ?? query.limit ?? 100);
+    let reason = EXHAUSTION.UNKNOWN;
 
     for (;;) {
       await impactRateLimiter.acquireSlot();
@@ -94,12 +122,24 @@ export function createImpactAdapter({
       pages.push({ page, count: rows.length });
       all.push(...rows);
 
-      if (!hasNextPage(data, page, pageSize, rows.length) || rows.length === 0) break;
+      const decision = nextPageDecision(data, page, pageSize, rows.length);
+      if (!decision.hasNext || rows.length === 0) {
+        // An empty page ends the walk whatever the pagination metadata claims, and that is what
+        // ended it, so it outranks a `hasNext` that merely failed to be true.
+        reason = rows.length === 0 ? EXHAUSTION.EMPTY_PAGE : decision.reason ?? EXHAUSTION.UNKNOWN;
+        break;
+      }
       page += 1;
-      // Safety: hard cap to avoid infinite loops on malformed pagination
-      if (page > 500) break;
+      // Safety: hard cap to avoid infinite loops on malformed pagination. It is a TRUNCATION —
+      // the supplier said another page follows and we declined to ask for it — so unlike every
+      // other exit here it is recorded as our own limit and not as the end of the catalog.
+      if (page > IMPACT_MAX_PAGE_COUNT) {
+        reason = EXHAUSTION.PAGE_CAP;
+        break;
+      }
     }
 
+    recordExhaustion(stats, reason, { pagesFetched: pages.length });
     return { rows: all, pages };
   }
 

@@ -5,7 +5,7 @@
 
 import { prisma } from "../database/prisma.js";
 import { toSyncObservabilityDto } from "../modules/networkOps/syncObservability.contract.js";
-import { pagedOutcome } from "./sourceFetchOutcome.js";
+import { pagedOutcome, withSourceOutcome } from "./sourceFetchOutcome.js";
 import {
   executeSourceObjectRun,
   resultRows,
@@ -204,18 +204,24 @@ export async function fetchOptimiseSourceObject(
     networkAccountId: ctx.networkAccountId,
     sourceObject: identity.sourceObject,
     endpoint: identity.endpoint,
-    execute: async () => {
-      const result = await fetchOptimiseResource(resource, credentials, fn, options);
-      if (result.error) throw result.error;
-      // The walk's own completeness evidence used to stop here: only `rows` was returned, so a
-      // slice that KNEW more pages remained reported an indistinguishable SUCCESS. It lives in a
-      // closure the fetch fn fills rather than on the resource result, so it is handed in through
-      // a ref and read back once fn() has run. A sliced walk is expected and healthy, so this is
-      // metadata and never `partial`: it exists so a later reader can answer "was this slice the
-      // terminal page of the catalog walk?" without re-deriving it.
-      const pagination = options.paginationRef?.value ?? null;
-      return pagination ? pagedOutcome(result.rows, pagination) : result.rows;
-    },
+    // options.exhaustionStats is the bag THIS call's pager writes its exhaustion reason to. It is
+    // created per call by the caller rather than per account, because these resources are fetched
+    // concurrently: one shared bag would be written by several walks at once and no snapshot could
+    // tell them apart. Absent for the resources whose pagers record nothing, and then this reduces
+    // to exactly what it was.
+    execute: async () =>
+      withSourceOutcome(options.exhaustionStats ?? null, async () => {
+        const result = await fetchOptimiseResource(resource, credentials, fn, options);
+        if (result.error) throw result.error;
+        // The walk's own completeness evidence used to stop here: only `rows` was returned, so a
+        // slice that KNEW more pages remained reported an indistinguishable SUCCESS. It lives in a
+        // closure the fetch fn fills rather than on the resource result, so it is handed in through
+        // a ref and read back once fn() has run. A sliced walk is expected and healthy, so this is
+        // metadata and never `partial`: it exists so a later reader can answer "was this slice the
+        // terminal page of the catalog walk?" without re-deriving it.
+        const pagination = options.paginationRef?.value ?? null;
+        return pagination ? pagedOutcome(result.rows, pagination) : result.rows;
+      }),
   });
 
   return {
@@ -250,6 +256,12 @@ export function includeTrackierResource(requested, resource) {
   return (TRACKIER_SUPPORTING[requested] || []).includes(resource);
 }
 
+/** A non-array supplier body, as opposed to an array of rows or an outcome envelope wrapping one. */
+function isResourceBody(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return !Array.isArray(value.rows);
+}
+
 export async function fetchTrackierSourceObject(
   resource,
   credentials,
@@ -275,12 +287,15 @@ export async function fetchTrackierSourceObject(
     networkAccountId: ctx.networkAccountId,
     sourceObject: identity.sourceObject,
     endpoint: identity.endpoint,
-    execute: async () => {
-      const result = await fetchTrackierResource(resource, credentials, fn, options);
-      if (result.error) throw result.error;
-      if (Array.isArray(result.rows) && result.rows.length) return result.rows;
-      return result.data ?? result.rows;
-    },
+    // Same per-call bag as Optimise, for the same reason: this job awaits its Trackier source
+    // objects with Promise.all.
+    execute: async () =>
+      withSourceOutcome(options.exhaustionStats ?? null, async () => {
+        const result = await fetchTrackierResource(resource, credentials, fn, options);
+        if (result.error) throw result.error;
+        if (Array.isArray(result.rows) && result.rows.length) return result.rows;
+        return result.data ?? result.rows;
+      }),
   });
 
   const rows = resultRows(run);
@@ -288,7 +303,10 @@ export async function fetchTrackierSourceObject(
     resource,
     endpoint: identity.endpoint,
     rows,
-    data: !rows.length && run.result && !Array.isArray(run.result) ? run.result : null,
+    // `data` is the non-array body a resource like campaignsCount answers with. An outcome object
+    // — {rows, metadata} — is NOT that: it is this run's own envelope, and handing it back as the
+    // resource's body would present pagination evidence as supplier data.
+    data: !rows.length && isResourceBody(run.result) ? run.result : null,
     error: run.status === "FAILED" ? { message: run.error?.message } : null,
     skipped: false,
     syncRun: summarizeSourceObjectRun(run),

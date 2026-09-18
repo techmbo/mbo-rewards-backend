@@ -1,5 +1,6 @@
 import { createHttpClient, getRateLimitWaitMs, requestWithRetry } from "../core/httpClient.js";
 import { createRateLimiter } from "../core/rateLimiter.js";
+import { EXHAUSTION, recordExhaustion } from "../core/paginationExhaustion.js";
 import {
   firstNonEmpty,
   pickTrackierCampaignName,
@@ -143,11 +144,27 @@ function extractPageToken(responseData) {
   );
 }
 
-function hasMoreCampaignPages(responseData, page, pageSize, rowsCount) {
+/**
+ * Whether another campaign page follows, and — when it does not — WHICH signal said so.
+ *
+ * `count`/`total` is Trackier's own size for the whole result set, so walking past it is the
+ * supplier asserting the end. The trailing `rowsCount >= pageSize` is our own inference from the
+ * page we happened to get, and it is labelled as one.
+ */
+function campaignPagesDecision(responseData, page, pageSize, rowsCount) {
   const body = getResponseBody(responseData);
   const total = body?.count ?? body?.total ?? responseData?.count;
-  if (total != null) return page * pageSize < Number(total);
-  return rowsCount >= pageSize;
+  if (total != null) {
+    const hasMore = page * pageSize < Number(total);
+    return { hasMore, reason: hasMore ? null : EXHAUSTION.SUPPLIER_TOTAL_REACHED };
+  }
+  const hasMore = rowsCount >= pageSize;
+  if (hasMore) return { hasMore: true, reason: null };
+  return { hasMore: false, reason: rowsCount === 0 ? EXHAUSTION.EMPTY_PAGE : EXHAUSTION.SHORT_PAGE };
+}
+
+function hasMoreCampaignPages(responseData, page, pageSize, rowsCount) {
+  return campaignPagesDecision(responseData, page, pageSize, rowsCount).hasMore;
 }
 
 function hasMoreNumberedPages(responseData, page, pageSize, rowsCount) {
@@ -203,9 +220,14 @@ async function fetchCampaignPages(
   httpClient,
   endpoint,
   baseParams = {},
-  { singlePage = false, retries, timeoutMs } = {},
+  { singlePage = false, retries, timeoutMs, stats = null } = {},
 ) {
   const rows = [];
+  // No page cap on this walk, so the initial value is only reachable if a branch ever stops
+  // naming its reason.
+  let reason = EXHAUSTION.UNKNOWN;
+  let slicedDeliberately = false;
+  let pagesFetched = 0;
   let page = Number(baseParams.page ?? 1);
   const limit = Number(baseParams.limit ?? TRACKIER_PAGE_LIMIT);
   const staticParams = { ...baseParams };
@@ -230,15 +252,22 @@ async function fetchCampaignPages(
 
     const pageRows = extractRows(response.data, ["campaigns"]);
     rows.push(...pageRows);
+    pagesFetched += 1;
 
+    // A deliberate one-page slice claims nothing about exhaustion, so it records nothing. The
+    // break itself is unchanged and still precedes the continuation check.
+    slicedDeliberately = singlePage;
     if (singlePage) break;
 
     if (!hasMoreCampaignPages(response.data, page, limit, pageRows.length)) {
+      // The same predicate, asked which signal ended the walk rather than whether to continue.
+      reason = campaignPagesDecision(response.data, page, limit, pageRows.length).reason ?? EXHAUSTION.UNKNOWN;
       break;
     }
     page += 1;
   }
 
+  if (!slicedDeliberately) recordExhaustion(stats, reason, { pagesFetched });
   return rows;
 }
 
@@ -317,12 +346,18 @@ async function fetchPageTokenPaginated(httpClient, endpoint, baseParams = {}, op
     singlePage = false,
     retries,
     timeoutMs,
+    stats = null,
   } = options;
 
   const rows = [];
   let pageToken = baseParams.pageToken ?? null;
   const staticParams = { ...baseParams };
   delete staticParams.pageToken;
+  // No page cap on this walk either: it follows the supplier's cursor until the supplier stops
+  // issuing one.
+  let reason = EXHAUSTION.UNKNOWN;
+  let slicedDeliberately = false;
+  let pagesFetched = 0;
 
   for (;;) {
     const params = { ...staticParams };
@@ -341,14 +376,26 @@ async function fetchPageTokenPaginated(httpClient, endpoint, baseParams = {}, op
 
     const pageRows = extractRows(response.data, collectionKeys);
     rows.push(...pageRows);
+    pagesFetched += 1;
 
+    slicedDeliberately = singlePage;
     if (singlePage) break;
 
     const nextToken = extractPageToken(response.data);
-    if (!nextToken || nextToken === pageToken || pageRows.length === 0) break;
+    if (!nextToken || nextToken === pageToken || pageRows.length === 0) {
+      // Order matches the condition's own short-circuit. An absent cursor is the SUPPLIER saying
+      // there is nothing after this page — the strongest evidence any of these pagers gets. A
+      // repeated cursor is neither an end nor a continuation: it is a defensive stop with no
+      // evidence, so it is recorded as unknown and never as a confirmed end.
+      if (!nextToken) reason = EXHAUSTION.SUPPLIER_NEXT_TOKEN_ABSENT;
+      else if (nextToken === pageToken) reason = EXHAUSTION.UNKNOWN;
+      else reason = EXHAUSTION.EMPTY_PAGE;
+      break;
+    }
     pageToken = nextToken;
   }
 
+  if (!slicedDeliberately) recordExhaustion(stats, reason, { pagesFetched });
   return rows;
 }
 

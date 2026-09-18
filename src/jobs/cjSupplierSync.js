@@ -22,6 +22,7 @@ import {
   evidenceFromRunSummary,
 } from "./sourceObjectRuns.js";
 import { resultRows } from "../modules/networkOps/sourceObjectSync.service.js";
+import { withSourceOutcome } from "./sourceFetchOutcome.js";
 
 async function resolveCjCredentials(accountLabel = "default") {
   const accessToken =
@@ -105,7 +106,15 @@ export async function syncCjAccount(accountLabel = "default") {
       ...runCtx,
       sourceObject: "advertisers",
       endpoint: "GET /v2/advertiser-lookup",
-      execute: () => adapter.fetchCampaigns({ "advertiser-ids": "joined" }, stats),
+      // fetchPaged stops at MAX_PAGE_COUNT and returns what it has. That exit is a truncation and
+      // must not read as a complete advertiser list; every other exit is healthy and only
+      // carries its evidence. The snapshot is per source object, so the links walk below cannot
+      // inherit this one's record off the shared stats bag.
+      execute: () =>
+        withSourceOutcome(stats, () => adapter.fetchCampaigns({ "advertiser-ids": "joined" }, stats), {
+          truncationCode: "CJ_ADVERTISER_LOOKUP_PAGE_CAP",
+          endpoint: "GET /v2/advertiser-lookup",
+        }),
     });
     sourceObjectRuns.push(summarizeSourceObjectRun(run));
     campaigns = resultRows(run);
@@ -117,7 +126,11 @@ export async function syncCjAccount(accountLabel = "default") {
       ...runCtx,
       sourceObject: "links",
       endpoint: "GET /v2/link-search",
-      execute: () => adapter.fetchLinks({ "advertiser-ids": "joined" }, stats),
+      execute: () =>
+        withSourceOutcome(stats, () => adapter.fetchLinks({ "advertiser-ids": "joined" }, stats), {
+          truncationCode: "CJ_LINK_SEARCH_PAGE_CAP",
+          endpoint: "GET /v2/link-search",
+        }),
     });
     sourceObjectRuns.push(summarizeSourceObjectRun(run));
     links = resultRows(run);
@@ -129,7 +142,15 @@ export async function syncCjAccount(accountLabel = "default") {
       ...runCtx,
       sourceObject: "coupons",
       endpoint: "GET /v2/link-search?promotion-type=coupon",
-      execute: () => adapter.fetchCoupons({ "advertiser-ids": "joined" }, stats),
+      // fetchCoupons DELEGATES to fetchLinks with promotion-type=coupon, so it walks the same
+      // pager and writes the same key. It is signalled here and nowhere inside the adapter:
+      // wrapping both would report one walk's cap twice, and this run's snapshot is what
+      // distinguishes the coupon walk's record from the links walk's.
+      execute: () =>
+        withSourceOutcome(stats, () => adapter.fetchCoupons({ "advertiser-ids": "joined" }, stats), {
+          truncationCode: "CJ_LINK_SEARCH_PAGE_CAP",
+          endpoint: "GET /v2/link-search?promotion-type=coupon",
+        }),
     });
     sourceObjectRuns.push(summarizeSourceObjectRun(run));
     coupons = resultRows(run);

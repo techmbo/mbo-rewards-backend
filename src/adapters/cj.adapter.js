@@ -3,6 +3,7 @@ import { createHttpClient, requestWithRetry } from "../core/httpClient.js";
 // Same functions, same behaviour; CJ's tests are unchanged and prove it.
 import { decodeXml, tagBlocks, tagText } from "../core/xml.js";
 import { SUPPLIER_CAPABILITIES } from "./contract.js";
+import { EXHAUSTION, recordExhaustion } from "../core/paginationExhaustion.js";
 
 const DEFAULT_RECORDS_PER_PAGE = 100;
 
@@ -31,6 +32,14 @@ export const CJ_ADVERTISER_RELATIONSHIP_SCOPES = Object.freeze({
   advertisers: "joined",
   available_advertisers: "notjoined",
 });
+/**
+ * The hard ceiling on pages one fetchPaged walk will request.
+ *
+ * It has always been here; what it never did was SAY so. Exiting on the loop bound returned the
+ * rows gathered so far and was indistinguishable from a walk that reached the end of the catalog,
+ * so a truncated read reported SUCCESS. The cap stays exactly where it was — this phase changes
+ * only whether the caller can tell which exit fired.
+ */
 const MAX_PAGE_COUNT = 1000;
 
 
@@ -236,6 +245,12 @@ export function createCjAdapter({
     delete base["records-per-page"];
     const out = [];
 
+    // Why the walk stopped, decided at the branch that fires rather than inferred afterwards.
+    // Left as PAGE_CAP so that falling out of the `for` bound — the one exit with no `break` —
+    // is what gets reported when no branch claimed the stop.
+    let reason = EXHAUSTION.PAGE_CAP;
+    let pagesFetched = 0;
+
     for (let i = 0; i < MAX_PAGE_COUNT; i += 1) {
       // eslint-disable-next-line no-await-in-loop
       const xml = await getXml(client, path, {
@@ -245,13 +260,31 @@ export function createCjAdapter({
       }, stats);
       const rows = extractor(xml);
       out.push(...rows);
+      pagesFetched += 1;
       const meta = pageStats(xml, containerTag);
-      if (!rows.length) break;
-      if (meta.totalMatched != null && out.length >= meta.totalMatched) break;
-      if (meta.recordsReturned != null && meta.recordsReturned < recordsPerPage) break;
-      if (rows.length < recordsPerPage) break;
+      if (!rows.length) {
+        reason = EXHAUSTION.EMPTY_PAGE;
+        break;
+      }
+      if (meta.totalMatched != null && out.length >= meta.totalMatched) {
+        // total-matched is CJ's own count of the result set, so reaching it is the supplier
+        // asserting the end and not an inference drawn from the page we happened to get.
+        reason = EXHAUSTION.SUPPLIER_TOTAL_REACHED;
+        break;
+      }
+      if (meta.recordsReturned != null && meta.recordsReturned < recordsPerPage) {
+        // records-returned is supplier metadata, but "fewer than asked for" is still OUR inference
+        // that nothing follows. A short page mid-catalog ends the walk early and looks complete.
+        reason = EXHAUSTION.SHORT_PAGE;
+        break;
+      }
+      if (rows.length < recordsPerPage) {
+        reason = EXHAUSTION.SHORT_PAGE;
+        break;
+      }
       page += 1;
     }
+    recordExhaustion(stats, reason, { pagesFetched });
     return out;
   }
 

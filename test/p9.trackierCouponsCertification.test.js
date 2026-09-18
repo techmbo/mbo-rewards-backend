@@ -587,7 +587,9 @@ describe("read-only, and the other probes unchanged", () => {
     assert.equal(spy.calls.length, 2);
     assert.equal(spy.calls[0].config.timeout, undefined, "no timeout imposed");
     assert.equal(rows.length, 2);
-    assert.match(codeOf(SYNC_SRC), /adapter\.fetchCoupons\(\)/);
+    // 9A.0a-iii hands the walk its own exhaustion bag. The options object is additive: the
+    // params are still empty and the page token is still followed, which is what this pins.
+    assert.match(codeOf(SYNC_SRC), /adapter\.fetchCoupons\(\{\}, \{ stats: trackierCouponStats \}\)/);
   });
 
   it("leaves fetchDeals on the same pager unchanged", async () => {

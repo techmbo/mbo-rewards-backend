@@ -15,6 +15,8 @@
  * The signal is read by SNAPSHOT: a key's value is captured before the call and compared after, so
  * one source object can never inherit a flag another one left on the shared per-account stats.
  */
+import { EXHAUSTION, EXHAUSTION_STATS_KEY } from "../core/paginationExhaustion.js";
+
 
 /**
  * Wrap one adapter call, reporting PARTIAL only when `statsKey` changed during THIS call.
@@ -73,6 +75,105 @@ export function pagedOutcome(rows, pagination = {}) {
       },
     },
   };
+}
+
+/* ------------------------------------------------------------------ exhaustion evidence ----- */
+
+// The vocabulary itself lives in core, because the adapters that record it cannot import from
+// jobs/. Re-exported here so the record and the helper that reads it stay one import apart.
+export { EXHAUSTION, EXHAUSTION_STATS_KEY, recordExhaustion } from "../core/paginationExhaustion.js";
+
+/**
+ * One adapter call, reported truthfully: hard failure, cap truncation, or healthy with evidence.
+ *
+ * Supersedes withFetchFailureSignal for sources that also carry exhaustion evidence; the older
+ * helper stays for the 9A.0a-i call sites that only need the failure half.
+ *
+ * Precedence is deliberate. A swallowed hard failure outranks any exhaustion record, because a
+ * pager that died mid-walk may still have written one. A PAGE_CAP exhaustion is itself a
+ * truncation and reports PARTIAL. Every other reason is healthy: a heuristic stop is still a
+ * complete-looking read, and downgrading it would flood PARTIAL with runs that are probably fine.
+ */
+export async function withSourceOutcome(
+  stats,
+  fetch,
+  { failureKeys = [], errorCode, truncationCode = null, endpoint = null } = {},
+) {
+  const failureBefore = new Map(failureKeys.map((key) => [key, stats ? stats[key] : undefined]));
+  const exhaustionBefore = stats ? stats[EXHAUSTION_STATS_KEY] : undefined;
+
+  const fetched = await fetch();
+
+  for (const key of failureKeys) {
+    const after = stats ? stats[key] : undefined;
+    if (after !== undefined && after !== failureBefore.get(key)) {
+      const base = asOutcome(fetched);
+      return {
+        rows: base.rows,
+        partial: true,
+        metadata: {
+          ...base.metadata,
+          fetchFailed: true,
+          errorCode,
+          detail: safeDetail(after),
+          ...(endpoint ? { endpoint } : {}),
+        },
+      };
+    }
+  }
+
+  const record = stats ? stats[EXHAUSTION_STATS_KEY] : undefined;
+  // Identity, not truthiness: a record left by the PREVIOUS source object on a shared stats bag is
+  // the same object reference, so it is not this call's evidence and must not be reported as it.
+  if (!record || record === exhaustionBefore) return fetched;
+
+  const pagination = {
+    exhausted: record.exhausted === true,
+    exhaustionReason: record.reason ?? EXHAUSTION.UNKNOWN,
+    supplierAssertedExhaustion: record.supplierAsserted === true,
+    ...(Number.isFinite(record.pagesFetched) ? { pagesFetched: record.pagesFetched } : {}),
+  };
+  const base = asOutcome(fetched);
+  if (record.reason === EXHAUSTION.PAGE_CAP) {
+    return {
+      rows: base.rows,
+      partial: true,
+      metadata: {
+        ...base.metadata,
+        fetchFailed: false,
+        truncated: true,
+        // A cap exit is a DIFFERENT defect from a swallowed error, so it carries its own code:
+        // "we stopped asking" must never be read back as "the supplier refused us".
+        errorCode: truncationCode ?? errorCode,
+        pagination,
+        ...(endpoint ? { endpoint } : {}),
+      },
+    };
+  }
+  return {
+    rows: base.rows,
+    ...(base.partial ? { partial: true } : {}),
+    metadata: { ...base.metadata, pagination, ...(endpoint ? { endpoint } : {}) },
+  };
+}
+
+/**
+ * Read a fetch() return value as an outcome without losing what it already carried.
+ *
+ * execute() may legitimately answer a bare array OR an outcome object a nested helper already
+ * built — Optimise's sliced walk returns pagedOutcome(). Flattening that to `rows` would discard
+ * the slice evidence 9A.0a-i added, so the existing metadata is merged rather than replaced.
+ */
+function asOutcome(value) {
+  if (Array.isArray(value)) return { rows: value, partial: false, metadata: {} };
+  if (value && typeof value === "object" && Array.isArray(value.rows)) {
+    return {
+      rows: value.rows,
+      partial: value.partial === true,
+      metadata: value.metadata && typeof value.metadata === "object" ? value.metadata : {},
+    };
+  }
+  return { rows: [], partial: false, metadata: {} };
 }
 
 /** A short, safe string. Adapters store an HTTP status or a message; nothing else is copied. */

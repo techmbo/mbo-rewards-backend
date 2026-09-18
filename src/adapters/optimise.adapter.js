@@ -1,4 +1,5 @@
 import { createHttpClient, requestWithRetry } from "../core/httpClient.js";
+import { EXHAUSTION, recordExhaustion } from "../core/paginationExhaustion.js";
 import { createRateLimiter } from "../core/rateLimiter.js";
 import { buildBoundedFeedUrl, parseFirstFeedRecord } from "./optimiseFeedSample.js";
 import {
@@ -432,10 +433,15 @@ function assertCampaignId(campaignId) {
   return text;
 }
 
-async function fetchOffsetPaginated(httpClient, endpoint, baseParams) {
+async function fetchOffsetPaginated(httpClient, endpoint, baseParams, { stats = null } = {}) {
   const rows = [];
   let offset = 0;
   const limit = Number(baseParams.limit ?? OPTIMISE_PAGE_LIMIT);
+  // This walk has ONE exit and it is a heuristic: Optimise sends no total, no cursor and no
+  // has-next on these endpoints, so "a page shorter than limit is the last page" is the only
+  // signal there is. It is recorded as the inference it is and never as a supplier confirmation.
+  let reason = EXHAUSTION.UNKNOWN;
+  let pagesFetched = 0;
 
   for (;;) {
     const response = await requestWithOptimiseLimits(() =>
@@ -450,13 +456,16 @@ async function fetchOffsetPaginated(httpClient, endpoint, baseParams) {
 
     const pageRows = extractRows(response.data);
     rows.push(...pageRows);
+    pagesFetched += 1;
 
     if (pageRows.length < limit) {
+      reason = pageRows.length === 0 ? EXHAUSTION.EMPTY_PAGE : EXHAUSTION.SHORT_PAGE;
       break;
     }
     offset += limit;
   }
 
+  recordExhaustion(stats, reason, { pagesFetched });
   return rows;
 }
 
@@ -879,11 +888,16 @@ export function createOptimiseAdapter({
         ...params,
       });
     },
-    fetchVoucherCodes(params = {}) {
-      return fetchOffsetPaginated(httpClient, "/vouchercodes", { ...commonParams, ...params });
+    /**
+     * `options` carries only the stats bag the walk records its exhaustion reason on. Calling
+     * with no second argument is byte-for-byte what it was: recordExhaustion no-ops on a null
+     * bag, so fetchCoupons and every existing caller are unchanged.
+     */
+    fetchVoucherCodes(params = {}, options = {}) {
+      return fetchOffsetPaginated(httpClient, "/vouchercodes", { ...commonParams, ...params }, options);
     },
-    fetchCoupons(params = {}) {
-      return this.fetchVoucherCodes(params);
+    fetchCoupons(params = {}, options = {}) {
+      return this.fetchVoucherCodes(params, options);
     },
     /**
      * List product feeds for campaigns the publisher is promoting.

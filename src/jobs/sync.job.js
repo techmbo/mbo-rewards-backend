@@ -102,6 +102,7 @@ import {
   summarizeSourceObjectRun,
   evidenceFromRunSummary,
 } from "./sourceObjectRuns.js";
+import { withSourceOutcome } from "./sourceFetchOutcome.js";
 import { resultRows } from "../modules/networkOps/sourceObjectSync.service.js";
 import { createPermitPool } from "../core/dbPermits.js";
 import {
@@ -568,7 +569,14 @@ async function syncBoostinyAccount(accountLabel) {
       ...runCtx,
       sourceObject: "campaigns",
       endpoint: "GET campaigns",
-      execute: () => adapter.fetchCampaigns(undefined, stats),
+      // The Boostiny pager has no page cap, so this never reports truncation. What it does report
+      // is WHY the walk stopped: pagination.hasNext / totalPages is the supplier asserting the
+      // end, while a short last page is only our inference. stats is shared with the coupons walk
+      // below, and withSourceOutcome snapshots it so neither can read the other's record.
+      execute: () =>
+        withSourceOutcome(stats, () => adapter.fetchCampaigns(undefined, stats), {
+          endpoint: "GET campaigns",
+        }),
     });
     sourceObjectRuns.push(summarizeSourceObjectRun(run));
     campaigns = resultRows(run);
@@ -634,7 +642,10 @@ async function syncBoostinyAccount(accountLabel) {
       ...runCtx,
       sourceObject: "coupons",
       endpoint: "GET coupons",
-      execute: () => adapter.fetchCoupons(undefined, stats),
+      execute: () =>
+        withSourceOutcome(stats, () => adapter.fetchCoupons(undefined, stats), {
+          endpoint: "GET coupons",
+        }),
     });
     sourceObjectRuns.push(summarizeSourceObjectRun(run));
     coupons = resultRows(run);
@@ -1012,6 +1023,10 @@ async function syncOptimiseRegion(region, accountLabel) {
     : () => adapter.fetchCampaigns();
 
   // Independent Optimise source objects; failure of conversions must not fail campaigns.
+  // Own bag, for the same reason as Trackier: this array is awaited with Promise.all, so anything
+  // shared between these walks would be written concurrently.
+  const optimiseVoucherStats = {};
+
   const [
     campaignsResult,
     conversionsResult,
@@ -1105,8 +1120,8 @@ async function syncOptimiseRegion(region, accountLabel) {
       ? fetchOptimiseSourceObject(
           "voucherCodes",
           credentials,
-          () => adapter.fetchVoucherCodes(),
-          {},
+          () => adapter.fetchVoucherCodes({}, { stats: optimiseVoucherStats }),
+          { exhaustionStats: optimiseVoucherStats },
           srcCtx,
         )
       : fetchOptimiseSourceObject(
@@ -1600,6 +1615,13 @@ async function syncTrackierAccount(accountLabel) {
       ? reportsKpiResult.rows
       : undefined;
 
+  // These source objects are fetched CONCURRENTLY, so a single shared stats bag would be written
+  // by several walks at once and the snapshot comparison could not tell them apart. Each walk that
+  // records exhaustion gets its own bag instead, which makes cross-source contamination
+  // structurally impossible here rather than merely unlikely.
+  const trackierCampaignStats = {};
+  const trackierCouponStats = {};
+
   const [
     categoriesResult,
     campaignsCountResult,
@@ -1634,7 +1656,13 @@ async function syncTrackierAccount(accountLabel) {
           srcCtx,
         ),
     refreshCampaigns
-      ? fetchTrackierSourceObject("campaigns", credentials, () => adapter.fetchCampaigns(), {}, srcCtx)
+      ? fetchTrackierSourceObject(
+          "campaigns",
+          credentials,
+          () => adapter.fetchCampaigns({}, { stats: trackierCampaignStats }),
+          { exhaustionStats: trackierCampaignStats },
+          srcCtx,
+        )
       : fetchTrackierSourceObject(
           "campaigns",
           credentials,
@@ -1643,7 +1671,13 @@ async function syncTrackierAccount(accountLabel) {
           srcCtx,
         ),
     refreshCoupons
-      ? fetchTrackierSourceObject("coupons", credentials, () => adapter.fetchCoupons(), {}, srcCtx)
+      ? fetchTrackierSourceObject(
+          "coupons",
+          credentials,
+          () => adapter.fetchCoupons({}, { stats: trackierCouponStats }),
+          { exhaustionStats: trackierCouponStats },
+          srcCtx,
+        )
       : fetchTrackierSourceObject(
           "coupons",
           credentials,

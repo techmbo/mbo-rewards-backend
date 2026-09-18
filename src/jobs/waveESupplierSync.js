@@ -25,7 +25,7 @@ import {
   evidenceFromRunSummary,
 } from "./sourceObjectRuns.js";
 import { resultRows } from "../modules/networkOps/sourceObjectSync.service.js";
-import { unavailableOutcome, withFetchFailureSignal } from "./sourceFetchOutcome.js";
+import { unavailableOutcome, withFetchFailureSignal, withSourceOutcome } from "./sourceFetchOutcome.js";
 
 /**
  * Wave E — Impact / Partnerize / Awin sync via registry + RawPayload staging.
@@ -208,7 +208,18 @@ export async function syncImpactAccount(accountLabel = "default") {
       ...runCtx,
       sourceObject: "programs",
       endpoint: "GET /Catalogs",
-      execute: () => adapter.fetchCampaigns({}, stats),
+      // fetchPaginated caps itself at IMPACT_MAX_PAGE_COUNT pages and returns what it has. That
+      // exit means the supplier said another page followed and we declined to ask, so the program
+      // list is short — PARTIAL, not a SUCCESS with fewer rows.
+      //
+      // No endpoint in the metadata: the run row above already declares one, and fetchCampaigns
+      // actually addresses GET /Campaigns, so writing the real path here would put two different
+      // endpoints on one record. The declared one is wrong and predates this phase; correcting it
+      // is an observability fix, not a pagination one.
+      execute: () =>
+        withSourceOutcome(stats, () => adapter.fetchCampaigns({}, stats), {
+          truncationCode: "IMPACT_CAMPAIGNS_PAGE_CAP",
+        }),
     });
     sourceObjectRuns.push(summarizeSourceObjectRun(run));
     campaigns = resultRows(run).map(normalizeImpactCampaign);
@@ -232,11 +243,16 @@ export async function syncImpactAccount(accountLabel = "default") {
       ...runCtx,
       sourceObject: "catalogs",
       endpoint: "GET /Catalogs/Items",
-      // fetchProducts swallows any transport/auth/server error and answers []. Without this the
-      // run could not tell a 403 from an empty catalog: both were SUCCESS with recordsFetched 0.
+      // Catalogs has TWO ways of coming back short, and both used to answer SUCCESS. fetchProducts
+      // swallows any transport/auth/server error and answers [] — so a 403 looked like an empty
+      // catalog. And fetchPaginated caps itself at IMPACT_MAX_PAGE_COUNT pages and returns what it
+      // has — so a truncated read looked like the whole catalog. Either one is PARTIAL now, and
+      // they carry different codes because they are different defects.
       execute: () =>
-        withFetchFailureSignal(stats, "productFetchSkipped", () => adapter.fetchProducts({}, stats), {
+        withSourceOutcome(stats, () => adapter.fetchProducts({}, stats), {
+          failureKeys: ["productFetchSkipped"],
           errorCode: "IMPACT_CATALOGS_FETCH_FAILED",
+          truncationCode: "IMPACT_CATALOGS_PAGE_CAP",
           endpoint: "GET /Catalogs/Items",
         }),
     });

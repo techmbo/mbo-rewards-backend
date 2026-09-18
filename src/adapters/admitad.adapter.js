@@ -1,5 +1,6 @@
 import { createHttpClient, requestWithRetry } from "../core/httpClient.js";
 import { SUPPLIER_CAPABILITIES } from "./contract.js";
+import { EXHAUSTION, recordExhaustion } from "../core/paginationExhaustion.js";
 
 const DEFAULT_LIMIT = 500;
 
@@ -213,6 +214,9 @@ export function createAdmitadAdapter({
 
     const rows = [];
     const pages = [];
+    // Admitad's walk has no page cap: every exit below is a break, so the initial value is only
+    // reachable if a branch ever stops naming its reason.
+    let reason = EXHAUSTION.UNKNOWN;
     for (;;) {
       // eslint-disable-next-line no-await-in-loop
       const payload = await get(path, { ...baseParams, limit, offset }, stats);
@@ -221,13 +225,27 @@ export function createAdmitadAdapter({
       rows.push(...pageRows);
       pages.push({ payload, meta });
 
-      if (!pageRows.length) break;
+      if (!pageRows.length) {
+        reason = EXHAUSTION.EMPTY_PAGE;
+        break;
+      }
       const nextOffset = meta.offset + meta.limit;
-      if (meta.count != null && nextOffset >= meta.count) break;
-      if (pageRows.length < meta.limit) break;
+      if (meta.count != null && nextOffset >= meta.count) {
+        // `count` is Admitad's own size for the whole result set, so walking past it is the
+        // supplier asserting the end rather than an inference from this page.
+        reason = EXHAUSTION.SUPPLIER_TOTAL_REACHED;
+        break;
+      }
+      if (pageRows.length < meta.limit) {
+        // A short page is OUR inference that nothing follows. Usually right; wrong in the one
+        // direction that matters, because it ends the walk early and looks complete.
+        reason = EXHAUSTION.SHORT_PAGE;
+        break;
+      }
       offset = nextOffset;
     }
 
+    recordExhaustion(stats, reason, { pagesFetched: pages.length });
     return { rows, pages };
   }
 

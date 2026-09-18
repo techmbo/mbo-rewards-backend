@@ -1,6 +1,7 @@
 import { createHttpClient, getRateLimitWaitMs, requestWithRetry } from "../core/httpClient.js";
 import { createRateLimiter } from "../core/rateLimiter.js";
 import { asArray } from "../core/normalize.js";
+import { EXHAUSTION, recordExhaustion } from "../core/paginationExhaustion.js";
 
 // Boostiny uses Laravel-style throttling. Account lockouts ("Retry after 10 minutes") happen
 // when too many requests are made in a short window — spacing must be conservative.
@@ -27,26 +28,44 @@ function extractSummary(responseData) {
   return [];
 }
 
-function hasMorePages(responseData, page, pageSize, rowsCount) {
+/**
+ * Whether another page follows, and — when it does not — WHICH signal said so.
+ *
+ * hasNext/has_next/totalPages are Boostiny's own pagination metadata: a false there is the
+ * supplier asserting the end of the list. The trailing `rowsCount === pageSize` is not; it is our
+ * inference from the size of the page we happened to get, and it is labelled as one so a reader
+ * can tell a confirmed end from a guessed one.
+ */
+function morePagesDecision(responseData, page, pageSize, rowsCount) {
   const pagination = responseData?.pagination ?? responseData?.payload?.pagination;
 
   if (pagination?.hasNext !== undefined) {
-    return Boolean(pagination.hasNext);
+    const hasMore = Boolean(pagination.hasNext);
+    return { hasMore, reason: hasMore ? null : EXHAUSTION.SUPPLIER_HAS_NEXT_FALSE };
   }
 
   if (pagination?.has_next !== undefined) {
-    return Boolean(pagination.has_next);
+    const hasMore = Boolean(pagination.has_next);
+    return { hasMore, reason: hasMore ? null : EXHAUSTION.SUPPLIER_HAS_NEXT_FALSE };
   }
 
   if (pagination?.totalPages !== undefined) {
-    return page < Number(pagination.totalPages);
+    const hasMore = page < Number(pagination.totalPages);
+    return { hasMore, reason: hasMore ? null : EXHAUSTION.SUPPLIER_TOTAL_REACHED };
   }
 
   if (responseData?.totalPages !== undefined) {
-    return page < Number(responseData.totalPages);
+    const hasMore = page < Number(responseData.totalPages);
+    return { hasMore, reason: hasMore ? null : EXHAUSTION.SUPPLIER_TOTAL_REACHED };
   }
 
-  return rowsCount === pageSize;
+  const hasMore = rowsCount === pageSize;
+  if (hasMore) return { hasMore: true, reason: null };
+  return { hasMore: false, reason: rowsCount === 0 ? EXHAUSTION.EMPTY_PAGE : EXHAUSTION.SHORT_PAGE };
+}
+
+function hasMorePages(responseData, page, pageSize, rowsCount) {
+  return morePagesDecision(responseData, page, pageSize, rowsCount).hasMore;
 }
 
 function isSummaryPerformanceRow(row) {
@@ -122,6 +141,10 @@ async function fetchPaginated(
   const pages = [];
   let page = 1;
   const pageSize = Number(query.limit ?? 100);
+  // Boostiny's walk has no page cap: every exit below is a break, so UNKNOWN is only reachable if
+  // a decision branch ever stops naming its reason.
+  let reason = EXHAUSTION.UNKNOWN;
+  let slicedDeliberately = false;
 
   for (;;) {
     await boostinyRateLimiter.acquireSlot();
@@ -156,14 +179,22 @@ async function fetchPaginated(
     const rows = extractRows(responseData);
     all.push(...rows);
 
+    // A deliberate one-page slice is not an exhaustion claim of any kind, so it records nothing
+    // and the walk reports no pagination evidence rather than a made-up one. The break itself is
+    // unchanged and still precedes the continuation check.
+    slicedDeliberately = singlePage;
     if (singlePage) break;
 
     if (!hasMorePages(responseData, page, pageSize, rows.length)) {
+      // Same predicate, asked a second question: not whether to continue, but which signal ended
+      // it. morePagesDecision is pure and reads only this page's body.
+      reason = morePagesDecision(responseData, page, pageSize, rows.length).reason ?? EXHAUSTION.UNKNOWN;
       break;
     }
     page += 1;
   }
 
+  if (!slicedDeliberately) recordExhaustion(stats, reason, { pagesFetched: pages.length });
   return { rows: all, pages };
 }
 

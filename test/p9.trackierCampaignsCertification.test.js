@@ -259,7 +259,9 @@ describe("exactly one request, no retry, no pagination", () => {
     assert.match(chain, /retries: 1/);
     assert.match(chain, /timeoutMs/);
     assert.match(codeOf(ADAPTER_SRC), /retries: 6, delayMs: 2000/);
-    assert.match(codeOf(ADAPTER_SRC), /\{ singlePage = false, retries, timeoutMs \} = \{\}/);
+    // stats = null is 9A.0a-iii's exhaustion bag. It is additive and defaults to off, so the
+    // certification bounds and production's defaults are exactly what they were.
+    assert.match(codeOf(ADAPTER_SRC), /\{ singlePage = false, retries, timeoutMs, stats = null \} = \{\}/);
   });
 });
 
