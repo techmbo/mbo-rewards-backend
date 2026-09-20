@@ -331,11 +331,32 @@ function prepareEntityRecord({ networkSource, entityType, rawData, externalId })
  * Single-entity upsert (coupons and direct callers).
  */
 export async function upsertRawEntity(options) {
+  /**
+   * `alreadyStaged` says the CALLER is already registered as a staging participant for this write.
+   *
+   * It exists because upsertCouponRows reaches this function once per row while sitting inside the
+   * batch participant upsertManyRawEntities already took. Each of those rows was then announcing a
+   * participant of its own: a JobRun insert, the freeze read that follows it, and a JobRun update
+   * to release it — three extra round trips per row, on top of a participant table that grew by one
+   * row per coupon and was re-read by the next coupon's freeze check. Trackier's 116 coupons
+   * exhausted a 300s invocation on that alone, staging zero Entities while their RECEIVED lineage
+   * was already written.
+   *
+   * It is NOT a way to skip the barrier. The batch participant still covers every row, and the
+   * freeze is still evaluated once for the batch before any row runs. What goes away is the
+   * re-entry, which protected nothing: a row inside an already-registered batch cannot be the
+   * stager a freeze needs to see, because the batch is.
+   *
+   * Default false, so every direct caller — the Coupon CMS, the operator paths — registers exactly
+   * as it did before.
+   */
+  const { alreadyStaged = false, ...staging } = options ?? {};
+  if (alreadyStaged) return stageRawEntity(staging);
   // Registered as a staging participant for the whole write, and refused outright if a promotion
   // or conversion-promotion cursor walk is in flight. See entityStagingBarrier.js for why.
   return entityStagingBarrier.withStaging(
     `${options?.networkSource ?? "unknown"}:${options?.entityType ?? "unknown"}`,
-    () => stageRawEntity(options),
+    () => stageRawEntity(staging),
     { holderId: "upsertRawEntity" },
   );
 }
@@ -446,6 +467,12 @@ async function upsertCouponRows({
   externalIdPrefix,
   sourceAccountKey,
   alreadyObserved = false,
+  /**
+   * True when the caller already holds a staging participant for this batch, which
+   * stageManyRawEntities always does. Threaded rather than assumed so the one place that decides
+   * is the call site that knows.
+   */
+  alreadyStaged = false,
 }) {
   const results = [];
   const prepared = rows.map((rawData, index) => ({
@@ -484,6 +511,9 @@ async function upsertCouponRows({
       rawData: entry.rawData,
       externalId: entry.externalId,
       observeSchema: false,
+      // Inside the batch participant already: one more per row buys nothing and costs three
+      // round trips, exactly as observeSchema:false avoids a second schema fan-out per row.
+      alreadyStaged,
     });
     results.push(entity);
   });
@@ -580,7 +610,14 @@ async function stageManyRawEntities({
   if (entityType === "coupon") {
     const couponStart = Date.now();
     // These are the rows the staging pass above already observed and wrote RECEIVED lineage for.
-    await upsertCouponRows({ networkSource, rows, externalIdPrefix, sourceAccountKey, alreadyObserved: true });
+    await upsertCouponRows({
+      networkSource,
+      rows,
+      externalIdPrefix,
+      sourceAccountKey,
+      alreadyObserved: true,
+      alreadyStaged: true,
+    });
     rowUpsertMs = Date.now() - couponStart;
   } else {
     const batchStart = Date.now();
@@ -599,6 +636,8 @@ async function stageManyRawEntities({
           rows: embedded.map((row) => ({ ...row, record_source: "coupon" })),
           externalIdPrefix,
           sourceAccountKey,
+          // Same batch participant: this fan-out runs inside stageManyRawEntities too.
+          alreadyStaged: true,
         });
         rowUpsertMs += Date.now() - fanOutStart;
       }
