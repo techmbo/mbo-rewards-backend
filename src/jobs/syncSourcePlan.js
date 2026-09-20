@@ -392,6 +392,39 @@ export function sourcesMaterialisedAfter(platform, sourceObject) {
  * having more. Returns null when the supplier reported the last page — which is what makes the
  * chain finite and a zero-row account a single unit.
  */
+/**
+ * The units for ONE source object of ONE account, for a narrowly scoped durable run.
+ *
+ * Built from planAccountUnits and then filtered, rather than from a second planning rule: a
+ * scoped run must produce byte-identical descriptors to the ones the estate plan would have
+ * produced for the same source, or it is certifying something other than what production runs.
+ *
+ * Returns [] when the source object is unknown to the platform, excluded by the audit, or
+ * deferred until another source completes — all three are "there is no unit to plan", and none of
+ * them may be papered over with an ad-hoc unit.
+ */
+export function planScopedSourceUnits({
+  platform,
+  accountLabel = "default",
+  sourceObject,
+  lastSuccessfulSync = null,
+  now = new Date(),
+  networkOptions = {},
+} = {}) {
+  const key = String(sourceObject ?? "").trim().toLowerCase();
+  if (!platform || !key) return [];
+  const planned = planAccountUnits({
+    platform,
+    accountLabel,
+    lastSuccessfulSync,
+    now,
+    networkOptions: { ...networkOptions, promoteAfter: false },
+  });
+  return planned.units.filter(
+    (unit) => String(unit.sourceObject ?? "").toLowerCase() === key,
+  );
+}
+
 export function nextPagedUnit(descriptor = {}, pagination = null) {
   if (!pagination?.hasMore) return null;
   const nextOffset = Number(pagination.nextOffset);

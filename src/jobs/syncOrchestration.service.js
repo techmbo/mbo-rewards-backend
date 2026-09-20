@@ -764,7 +764,14 @@ export class SyncOrchestrationService {
             // The shape of this run's units. A later request only reuses a run that plans the
             // same shape; see PLANNER_VERSION.
             plannerVersion: PLANNER_VERSION,
-            options: { fastSync: Boolean(options.fastSync), promoteAfter: options.promoteAfter !== false },
+            options: {
+              fastSync: Boolean(options.fastSync),
+              promoteAfter: options.promoteAfter !== false,
+              // Recorded only when present, so an estate run's payload keeps exactly the shape it
+              // has always had. It is what makes a scoped run findable as ITS OWN work rather
+              // than as any active run whose breadth happens to be compatible.
+              ...(options.scopeKey ? { scopeKey: String(options.scopeKey) } : {}),
+            },
             // Explicit, never silent: "none" when promotion was not requested, "blocked" when
             // placeholders exist, "deferred" when promotion was asked for but has no bounded units.
             // "blocked" is about POST-SYNC stages only: a non-executable NETWORK source object
@@ -1023,12 +1030,29 @@ export class SyncOrchestrationService {
    * racer that commits last always sees both rows, so exactly one active run survives. The same
    * pass also self-heals a duplicate left behind by an earlier crash.
    */
-  async getOrCreateRun({ kind = "full", trigger = "api", options = {} } = {}) {
+  async getOrCreateRun({ kind = "full", trigger = "api", options = {}, units = null } = {}) {
     // Reuse is scoped to this planner version: an active run whose units are a different shape —
     // a pre-Phase-5 account-wide run, or one from a future version — is not this request's run,
     // and resuming it would quietly do different work than the caller asked for.
     const plannerVersion = PLANNER_VERSION;
-    const existing = await this.findActiveRun({ kind, options, plannerVersion });
+    /**
+     * A run that plans ONE source object is not the estate's run, and the estate's run is not
+     * its. `scopeKey` says which, and reuse must match it EXACTLY in both directions — otherwise
+     * a second Awin-offers request would adopt an unrelated active run and silently do different
+     * work, which is the failure findActiveRun exists to prevent for breadth and options.
+     *
+     * The SQL predicate deliberately does not learn about scope: distinguishing an absent JSON
+     * key from a JSON null is driver-dependent, and getting it subtly wrong would be worse than
+     * filtering in one obvious line here. A scoped request reads the full compatible list and
+     * takes the first exact match; an unscoped one keeps findActiveRun untouched, so /sync/all
+     * behaves exactly as it did.
+     */
+    const scopeKey = options?.scopeKey ?? null;
+    const existing = scopeKey
+      ? (await this.listActiveCompatibleRuns({ kind, options, plannerVersion })).find(
+          (run) => (run.payload?.options?.scopeKey ?? null) === scopeKey,
+        ) ?? null
+      : await this.#unscopedActiveRun({ kind, options, plannerVersion });
     if (!existing) {
       // Nothing satisfies this request. Before creating a parent, refuse if an INCOMPATIBLE one is
       // already active — otherwise a non-fast request beside an active fast run silently produces
@@ -1059,7 +1083,7 @@ export class SyncOrchestrationService {
       return this.#reuseView(existing, kind);
     }
 
-    const created = await this.createRun({ kind, trigger, options });
+    const created = await this.createRun({ kind, trigger, options, units });
 
     // Resolve a possible concurrent creation. This read happens after our own rows are committed,
     // so a racer that committed before us is visible here.
@@ -1069,11 +1093,34 @@ export class SyncOrchestrationService {
       if (collapse.collapsed) return { ...this.#reuseView(canonical, kind), collapsedRunId: created.id };
       // Our own run could not be collapsed (a worker already claimed a unit): keep it as its own
       // run rather than orphaning started work, and report it truthfully as created.
-      return { ...created, options: { fastSync: Boolean(options.fastSync), promoteAfter: options.promoteAfter !== false } };
+      return { ...created, options: this.#optionsView(options) };
     }
 
     await this.#collapseDuplicatesOf(created.id, { options, plannerVersion });
-    return { ...created, options: { fastSync: Boolean(options.fastSync), promoteAfter: options.promoteAfter !== false } };
+    return { ...created, options: this.#optionsView(options) };
+  }
+
+  /** The options a caller is told its run has, in the same shape the payload records. */
+  #optionsView(options = {}) {
+    return {
+      fastSync: Boolean(options.fastSync),
+      promoteAfter: options.promoteAfter !== false,
+      ...(options.scopeKey ? { scopeKey: String(options.scopeKey) } : {}),
+    };
+  }
+
+  /**
+   * findActiveRun, but never a run that was planned for ONE source object.
+   *
+   * The compatibility predicate reads breadth and options, not scope, so without this an estate
+   * request could adopt an Awin-offers-only run and believe the whole estate was syncing. Such a
+   * run is left to the incompatibility check, which reports it and names the cancel route rather
+   * than quietly widening it.
+   */
+  async #unscopedActiveRun({ kind, options, plannerVersion }) {
+    const run = await this.findActiveRun({ kind, options, plannerVersion });
+    if (!run) return null;
+    return (run.payload?.options?.scopeKey ?? null) === null ? run : null;
   }
 
   /**

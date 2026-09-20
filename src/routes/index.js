@@ -20,6 +20,7 @@ import {
   previewSyncPlanHandler,
   cancelSyncRunHandler,
   triggerIncrementalSync,
+  triggerScopedDurableSync,
   triggerSyncAll,
   triggerSyncPlatform,
   triggerBoostinyCanarySync,
@@ -421,6 +422,24 @@ router.post(
   requirePermission(PERMISSIONS.SYNC_TRIGGER),
   auditAction("sync.worker", "sync:worker"),
   triggerSyncWorker,
+);
+// A durable run containing ONE account's ONE source object, for certifying a paged source in
+// production page by page. Registered BEFORE the dynamic /sync/:platform patterns so a three
+// segment path is never captured by the two-segment ones. Same chain as /sync/worker and the
+// cancel route — creating durable estate work is at least as consequential as advancing it — so
+// it is admin-only on top of SYNC_TRIGGER, never merely permissioned.
+router.post(
+  "/sync/:platform/:accountLabel/durable",
+  noStoreHeaders,
+  authenticate,
+  requireAdminRole,
+  requirePermission(PERMISSIONS.SYNC_TRIGGER),
+  auditAction(
+    "sync.scoped.durable",
+    (req) =>
+      `sync:${req.params.platform}:${req.params.accountLabel}:${String(req.query?.sourceObject ?? req.body?.sourceObject ?? "")}`,
+  ),
+  triggerScopedDurableSync,
 );
 router.post(
   "/sync/boostiny/:accountLabel/canary",

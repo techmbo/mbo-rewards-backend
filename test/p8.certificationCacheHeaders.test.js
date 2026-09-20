@@ -259,6 +259,10 @@ describe("certification cache headers — a 429 is not cacheable either", () => 
       "/sync/plan-preview",
       // Its 202 body is the durable run projection, the same state /sync/status returns.
       "/sync/all",
+      // Same 202 body for a run scoped to one account's one source object: run id, unit counts
+      // and sync state. No more shared-cacheable than /sync/all's, and its 409 refusal names an
+      // active run id that must not be served to the next caller from a cache.
+      "/sync/:platform/:accountLabel/durable",
     ];
     const uses = [...routesSource.matchAll(/^\s*noStoreHeaders,\s*$/gm)];
     assert.equal(uses.length, allowed.length, "one use per approved route");

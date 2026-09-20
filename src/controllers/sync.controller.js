@@ -27,6 +27,7 @@ import {
   nextPromotionUnit,
   summarisePromotionUnitOutcome,
 } from "../jobs/promotionUnit.js";
+import { planScopedSourceUnits } from "../jobs/syncSourcePlan.js";
 import { SyncAccountLockService, accountLockKey } from "../jobs/syncAccountLock.service.js";
 import { isStagingFrozenError } from "../jobs/entityStagingBarrier.js";
 
@@ -456,6 +457,122 @@ export async function triggerSyncPlatform(req, res, next) {
  * The response carries the finished status (result[accountLabel].canary / .commissionRules); the
  * same payload stays readable from GET /sync/status on the instance that ran it.
  */
+/**
+ * The platform/source pairs a scoped durable run may be created for.
+ *
+ * An allow-list rather than a free parameter. A durable run that plans one source object is a
+ * certification instrument, not a general sync API: opening it to any platform and any string
+ * would let a caller plan work nobody has reasoned about, beside an estate run, under one account
+ * lock. Awin offers is here because it is the source that cannot complete in a single invocation
+ * and therefore has to be certified page by page.
+ */
+export const SCOPED_DURABLE_SOURCES = Object.freeze({
+  awin: Object.freeze(["offers"]),
+});
+
+/**
+ * Create (or resume) a durable run containing ONLY one account's one source object.
+ *
+ * Everything here is the estate's own machinery, narrowed: planScopedSourceUnits filters the
+ * SAME planAccountUnits output the full plan uses, so the unit descriptor is byte-identical to
+ * the one /sync/all would have produced for this source; getOrCreateRun records it, dedupes it
+ * and collapses racers exactly as it does for a full run; and the worker, the account lock, the
+ * continuation planner and the post-sync gate are untouched.
+ *
+ * Only the FIRST page is planned. Pages 2..N are appended by materialiseFollowOnUnits from what
+ * each completed unit reports, which is the property being certified — pre-creating 25 units
+ * would test a queue rather than the resumable walk.
+ *
+ * promoteAfter is false and post-sync units are never included: a run that syncs one source
+ * object has no business promoting the estate.
+ */
+export async function triggerScopedDurableSync(req, res, next) {
+  try {
+    const platform = String(req.params?.platform ?? "").trim().toLowerCase();
+    const accountLabel = String(req.params?.accountLabel ?? "").trim() || "default";
+    const sourceObject = String(req.query?.sourceObject ?? req.body?.sourceObject ?? "")
+      .trim()
+      .toLowerCase();
+
+    const allowed = SCOPED_DURABLE_SOURCES[platform];
+    if (!allowed) {
+      return res.status(400).json({
+        ok: false,
+        code: "scoped_durable_platform_unsupported",
+        message: `Scoped durable runs are not available for platform "${platform}".`,
+        supported: Object.keys(SCOPED_DURABLE_SOURCES),
+      });
+    }
+    if (!sourceObject) {
+      return res.status(400).json({
+        ok: false,
+        code: "scoped_durable_source_required",
+        message: "sourceObject is required.",
+        supported: [...allowed],
+      });
+    }
+    if (!allowed.includes(sourceObject)) {
+      return res.status(400).json({
+        ok: false,
+        code: "scoped_durable_source_unsupported",
+        message: `Scoped durable runs are not available for ${platform}/${sourceObject}.`,
+        supported: [...allowed],
+      });
+    }
+
+    const orchestration = orchestrationServiceFor(req);
+    const units = planScopedSourceUnits({ platform, accountLabel, sourceObject }).map((unit) => ({
+      kind: UNIT_KINDS.NETWORK,
+      ...unit,
+    }));
+    if (!units.length) {
+      // The audit does not bound this source, or it is deferred behind another. Either way there
+      // is no unit to plan, and inventing one would put unaudited work on the estate.
+      return res.status(409).json({
+        ok: false,
+        code: "scoped_durable_source_unplannable",
+        message: `${platform}/${sourceObject} produced no bounded unit and cannot be run durably.`,
+      });
+    }
+
+    const options = {
+      fastSync: false,
+      promoteAfter: false,
+      // The reuse identity. Two requests for the same account and source share a run; a request
+      // for anything else — including the whole estate — never adopts it.
+      scopeKey: `${platform}:${accountLabel}:${sourceObject}`,
+    };
+    const run = await orchestration.getOrCreateRun({ kind: "full", trigger: "api", options, units });
+    const syncStatus = await orchestration.describeRun(run.id);
+    return res.status(202).json({
+      ok: true,
+      status: syncStatus?.status ?? "running",
+      message: run.created
+        ? `Durable ${platform}/${sourceObject} run created. Advance it with POST /api/sync/worker.`
+        : `A matching durable ${platform}/${sourceObject} run is already active; resuming it.`,
+      runId: run.id,
+      created: run.created,
+      plannerVersion: run.plannerVersion ?? null,
+      scope: { platform, accountLabel, sourceObject },
+      // Counts and descriptors only — never a supplier payload.
+      plan: summarisePlan({ units }, { kind: "full", options }),
+      syncStatus,
+    });
+  } catch (error) {
+    if (error?.code === "active_run_incompatible") {
+      return res.status(409).json({
+        ok: false,
+        code: "active_run_incompatible",
+        message:
+          "Another sync run is already active and cannot satisfy this request. Wait for it to "
+          + "finish, or cancel it explicitly with POST /api/sync/runs/:runId/cancel.",
+        activeRunId: error.activeRunId ?? null,
+      });
+    }
+    next(formatSyncError(error));
+  }
+}
+
 export async function triggerBoostinyCanarySync(req, res, next) {
   try {
     const accountLabel = String(req.params?.accountLabel ?? "").trim();
