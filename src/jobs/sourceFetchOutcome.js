@@ -15,7 +15,7 @@
  * The signal is read by SNAPSHOT: a key's value is captured before the call and compared after, so
  * one source object can never inherit a flag another one left on the shared per-account stats.
  */
-import { EXHAUSTION, EXHAUSTION_STATS_KEY } from "../core/paginationExhaustion.js";
+import { EXHAUSTION, EXHAUSTION_STATS_KEY, TRUNCATION_REASONS } from "../core/paginationExhaustion.js";
 
 
 /**
@@ -81,7 +81,12 @@ export function pagedOutcome(rows, pagination = {}) {
 
 // The vocabulary itself lives in core, because the adapters that record it cannot import from
 // jobs/. Re-exported here so the record and the helper that reads it stay one import apart.
-export { EXHAUSTION, EXHAUSTION_STATS_KEY, recordExhaustion } from "../core/paginationExhaustion.js";
+export {
+  EXHAUSTION,
+  EXHAUSTION_STATS_KEY,
+  TRUNCATION_REASONS,
+  recordExhaustion,
+} from "../core/paginationExhaustion.js";
 
 /**
  * One adapter call, reported truthfully: hard failure, cap truncation, or healthy with evidence.
@@ -90,14 +95,27 @@ export { EXHAUSTION, EXHAUSTION_STATS_KEY, recordExhaustion } from "../core/pagi
  * helper stays for the 9A.0a-i call sites that only need the failure half.
  *
  * Precedence is deliberate. A swallowed hard failure outranks any exhaustion record, because a
- * pager that died mid-walk may still have written one. A PAGE_CAP exhaustion is itself a
- * truncation and reports PARTIAL. Every other reason is healthy: a heuristic stop is still a
- * complete-looking read, and downgrading it would flood PARTIAL with runs that are probably fine.
+ * pager that died mid-walk may still have written one. A TRUNCATION_REASONS exhaustion — our own
+ * page cap, or a page the supplier re-delivered — is itself a truncation and reports PARTIAL.
+ * Every other reason is healthy: a heuristic stop is still a complete-looking read, and
+ * downgrading it would flood PARTIAL with runs that are probably fine.
  */
 export async function withSourceOutcome(
   stats,
   fetch,
-  { failureKeys = [], errorCode, truncationCode = null, endpoint = null } = {},
+  {
+    failureKeys = [],
+    errorCode,
+    truncationCode = null,
+    /**
+     * The code a REPEATED_PAGE truncation carries. Separate from truncationCode because the two
+     * say different things: a cap means we stopped asking, a repeat means the supplier stopped
+     * listening. Falls back to truncationCode, so a pager that never records REPEATED_PAGE needs
+     * no change at all.
+     */
+    repeatedPageCode = null,
+    endpoint = null,
+  } = {},
 ) {
   const failureBefore = new Map(failureKeys.map((key) => [key, stats ? stats[key] : undefined]));
   const exhaustionBefore = stats ? stats[EXHAUSTION_STATS_KEY] : undefined;
@@ -134,7 +152,7 @@ export async function withSourceOutcome(
     ...(Number.isFinite(record.pagesFetched) ? { pagesFetched: record.pagesFetched } : {}),
   };
   const base = asOutcome(fetched);
-  if (record.reason === EXHAUSTION.PAGE_CAP) {
+  if (TRUNCATION_REASONS.has(record.reason)) {
     return {
       rows: base.rows,
       partial: true,
@@ -142,9 +160,14 @@ export async function withSourceOutcome(
         ...base.metadata,
         fetchFailed: false,
         truncated: true,
-        // A cap exit is a DIFFERENT defect from a swallowed error, so it carries its own code:
-        // "we stopped asking" must never be read back as "the supplier refused us".
-        errorCode: truncationCode ?? errorCode,
+        // A truncation is a DIFFERENT defect from a swallowed error, so it carries its own code:
+        // "we stopped asking", or "the supplier stopped honouring `page`", must never be read back
+        // as "the supplier refused us". The two truncations are told apart as well, because the
+        // operator response to them is not the same.
+        errorCode:
+          record.reason === EXHAUSTION.REPEATED_PAGE
+            ? (repeatedPageCode ?? truncationCode ?? errorCode)
+            : (truncationCode ?? errorCode),
         pagination,
         ...(endpoint ? { endpoint } : {}),
       },

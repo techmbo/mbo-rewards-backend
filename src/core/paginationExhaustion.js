@@ -19,6 +19,7 @@ export const EXHAUSTION = Object.freeze({
   SHORT_PAGE: "short_page",
   EMPTY_PAGE: "empty_page",
   PAGE_CAP: "page_cap",
+  REPEATED_PAGE: "repeated_page",
   UNKNOWN: "unknown",
 });
 
@@ -28,6 +29,23 @@ const SUPPLIER_ASSERTED = new Set([
   EXHAUSTION.SUPPLIER_TOTAL_REACHED,
   EXHAUSTION.SUPPLIER_NEXT_TOKEN_ABSENT,
 ]);
+
+/**
+ * Reasons that end a walk WITHOUT reaching the end of the catalog.
+ *
+ * PAGE_CAP is our own limit. REPEATED_PAGE means the supplier handed back a page we already hold,
+ * so it is not honouring `page` and the rest of the catalog is unreachable by this walk — more
+ * incomplete than a cap, not less. UNKNOWN is a stop with no evidence either way.
+ */
+const NOT_EXHAUSTED = new Set([EXHAUSTION.PAGE_CAP, EXHAUSTION.REPEATED_PAGE, EXHAUSTION.UNKNOWN]);
+
+/**
+ * The subset of those that a run must report as a TRUNCATION rather than a healthy read.
+ *
+ * UNKNOWN is deliberately absent: it is a defensive stop that claims nothing, and the callers that
+ * record it are not asserting the catalog was cut short.
+ */
+export const TRUNCATION_REASONS = new Set([EXHAUSTION.PAGE_CAP, EXHAUSTION.REPEATED_PAGE]);
 
 /** The key every pager writes its exhaustion record to on the stats object it already receives. */
 export const EXHAUSTION_STATS_KEY = "paginationExhaustion";
@@ -43,9 +61,8 @@ export function recordExhaustion(stats, reason, extra = {}) {
   if (!stats) return;
   stats[EXHAUSTION_STATS_KEY] = {
     reason,
-    // PAGE_CAP is our own limit, not the end of the catalog. UNKNOWN is a defensive stop with no
-    // evidence either way. Neither may claim the walk reached the end.
-    exhausted: reason !== EXHAUSTION.PAGE_CAP && reason !== EXHAUSTION.UNKNOWN,
+    // None of these may claim the walk reached the end of the catalog. See NOT_EXHAUSTED.
+    exhausted: !NOT_EXHAUSTED.has(reason),
     supplierAsserted: SUPPLIER_ASSERTED.has(reason),
     ...extra,
   };

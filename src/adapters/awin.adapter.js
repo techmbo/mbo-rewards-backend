@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import { createHttpClient, requestWithRetry } from "../core/httpClient.js";
 import { createRateLimiter } from "../core/rateLimiter.js";
 import { asArray } from "../core/normalize.js";
 import { SUPPLIER_CAPABILITIES } from "./contract.js";
+import { EXHAUSTION, recordExhaustion } from "../core/paginationExhaustion.js";
 
 /**
  * Awin Publisher API adapter.
@@ -31,6 +33,161 @@ export const AWIN_CERTIFICATION_MAX_ROWS = 1;
  * when in fact the window was never valid.
  */
 export const AWIN_MAX_TRANSACTION_WINDOW_DAYS = 31;
+
+/**
+ * The page size Awin's promotions endpoint is asked for, everywhere, always.
+ *
+ * NOT a variable and NOT configurable. An earlier certification probe sent pageSize 1 — smaller,
+ * and seemingly safer — and the supplier answered HTTP 500. 200 is production's value and the
+ * documented maximum, so it is the one value proven to work. Paging changes `page` and nothing
+ * else.
+ */
+export const AWIN_OFFERS_PAGE_SIZE = 200;
+
+/**
+ * The hard ceiling on pages one offers walk will request. 25 pages = 5,000 promotions.
+ *
+ * Derived from the INVOCATION BUDGET, not from a guess about catalogue size: every request waits
+ * AWIN_MIN_INTERVAL_MS (3s) on the shared limiter, which programmes and transactions also queue
+ * on, so 25 pages is already ~75s of supplier time inside a 300s invocation that must also stage
+ * every row. We have never measured a real Awin offer count, so this is a budget, not a claim.
+ *
+ * Deliberately NOT env-overridable, unlike this adapter's timeout and interval. Those tune pacing;
+ * this bounds how much work one invocation may attempt, and an env override is exactly how such a
+ * bound gets raised quietly until an invocation times out. Reaching it is reported as a truncation
+ * — never silently — so the run says so instead of the cap being loosened to hide it.
+ */
+export const AWIN_MAX_OFFER_PAGES = 25;
+
+/** Stable, non-fatal error code a truncated offers run carries. */
+export const AWIN_OFFERS_PAGE_CAP_CODE = "AWIN_OFFERS_PAGE_CAP";
+
+/**
+ * The code a walk carries when the supplier handed back a page it had already given us.
+ *
+ * Distinct from the cap code on purpose. A cap means we stopped asking and raising it would fetch
+ * more; a repeat means `page` is not being honoured, so the rest of the catalogue is unreachable
+ * by this walk however many times we ask. The operator response to the two is not the same, so
+ * the run must not spell them the same way.
+ */
+export const AWIN_OFFERS_REPEATED_PAGE_CODE = "AWIN_OFFERS_REPEATED_PAGE";
+
+/** Containers a supplier may put its pagination metadata in. The envelope itself counts. */
+const PAGINATION_CONTAINERS = ["pagination", "meta", "metadata"];
+
+const lowerKey = (key) => String(key).toLowerCase();
+
+/** Read one key from an object, case-insensitively, without walking into its value. */
+function readKey(source, names) {
+  if (!source || typeof source !== "object" || Array.isArray(source)) return undefined;
+  for (const [key, value] of Object.entries(source)) {
+    if (names.includes(lowerKey(key))) return value;
+  }
+  return undefined;
+}
+
+const finiteNumber = (value) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+};
+
+/**
+ * Does the supplier's own metadata positively settle whether another page follows?
+ *
+ * Returns `{ hasMore, reason }` when it does, and `{ hasMore: null }` when it does not — the
+ * caller then falls back to the short/empty-page heuristics and labels them as heuristics.
+ *
+ * This is deliberately conservative in three places:
+ *
+ *   `count` is only read as a TOTAL when no total-ish key exists AND it exceeds the page size. A
+ *   per-page count and a result-set count are both spelled "count", and mistaking the first for
+ *   the second would end a walk early while calling it supplier-confirmed — the precise failure
+ *   this phase exists to prevent. An ambiguous `count` is ignored, and the heuristics take over.
+ *
+ *   A cursor is read for PRESENCE only. Its value is never inspected, compared or recorded.
+ *
+ *   Signals that DISAGREE yield no verdict at all. Two recognised keys pointing opposite ways is
+ *   not an unambiguous terminal condition, so nothing is asserted and the heuristics decide.
+ */
+export function awinOffersPaginationSignal(envelope, { page, pageSize }) {
+  if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) {
+    return { hasMore: null, reason: null };
+  }
+
+  const containers = [envelope];
+  for (const name of PAGINATION_CONTAINERS) {
+    const nested = readKey(envelope, [name]);
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) containers.push(nested);
+  }
+
+  const verdicts = [];
+  for (const container of containers) {
+    const hasNext = readKey(container, ["hasnext", "hasnextpage", "has_next", "has_next_page", "hasmore", "has_more"]);
+    if (typeof hasNext === "boolean") {
+      verdicts.push({ hasMore: hasNext, reason: hasNext ? null : EXHAUSTION.SUPPLIER_HAS_NEXT_FALSE });
+    }
+
+    const cursor = readKey(container, ["next", "nextpage", "next_page", "nextpagetoken", "next_page_token", "nextpageuri"]);
+    if (cursor !== undefined) {
+      // Presence only. A number is a page index; anything else is inspected no further than
+      // "is it there", so a cursor URL carrying the publisher id is never read.
+      const present = cursor !== null && cursor !== false && cursor !== "";
+      verdicts.push({ hasMore: present, reason: present ? null : EXHAUSTION.SUPPLIER_HAS_NEXT_FALSE });
+    }
+
+    const totalPages = finiteNumber(
+      readKey(container, ["totalpages", "total_pages", "pagecount", "page_count", "lastpage", "last_page"]),
+    );
+    if (totalPages !== null && totalPages >= 0) {
+      const more = page < totalPages;
+      verdicts.push({ hasMore: more, reason: more ? null : EXHAUSTION.SUPPLIER_TOTAL_REACHED });
+    }
+
+    const total = finiteNumber(readKey(container, ["total", "totalitems", "total_items", "totalcount", "total_count"]));
+    const ambiguousCount = finiteNumber(readKey(container, ["count"]));
+    const resolvedTotal =
+      total !== null ? total : ambiguousCount !== null && ambiguousCount > pageSize ? ambiguousCount : null;
+    if (resolvedTotal !== null && resolvedTotal >= 0) {
+      const more = page * pageSize < resolvedTotal;
+      verdicts.push({ hasMore: more, reason: more ? null : EXHAUSTION.SUPPLIER_TOTAL_REACHED });
+    }
+  }
+
+  if (!verdicts.length) return { hasMore: null, reason: null };
+  const distinct = new Set(verdicts.map((verdict) => verdict.hasMore));
+  if (distinct.size > 1) return { hasMore: null, reason: null, conflicted: true };
+
+  const hasMore = verdicts[0].hasMore;
+  if (hasMore) return { hasMore: true, reason: null };
+  // Prefer the strongest wording available among agreeing terminal signals.
+  const reason =
+    verdicts.find((verdict) => verdict.reason === EXHAUSTION.SUPPLIER_HAS_NEXT_FALSE)?.reason ??
+    verdicts[0].reason ??
+    null;
+  return { hasMore: false, reason };
+}
+
+/**
+ * A page's identity, for the repeated-page guard only.
+ *
+ * Built from the stable supplier identifiers Awin promotion rows already carry; a row without one
+ * contributes a private fingerprint of its own content instead. Both are LOCAL: the returned key
+ * is compared against the previous page's and then discarded. It is never recorded on the run,
+ * never logged and never returned to a caller, because a promotion id is row data.
+ */
+function offersPageIdentity(rows) {
+  return rows
+    .map((row) => {
+      const id = row?.promotionId ?? row?.id ?? row?._id ?? null;
+      if (id !== null && id !== undefined && String(id).trim() !== "") return `i:${String(id)}`;
+      try {
+        return `f:${createHash("sha1").update(JSON.stringify(row ?? null)).digest("hex")}`;
+      } catch {
+        return "f:unserialisable";
+      }
+    })
+    .join("|");
+}
 
 /**
  * The transaction date format Awin actually accepts: YYYY-MM-DDTHH:mm:ss.
@@ -294,14 +451,110 @@ export function createAwinAdapter({
       return asArray(extractCollection(data, ["commissionGroups", "data"]));
     },
 
-    /** Offers / vouchers */
+    /**
+     * Offers / vouchers, walked to the end of the catalogue.
+     *
+     * This endpoint is documented as paginated and was read one page deep: `page` was pinned at 1
+     * and nothing incremented it, so any account with more than AWIN_OFFERS_PAGE_SIZE promotions
+     * silently staged only the first page and the run still reported SUCCESS.
+     *
+     * What does NOT change: the path, the verb, `filters`, and the page size. Only `page` moves,
+     * one request at a time, each one taking its slot on the shared 3s limiter — no parallel
+     * fetching, because that limiter is shared with programmes and transactions.
+     *
+     * A caller that pins `pagination` gets exactly that one page and no walk. Nothing in
+     * production does; the escape hatch is preserved so an explicit single-page call stays
+     * byte-identical to what it was.
+     *
+     * Termination, in precedence order. Only the first is the supplier asserting the end:
+     *
+     *   1  supplier metadata positively says no more      supplier_has_next_false / _total_reached
+     *   2  the page repeated one we already hold          repeated_page       (a TRUNCATION)
+     *   3  the page came back empty                       empty_page          (heuristic)
+     *   4  the page came back short                       short_page          (heuristic)
+     *   5  AWIN_MAX_OFFER_PAGES reached                   page_cap            (a TRUNCATION)
+     *
+     * 3 and 4 are inferences and are recorded as inferences: a short page mid-catalogue ends the
+     * walk early and looks complete, which is exactly the ambiguity that must not be laundered
+     * into a completeness claim.
+     *
+     * 2 is checked against every page already accepted, not merely the one before it, so an
+     * endpoint that cycles A -> B -> A is caught on the second A rather than walking to the cap.
+     * It is a TRUNCATION: a supplier that re-delivers a page is not honouring `page`, so whatever
+     * remains of the catalogue is unreachable by this walk, and a run holding part of a catalogue
+     * must not report SUCCESS. The repeated page is dropped rather than appended a second time.
+     *
+     * 2 and 5 both preserve every row already fetched and make the run PARTIAL, under DIFFERENT
+     * codes: raising the cap would fetch more, whereas re-asking a supplier that ignores `page`
+     * would not.
+     */
     async fetchCoupons(params = {}, stats = null) {
-      const body = {
-        filters: params.filters ?? {},
-        pagination: params.pagination ?? { page: 1, pageSize: 200 },
+      const filters = params.filters ?? {};
+      const fetchPage = async (page) => {
+        const envelope = await post(
+          `/publisher/${pubId}/promotions`,
+          { filters, pagination: { page, pageSize: AWIN_OFFERS_PAGE_SIZE } },
+          stats,
+        );
+        // The envelope is held only for the length of this call: the signal parser reads
+        // recognised pagination keys out of it, and it is then dropped exactly as before.
+        return { envelope, rows: asArray(extractCollection(envelope, ["data", "promotions", "offers"])) };
       };
-      const data = await post(`/publisher/${pubId}/promotions`, body, stats);
-      return asArray(extractCollection(data, ["data", "promotions", "offers"]));
+
+      // An explicitly pinned pagination is honoured as ONE page, unchanged and unwalked.
+      if (params.pagination) {
+        const envelope = await post(
+          `/publisher/${pubId}/promotions`,
+          { filters, pagination: params.pagination },
+          stats,
+        );
+        return asArray(extractCollection(envelope, ["data", "promotions", "offers"]));
+      }
+
+      const all = [];
+      let reason = EXHAUSTION.PAGE_CAP;
+      let pagesFetched = 0;
+      // Every page identity accepted so far, not just the last one. Function-local and bounded by
+      // AWIN_MAX_OFFER_PAGES entries, so it cannot grow beyond the walk that owns it, and it is
+      // discarded with the call — nothing here is recorded, returned or logged.
+      const seenPages = new Set();
+
+      for (let page = 1; page <= AWIN_MAX_OFFER_PAGES; page += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        const { envelope, rows } = await fetchPage(page);
+        pagesFetched += 1;
+
+        const identity = offersPageIdentity(rows);
+        if (rows.length && seenPages.has(identity)) {
+          // A page we already hold. The supplier is not honouring `page`, so these rows are
+          // duplicates of ones already accumulated and are NOT appended again, and the rest of the
+          // catalogue is unreachable by this walk — which makes the run a truncation, not a
+          // healthy read. Empty pages never participate: they are ended by the empty-page rule
+          // below, and an empty identity must not be mistaken for a repeat.
+          reason = EXHAUSTION.REPEATED_PAGE;
+          break;
+        }
+        if (rows.length) seenPages.add(identity);
+        all.push(...rows);
+
+        const signal = awinOffersPaginationSignal(envelope, { page, pageSize: AWIN_OFFERS_PAGE_SIZE });
+        if (signal.hasMore === false) {
+          reason = signal.reason ?? EXHAUSTION.SUPPLIER_HAS_NEXT_FALSE;
+          break;
+        }
+        if (rows.length === 0) {
+          reason = EXHAUSTION.EMPTY_PAGE;
+          break;
+        }
+        if (rows.length < AWIN_OFFERS_PAGE_SIZE) {
+          reason = EXHAUSTION.SHORT_PAGE;
+          break;
+        }
+        // Falling out of the loop bound leaves `reason` at PAGE_CAP, which is the truncation.
+      }
+
+      recordExhaustion(stats, reason, { pagesFetched });
+      return all;
     },
 
     /**

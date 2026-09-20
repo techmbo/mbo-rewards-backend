@@ -282,8 +282,10 @@ describe("campaigns and coupons are untouched", () => {
 
   it("22 - production fetchCampaigns and fetchCoupons are unchanged", () => {
     assert.match(ADAPTER_SRC, /relationship: params\.relationship \?\? "joined",/);
-    assert.match(ADAPTER_SRC, /pagination: params\.pagination \?\? \{ page: 1, pageSize: 200 \}/);
-    assert.match(ADAPTER_SRC, /await post\(`\/publisher\/\$\{pubId\}\/promotions`, body, stats\)/);
+    // 9A.0b-ii gave fetchCoupons a page walk; the page size and the endpoint did not move.
+    assert.match(ADAPTER_SRC, /export const AWIN_OFFERS_PAGE_SIZE = 200;/);
+    assert.match(ADAPTER_SRC, /pagination: \{ page, pageSize: AWIN_OFFERS_PAGE_SIZE \}/);
+    assert.match(ADAPTER_SRC, /await post\(\s*`\/publisher\/\$\{pubId\}\/promotions`/);
     // The date serializer touches transactions only.
     const coupons = ADAPTER_SRC.slice(
       ADAPTER_SRC.indexOf("async fetchCoupons("),

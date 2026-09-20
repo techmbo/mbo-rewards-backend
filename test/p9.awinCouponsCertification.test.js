@@ -145,7 +145,9 @@ describe("awin coupons — the endpoint is pinned to production's", () => {
   });
 
   it("2b — production sync still builds that same path and verb", () => {
-    assert.match(ADAPTER_SRC, /await post\(`\/publisher\/\$\{pubId\}\/promotions`, body, stats\)/);
+    // 9A.0b-ii moved the body inline when fetchCoupons learned to walk pages. The path and the
+    // verb did not change, and both branches of the fetcher still address exactly this one.
+    assert.equal((ADAPTER_SRC.match(/await post\(\s*`\/publisher\/\$\{pubId\}\/promotions`/g) ?? []).length, 2);
     assert.match(ADAPTER_SRC, /path: \(resolved\) => `\/publisher\/\$\{resolved\.publisherId\}\/promotions`/);
   });
 
@@ -153,20 +155,25 @@ describe("awin coupons — the endpoint is pinned to production's", () => {
     const { spy } = await certify({ response: envelope([PROMOTION_ROW]) });
     assert.deepEqual(spy.calls[0].body, { filters: {}, pagination: { page: 1, pageSize: 200 } });
 
-    // Not asserted by eye: the production defaults are read out of fetchCoupons' own source and
-    // compared to what the probe actually sent, so the two cannot drift apart silently. An earlier
-    // probe sent pageSize 1 — smaller, not safer — and the supplier answered HTTP 500.
-    const prodDefaults = ADAPTER_SRC.slice(
-      ADAPTER_SRC.indexOf("async fetchCoupons("),
-      ADAPTER_SRC.indexOf("async fetchConversions("),
-    );
-    const filters = prodDefaults.match(/filters: params\.filters \?\? (\{\})/);
-    const pagination = prodDefaults.match(/pagination: params\.pagination \?\? (\{ page: \d+, pageSize: \d+ \})/);
-    assert.ok(filters && pagination, "production's defaults could not be read");
-    // syncAwinAccount calls fetchCoupons({}, stats), so the defaults ARE the production body.
-    // eslint-disable-next-line no-new-func
-    const productionBody = new Function(`return { filters: ${filters[1]}, pagination: ${pagination[1]} };`)();
-    assert.deepEqual(spy.calls[0].body, productionBody, "the probe body diverged from production's");
+    // Not asserted by eye, and no longer read out of the source either: since 9A.0b-ii taught
+    // fetchCoupons to walk pages, production's body is whatever its FIRST page sends. So it is
+    // obtained by running production against a spy and compared to the probe's, which cannot
+    // drift the way a regex over defaults could. An earlier probe sent pageSize 1 — smaller, not
+    // safer — and the supplier answered HTTP 500.
+    const productionCalls = [];
+    const productionAdapter = createAwinAdapter({
+      accessToken: TOKEN,
+      publisherId: PUBLISHER_ID,
+      httpClient: {
+        get: async () => ({ data: {} }),
+        post: async (path, body) => {
+          productionCalls.push(body);
+          return { data: { data: [] } };
+        },
+      },
+    });
+    await productionAdapter.fetchCoupons({}, { requestCount: 0 });
+    assert.deepEqual(spy.calls[0].body, productionCalls[0], "the probe body diverged from production's");
   });
 
   it("2c2 — pageSize 200 is REQUESTED, but only one row is kept", async () => {
@@ -330,7 +337,7 @@ describe("awin coupons — honest outcomes", () => {
     }
     // Production's keys AND the probe spec's own — the mutation that narrows the spec must fail
     // even though extractCollection's generic fallback would still find the array.
-    assert.match(ADAPTER_SRC, /extractCollection\(data, \["data", "promotions", "offers"\]\)/);
+    assert.match(ADAPTER_SRC, /extractCollection\(envelope, \["data", "promotions", "offers"\]\)/);
     const start = ADAPTER_SRC.indexOf("  coupons: {");
     const spec = ADAPTER_SRC.slice(start, ADAPTER_SRC.indexOf("\n  },", start));
     assert.match(spec, /collectionKeys: \["data", "promotions", "offers"\],/);
@@ -451,9 +458,14 @@ describe("nothing else changed", () => {
     assert.equal(listProbeSourceObjects("partnerize").length, 8);
   });
 
-  it("9b — production AWIN sync fetchers are unchanged", () => {
+  it("9b — production's fetchers keep the contract certification depends on", () => {
     assert.match(ADAPTER_SRC, /async fetchCoupons\(params = \{\}, stats = null\) \{/);
-    assert.match(ADAPTER_SRC, /pagination: params\.pagination \?\? \{ page: 1, pageSize: 200 \}/);
+    // 9A.0b-ii gave fetchCoupons a page walk. What certification depends on is unchanged: the page
+    // size is still 200 and still not a variable, and a caller that pins pagination still gets
+    // exactly that one page.
+    assert.match(ADAPTER_SRC, /export const AWIN_OFFERS_PAGE_SIZE = 200;/);
+    assert.match(ADAPTER_SRC, /if \(params\.pagination\) \{/);
+    assert.match(ADAPTER_SRC, /\{ filters, pagination: params\.pagination \}/);
     assert.match(ADAPTER_SRC, /showBasketProducts: params\.showBasketProducts !== false,/);
     const start = ADAPTER_SRC.indexOf("async fetchCertificationSample(");
     const body = ADAPTER_SRC.slice(start, ADAPTER_SRC.indexOf("\n    },", start));

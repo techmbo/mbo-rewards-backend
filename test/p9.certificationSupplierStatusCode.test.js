@@ -287,6 +287,8 @@ describe("the failure path is shared, so every network gets it", () => {
     const adapter = readFileSync("src/adapters/awin.adapter.js", "utf8");
     assert.match(adapter, /path: \(resolved\) => `\/publisher\/\$\{resolved\.publisherId\}\/promotions`/);
     assert.match(adapter, /body: \(\) => \(\{ filters: \{\}, pagination: \{ page: 1, pageSize: 200 \} \}\)/);
-    assert.match(adapter, /pagination: params\.pagination \?\? \{ page: 1, pageSize: 200 \}/);
+    // 9A.0b-ii gave production's fetchCoupons a page walk. The certification body above is
+    // unchanged, and the page size production asks for is still 200.
+    assert.match(adapter, /export const AWIN_OFFERS_PAGE_SIZE = 200;/);
   });
 });

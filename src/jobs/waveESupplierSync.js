@@ -24,6 +24,10 @@ import {
   summarizeSourceObjectRun,
   evidenceFromRunSummary,
 } from "./sourceObjectRuns.js";
+import {
+  AWIN_OFFERS_PAGE_CAP_CODE,
+  AWIN_OFFERS_REPEATED_PAGE_CODE,
+} from "../adapters/awin.adapter.js";
 import { resultRows } from "../modules/networkOps/sourceObjectSync.service.js";
 import { unavailableOutcome, withFetchFailureSignal, withSourceOutcome } from "./sourceFetchOutcome.js";
 
@@ -644,7 +648,20 @@ export async function syncAwinAccount(accountLabel = "default") {
       ...runCtx,
       sourceObject: "offers",
       endpoint: "GET offers / coupons",
-      execute: () => adapter.fetchCoupons({}, stats),
+      // The offers walk stops at AWIN_MAX_OFFER_PAGES and returns what it has. That exit means the
+      // catalogue was still offering pages when we stopped asking, so the run is PARTIAL rather
+      // than a SUCCESS holding fewer rows. Every other exit is healthy and only carries evidence
+      // of WHY it ended — and a short or empty page is recorded as the inference it is.
+      //
+      // programmes above is deliberately NOT wrapped: no page parameter is documented on that
+      // endpoint and its response is not read for metadata, so there is nothing truthful to
+      // record. It stays UNKNOWN and is not eligible for a reconciliation allow-list.
+      execute: () =>
+        withSourceOutcome(stats, () => adapter.fetchCoupons({}, stats), {
+          truncationCode: AWIN_OFFERS_PAGE_CAP_CODE,
+          repeatedPageCode: AWIN_OFFERS_REPEATED_PAGE_CODE,
+          endpoint: "POST /publisher/{publisherId}/promotions",
+        }),
     });
     sourceObjectRuns.push(summarizeSourceObjectRun(run));
     couponsRaw = resultRows(run);

@@ -572,12 +572,14 @@ describe("9A.0a-iii — a heuristic is never recorded as supplier-confirmed", ()
     }
   });
 
-  it("neither a cap nor an unknown stop may claim the walk reached the end", () => {
+  it("no cap, repeat or unknown stop may claim the walk reached the end", () => {
+    // A repeated page joins the cap and the unknown stop: the supplier is not honouring `page`,
+    // so the walk plainly did not reach the end of the catalog.
+    const notExhausted = new Set([EXHAUSTION.PAGE_CAP, EXHAUSTION.REPEATED_PAGE, EXHAUSTION.UNKNOWN]);
     for (const reason of Object.values(EXHAUSTION)) {
       const stats = {};
       recordExhaustion(stats, reason);
-      const expected = reason !== EXHAUSTION.PAGE_CAP && reason !== EXHAUSTION.UNKNOWN;
-      assert.equal(stats[EXHAUSTION_STATS_KEY].exhausted, expected, reason);
+      assert.equal(stats[EXHAUSTION_STATS_KEY].exhausted, !notExhausted.has(reason), reason);
     }
   });
 
@@ -592,10 +594,13 @@ describe("9A.0a-iii — a heuristic is never recorded as supplier-confirmed", ()
       );
       assert.ok(!src.includes('from "../jobs/'), `${network} must not reach into jobs/`);
     }
-    assert.match(
-      OUTCOME_SRC,
-      /export \{ EXHAUSTION, EXHAUSTION_STATS_KEY, recordExhaustion \} from "\.\.\/core\/paginationExhaustion\.js";/,
-    );
+    // Names, not line shape: the re-export gained TRUNCATION_REASONS and wrapped.
+    const reexport = OUTCOME_SRC.match(/export \{([^}]*)\} from "\.\.\/core\/paginationExhaustion\.js";/);
+    assert.ok(reexport, "jobs/ no longer re-exports the vocabulary");
+    const names = reexport[1].split(",").map((n) => n.trim()).filter(Boolean);
+    for (const required of ["EXHAUSTION", "EXHAUSTION_STATS_KEY", "recordExhaustion"]) {
+      assert.ok(names.includes(required), `${required} is no longer re-exported`);
+    }
     assert.ok(!VOCABULARY_SRC.includes("import "), "the vocabulary depends on nothing");
   });
 
@@ -608,21 +613,60 @@ describe("9A.0a-iii — a heuristic is never recorded as supplier-confirmed", ()
       "SHORT_PAGE",
       "EMPTY_PAGE",
       "PAGE_CAP",
+      "REPEATED_PAGE",
       "UNKNOWN",
     ]);
   });
 
-  it("only PAGE_CAP turns an otherwise healthy walk PARTIAL", async () => {
+  it("only a truncation turns an otherwise healthy walk PARTIAL", async () => {
+    // Two reasons are truncations: our own cap, and a page the supplier re-delivered. UNKNOWN is
+    // deliberately NOT one — it is a defensive stop that asserts nothing either way.
+    const truncations = new Set([EXHAUSTION.PAGE_CAP, EXHAUSTION.REPEATED_PAGE]);
     for (const reason of Object.values(EXHAUSTION)) {
       const stats = {};
       const outcome = await withSourceOutcome(stats, async () => {
         recordExhaustion(stats, reason, { pagesFetched: 1 });
         return [{ id: "zz1zz" }];
       });
-      const expected = reason === EXHAUSTION.PAGE_CAP ? SYNC_OBS_STATUS.PARTIAL : SYNC_OBS_STATUS.SUCCESS;
+      const expected = truncations.has(reason) ? SYNC_OBS_STATUS.PARTIAL : SYNC_OBS_STATUS.SUCCESS;
       assert.equal(terminalStatusFor(outcome), expected, reason);
       assert.equal(rowsOf(outcome).length, 1, `${reason} keeps its rows`);
+      assert.equal(outcome?.metadata?.truncated === true, truncations.has(reason), reason);
+      if (truncations.has(reason)) assert.equal(outcome.metadata.fetchFailed, false, reason);
     }
+  });
+
+  it("a repeat and a cap are told apart by their codes, not merged", async () => {
+    const codes = {};
+    for (const reason of [EXHAUSTION.PAGE_CAP, EXHAUSTION.REPEATED_PAGE]) {
+      const stats = {};
+      // eslint-disable-next-line no-await-in-loop
+      const outcome = await withSourceOutcome(
+        stats,
+        async () => {
+          recordExhaustion(stats, reason, { pagesFetched: 1 });
+          return [{ id: "zz1zz" }];
+        },
+        { truncationCode: "ZZ_CAP", repeatedPageCode: "ZZ_REPEAT" },
+      );
+      codes[reason] = outcome.metadata.errorCode;
+    }
+    assert.equal(codes[EXHAUSTION.PAGE_CAP], "ZZ_CAP");
+    assert.equal(codes[EXHAUSTION.REPEATED_PAGE], "ZZ_REPEAT", "a repeat was reported as a cap");
+  });
+
+  it("a pager that never records a repeat needs no new code", async () => {
+    // repeatedPageCode falls back to truncationCode, so every existing call site is unchanged.
+    const stats = {};
+    const outcome = await withSourceOutcome(
+      stats,
+      async () => {
+        recordExhaustion(stats, EXHAUSTION.REPEATED_PAGE, { pagesFetched: 1 });
+        return [{ id: "zz1zz" }];
+      },
+      { truncationCode: "ZZ_CAP_ONLY" },
+    );
+    assert.equal(outcome.metadata.errorCode, "ZZ_CAP_ONLY");
   });
 });
 
