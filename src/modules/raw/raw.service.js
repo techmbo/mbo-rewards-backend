@@ -556,6 +556,22 @@ async function stageManyRawEntities({
       entityType === "campaign" && String(networkSource).startsWith("optimise_");
     const benchmark = String(process.env.SYNC_UPSERT_BENCHMARK || "").toLowerCase() === "true";
 
+    /**
+     * Phase-boundary diagnostics. The existing `[sync-benchmark]` line is emitted only at the END
+     * of this function, so an invocation killed mid-batch produces no timing at all — its absence
+     * proves nothing about WHICH phase consumed the budget. These lines close each phase as it
+     * completes, so a truncated invocation still reports how far it got.
+     *
+     * Counts and durations only: never a payload, an externalId, a coupon code, a row body, a
+     * token or a secret. `networkSource` and `entityType` are the same two identifiers the
+     * existing benchmark line already carries.
+     */
+    const emitPhase = (phase, fields) => {
+      if (!benchmark) return;
+      // eslint-disable-next-line no-console
+      console.info(`[sync-phase] ${networkSource}:${entityType} ${phase} ${fields}`);
+    };
+
     const prepareStart = Date.now();
     const preparedRecords = rows
       .map((rawData, index) => {
@@ -586,6 +602,7 @@ async function stageManyRawEntities({
       })
       .filter(Boolean);
     const prepareMs = Date.now() - prepareStart;
+    emitPhase("prepared", `rows=${rows.length} prepared=${preparedRecords.length} ms=${prepareMs}`);
 
     let rawOutcomes = [];
     try {
@@ -594,6 +611,12 @@ async function stageManyRawEntities({
         {
           metadata: { sourceAccountKey: sourceAccountKey ?? null },
           evidence,
+          // Fires after RECEIVED persistence and again after schema observation, which happen
+          // inside that call rather than here. Ignored entirely when the flag is off.
+          onPhase: benchmark
+            ? ({ phase, count, ms }) =>
+                emitPhase(phase, count === null ? `ms=${ms}` : `outcomes=${count} ms=${ms}`)
+            : null,
         },
       );
     } catch (error) {
@@ -658,6 +681,7 @@ async function stageManyRawEntities({
   }
 
   const dbWriteMs = Date.now() - dbWriteStart;
+  emitPhase("entities", `rows=${preparedRecords.length} ms=${dbWriteMs}`);
 
   // Link latest raw rows to staged Entity ids (best-effort, non-blocking).
   // The raw rows were just written above, so their ids come from this batch's own outcomes: no

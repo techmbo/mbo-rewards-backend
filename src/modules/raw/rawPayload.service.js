@@ -396,8 +396,28 @@ async function observeBatchSchema(outcomes, db) {
 
 export async function persistRawPayloadsForPreparedRecords(
   preparedRecords,
-  { metadata = null, required = false, evidence = null, observeSchema = true, db = null } = {},
+  {
+    metadata = null,
+    required = false,
+    evidence = null,
+    observeSchema = true,
+    db = null,
+    /**
+     * Diagnostic-only phase boundary hook: `({ phase, count, ms })` after RECEIVED persistence and
+     * again after schema observation. Optional, never awaited, and every throw it makes is
+     * swallowed, so supplying one cannot change what this function does or returns.
+     */
+    onPhase = null,
+  } = {},
 ) {
+  const reportPhase = (phase, count, ms) => {
+    if (!onPhase) return;
+    try {
+      onPhase({ phase, count, ms });
+    } catch {
+      // Instrumentation must never affect raw lineage.
+    }
+  };
   const client = db ?? prisma;
   // One row at a time made this Theta(rows) SERIAL round trips: a catalog of a few thousand rows
   // spent the whole invocation here. The per-row work is unchanged and rows are independent, so it
@@ -406,6 +426,7 @@ export async function persistRawPayloadsForPreparedRecords(
   // serial order would have produced.
   const results = new Array(preparedRecords.length);
   let requiredFailure = null;
+  const persistStart = Date.now();
   await runWithConcurrency(preparedRecords, DB_WORK_CONCURRENCY_CEILING, async (record, index) => {
     try {
       const outcome = await persistRawPayload(
@@ -438,8 +459,14 @@ export async function persistRawPayloadsForPreparedRecords(
       results[index] = { record: null, created: false, failed: true, error };
     }
   });
+  const persistMs = Date.now() - persistStart;
   if (required && requiredFailure) throw requiredFailure;
-  if (observeSchema) await observeBatchSchema(results, client);
+  reportPhase("received", results.length, persistMs);
+  if (observeSchema) {
+    const observeStart = Date.now();
+    await observeBatchSchema(results, client);
+    reportPhase("observed", null, Date.now() - observeStart);
+  }
   return results;
 }
 
