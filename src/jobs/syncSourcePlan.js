@@ -82,6 +82,21 @@ export const OPTIMISE_CAMPAIGN_PAGES_PER_UNIT = 8;
 export const OPTIMISE_CAMPAIGN_PAGE_LIMIT = 100;
 
 /**
+ * Awin offers: ONE supplier page per unit, 200 offers wide.
+ *
+ * Optimise takes 8 pages per unit because its cost is the 12.5s limiter and its pages are small.
+ * Awin's cost is the opposite — the fetch is cheap and STAGING is what exhausts the invocation, at
+ * roughly 11s per 200 coupons measured in the database's own region. One page per unit keeps a
+ * slice near that proven figure instead of extrapolating past it.
+ *
+ * The width is the adapter's page size, restated here rather than imported: syncSourcePlan is
+ * planning vocabulary and must not pull an HTTP adapter into every planner import. A test pins
+ * the two together so they cannot drift.
+ */
+export const AWIN_OFFERS_PAGES_PER_UNIT = 1;
+export const AWIN_OFFERS_PAGE_LIMIT = 200;
+
+/**
  * Per-network span behaviour, read from the sync layer as it stands:
  *   incremental — the range builder narrows to lastSuccessfulSync − overlap when a previous
  *                 successful sync exists (boostiny/optimise/trackier/admitad/rakuten events);
@@ -161,7 +176,17 @@ const FAMILY_SOURCES = Object.freeze({
   // Limiter 3000ms. Supplier caps the transactions range at 31 days.
   awin: Object.freeze([
     source({ sourceObject: "programmes", notes: "GET programmes." }),
-    source({ sourceObject: "offers", notes: "GET offers / coupons." }),
+    source({
+      sourceObject: "offers",
+      paged: true,
+      // One supplier page per unit. 5,000 offers stage at roughly 11s per 200 rows in the
+      // database's own region, so a whole catalogue is ~247s of staging on top of ~96s of
+      // fetching — past a 300s invocation before any safety margin. One page in, one page
+      // staged, checkpoint, return.
+      pagesPerUnit: AWIN_OFFERS_PAGES_PER_UNIT,
+      pageLimit: AWIN_OFFERS_PAGE_LIMIT,
+      notes: "POST /publisher/{publisherId}/promotions, page-paginated. One page per unit: the catalogue is too large to fetch and stage inside one invocation.",
+    }),
     source({ sourceObject: "transactions", windowed: true, windowDays: 30, maxWindowDays: 31, notes: "GET transactions (startDate/endDate); supplier hard cap is 31 days." }),
   ]),
   // No client-side limiter.
@@ -378,6 +403,14 @@ export function nextPagedUnit(descriptor = {}, pagination = null) {
     campaignPageOffset: nextOffset,
     campaignPageLimit: descriptor.campaignPageLimit ?? source.pageLimit,
     campaignPageBudget: descriptor.campaignPageBudget ?? source.pagesPerUnit,
+    // Opaque slice state the SOURCE asked to carry forward, durable in the unit descriptor.
+    // Awin uses it for the page identities already accepted: a walk keeps those in a local Set,
+    // and a walk split across invocations has no local anything, so without carrying them a
+    // re-delivered page could not be recognised after the first slice. Never part of a unit's
+    // identity — two attempts at the same offset are the same work whatever they carry.
+    ...(pagination.carry === undefined || pagination.carry === null
+      ? {}
+      : { campaignPageCarry: pagination.carry }),
   };
 }
 

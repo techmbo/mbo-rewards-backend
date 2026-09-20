@@ -175,8 +175,24 @@ describe("the catalog is walked in bounded slices", () => {
       { i: campaigns[0].campaignPageIndex, o: campaigns[0].campaignPageOffset, l: campaigns[0].campaignPageLimit, b: campaigns[0].campaignPageBudget },
       { i: 0, o: 0, l: LIMIT, b: PAGES },
     );
-    // Other networks' campaigns are untouched by this change.
-    assert.ok(units.every((u) => u.platform === "optimise_sea" || u.campaignPageOffset === undefined));
+    // Other networks' CAMPAIGNS are untouched by this change — which is what this guards. Awin
+    // offers is separately paged for its own reason (staging 5,000 coupons cannot fit one
+    // invocation), so the claim is scoped to the source object rather than to the platform.
+    const foreignCampaigns = units.filter(
+      (u) => u.platform !== "optimise_sea" && u.sourceObject === "campaigns",
+    );
+    assert.ok(
+      foreignCampaigns.every((u) => u.campaignPageOffset === undefined),
+      "another network's campaigns became paged",
+    );
+    const foreignPaged = units.filter(
+      (u) => u.platform !== "optimise_sea" && u.campaignPageOffset !== undefined,
+    );
+    assert.deepEqual(
+      [...new Set(foreignPaged.map((u) => `${u.platform}:${u.sourceObject}`))].sort(),
+      ["awin:offers"],
+      "an unexpected source became paged",
+    );
   });
 
   it("the page budget is a named constant sized from the 12.5s limiter", () => {
@@ -630,7 +646,11 @@ describe("source guards", () => {
   });
 
   it("the planner version was bumped, because the unit shape changed", () => {
-    assert.equal(PLANNER_VERSION, 6);
+    // 6 was this change. It has since been superseded by 7 (Awin offers became durable-paged),
+    // and what this guards is that 6's OWN rationale is still recorded — a later bump must not
+    // erase why an earlier one happened.
+    assert.ok(PLANNER_VERSION >= 6, "the planner version went backwards");
     assert.match(SERVICE_SRC, /\* 6 — Optimise campaigns became a PAGED source\./);
+    assert.match(SERVICE_SRC, new RegExp(`export const PLANNER_VERSION = ${PLANNER_VERSION};`));
   });
 });

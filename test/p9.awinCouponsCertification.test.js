@@ -147,7 +147,9 @@ describe("awin coupons — the endpoint is pinned to production's", () => {
   it("2b — production sync still builds that same path and verb", () => {
     // 9A.0b-ii moved the body inline when fetchCoupons learned to walk pages. The path and the
     // verb did not change, and both branches of the fetcher still address exactly this one.
-    assert.equal((ADAPTER_SRC.match(/await post\(\s*`\/publisher\/\$\{pubId\}\/promotions`/g) ?? []).length, 2);
+    // Three call sites now: the walk's page fetch, the pinned-pagination escape hatch, and the
+    // bounded slice. All three address exactly this path and verb, which is what is pinned.
+    assert.equal((ADAPTER_SRC.match(/await post\(\s*`\/publisher\/\$\{pubId\}\/promotions`/g) ?? []).length, 3);
     assert.match(ADAPTER_SRC, /path: \(resolved\) => `\/publisher\/\$\{resolved\.publisherId\}\/promotions`/);
   });
 

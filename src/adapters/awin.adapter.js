@@ -171,12 +171,13 @@ export function awinOffersPaginationSignal(envelope, { page, pageSize }) {
  * A page's identity, for the repeated-page guard only.
  *
  * Built from the stable supplier identifiers Awin promotion rows already carry; a row without one
- * contributes a private fingerprint of its own content instead. Both are LOCAL: the returned key
- * is compared against the previous page's and then discarded. It is never recorded on the run,
- * never logged and never returned to a caller, because a promotion id is row data.
+ * contributes a private fingerprint of its own content instead — and the result is a DIGEST of
+ * those, never the identifiers themselves. A promotion id is row data and never leaves this
+ * adapter; a slice can hand its digests to the orchestrator to carry across invocations, and they
+ * compare exactly as well while carrying nothing back out.
  */
 function offersPageIdentity(rows) {
-  return rows
+  const joined = rows
     .map((row) => {
       const id = row?.promotionId ?? row?.id ?? row?._id ?? null;
       if (id !== null && id !== undefined && String(id).trim() !== "") return `i:${String(id)}`;
@@ -187,6 +188,49 @@ function offersPageIdentity(rows) {
       }
     })
     .join("|");
+  // Digested, not returned raw. A slice hands its accepted page identities to the orchestrator so
+  // the next invocation can still recognise a re-delivered page, and that lands in a durable unit
+  // descriptor — which is no place for a list of promotion ids. A one-way digest compares exactly
+  // as well and carries nothing back out.
+  return createHash("sha1").update(joined).digest("hex");
+}
+
+/**
+ * What one fetched page means for the walk, decided in ONE place.
+ *
+ * The full walk and a single resumable slice must never disagree about when a catalogue ends or
+ * why, so both call this rather than each carrying its own copy of the rules. `seen` is the set of
+ * page identities already accepted — a Set inside one walk, a rehydrated list across invocations.
+ *
+ * Precedence is the walk's, unchanged: a page already held is a truncation; then the supplier's
+ * own metadata; then the empty-page and short-page inferences; and page `cap` is the truncation a
+ * caller falls into when none of those fired.
+ */
+export function classifyOffersPage({ envelope, rows, page, seen, cap = AWIN_MAX_OFFER_PAGES }) {
+  const identity = offersPageIdentity(rows);
+  // Empty pages never participate in the repeat check: they are ended by the empty-page rule, and
+  // an empty identity must not be mistaken for a page we already hold.
+  if (rows.length && seen?.has?.(identity)) {
+    return { accept: false, done: true, reason: EXHAUSTION.REPEATED_PAGE, identity };
+  }
+
+  const signal = awinOffersPaginationSignal(envelope, { page, pageSize: AWIN_OFFERS_PAGE_SIZE });
+  if (signal.hasMore === false) {
+    return {
+      accept: true,
+      done: true,
+      reason: signal.reason ?? EXHAUSTION.SUPPLIER_HAS_NEXT_FALSE,
+      identity,
+    };
+  }
+  if (rows.length === 0) return { accept: true, done: true, reason: EXHAUSTION.EMPTY_PAGE, identity };
+  if (rows.length < AWIN_OFFERS_PAGE_SIZE) {
+    return { accept: true, done: true, reason: EXHAUSTION.SHORT_PAGE, identity };
+  }
+  // A full page with no terminal signal: more remains. Stopping HERE because the cap is reached is
+  // a truncation, not the end of the catalogue.
+  if (page >= cap) return { accept: true, done: true, reason: EXHAUSTION.PAGE_CAP, identity };
+  return { accept: true, done: false, reason: null, identity };
 }
 
 /**
@@ -524,37 +568,69 @@ export function createAwinAdapter({
         const { envelope, rows } = await fetchPage(page);
         pagesFetched += 1;
 
-        const identity = offersPageIdentity(rows);
-        if (rows.length && seenPages.has(identity)) {
-          // A page we already hold. The supplier is not honouring `page`, so these rows are
-          // duplicates of ones already accumulated and are NOT appended again, and the rest of the
-          // catalogue is unreachable by this walk — which makes the run a truncation, not a
-          // healthy read. Empty pages never participate: they are ended by the empty-page rule
-          // below, and an empty identity must not be mistaken for a repeat.
-          reason = EXHAUSTION.REPEATED_PAGE;
+        const verdict = classifyOffersPage({ envelope, rows, page, seen: seenPages });
+        if (verdict.accept) {
+          if (rows.length) seenPages.add(verdict.identity);
+          all.push(...rows);
+        }
+        if (verdict.done) {
+          reason = verdict.reason;
           break;
         }
-        if (rows.length) seenPages.add(identity);
-        all.push(...rows);
-
-        const signal = awinOffersPaginationSignal(envelope, { page, pageSize: AWIN_OFFERS_PAGE_SIZE });
-        if (signal.hasMore === false) {
-          reason = signal.reason ?? EXHAUSTION.SUPPLIER_HAS_NEXT_FALSE;
-          break;
-        }
-        if (rows.length === 0) {
-          reason = EXHAUSTION.EMPTY_PAGE;
-          break;
-        }
-        if (rows.length < AWIN_OFFERS_PAGE_SIZE) {
-          reason = EXHAUSTION.SHORT_PAGE;
-          break;
-        }
-        // Falling out of the loop bound leaves `reason` at PAGE_CAP, which is the truncation.
       }
 
       recordExhaustion(stats, reason, { pagesFetched });
       return all;
+    },
+
+    /**
+     * ONE page of the offers catalogue, for a bounded resumable unit.
+     *
+     * The same endpoint, the same page size and the same termination rules as the walk above —
+     * they share classifyOffersPage, so there is one set of pagination semantics rather than two.
+     * What differs is that this returns after a single supplier request and hands back everything
+     * the next invocation needs to continue: the next offset, whether more remains, and the page
+     * identities seen so far, which a walk keeps in a local Set and a slice must carry durably.
+     *
+     * Offsets rather than page numbers, because that is what the orchestration's paged-unit model
+     * already speaks. offset 0 is page 1, offset 200 is page 2, and a retry of the same offset
+     * re-requests exactly the same page.
+     */
+    async fetchCouponsPage({ offset = 0, limit = AWIN_OFFERS_PAGE_SIZE, seen = [], filters = {} } = {}, stats = null) {
+      const pageSize = Number.isInteger(limit) && limit > 0 ? limit : AWIN_OFFERS_PAGE_SIZE;
+      const start = Number.isInteger(offset) && offset >= 0 ? offset : 0;
+      const page = Math.floor(start / pageSize) + 1;
+      const seenSet = new Set(Array.isArray(seen) ? seen : []);
+
+      const envelope = await post(
+        `/publisher/${pubId}/promotions`,
+        { filters, pagination: { page, pageSize } },
+        stats,
+      );
+      const rows = asArray(extractCollection(envelope, ["data", "promotions", "offers"]));
+      const verdict = classifyOffersPage({ envelope, rows, page, seen: seenSet });
+
+      const accepted = verdict.accept ? rows : [];
+      if (verdict.accept && rows.length) seenSet.add(verdict.identity);
+      // Recorded ONLY when this slice is the terminal one. A mid-walk slice has not exhausted
+      // anything, and recording a reason for it would hand withSourceOutcome an `exhausted: true`
+      // for a catalogue that plainly has more pages — the exact false completeness claim the
+      // exhaustion vocabulary exists to prevent. Its truthfulness lives in `hasMore` instead,
+      // which is what plans the next unit.
+      if (verdict.done) recordExhaustion(stats, verdict.reason, { pagesFetched: 1 });
+
+      return {
+        rows: accepted,
+        page,
+        offset: start,
+        pageSize,
+        pagesFetched: 1,
+        hasMore: !verdict.done,
+        nextOffset: verdict.done ? null : start + pageSize,
+        reason: verdict.done ? verdict.reason : null,
+        // Bounded by the page cap: at most AWIN_MAX_OFFER_PAGES identities ever accumulate.
+        seen: [...seenSet],
+      };
     },
 
     /**

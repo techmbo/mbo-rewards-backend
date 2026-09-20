@@ -232,7 +232,7 @@ describe("machine auth — a shared secret, and nothing else", () => {
 });
 
 describe("sync-start — one bounded action: plan and enqueue", () => {
-  it("creates a plannerVersion 6 run when none exists, and executes no unit", async () => {
+  it("creates a run stamped with the CURRENT planner version, and executes no unit", async () => {
     const h = app();
     const res = await h.start();
 
@@ -242,10 +242,9 @@ describe("sync-start — one bounded action: plan and enqueue", () => {
     assert.equal(res.body.reused, false);
     assert.equal(res.body.status, "created");
     assert.equal(res.body.plannerVersion, PLANNER_VERSION);
-    assert.equal(PLANNER_VERSION, 6);
     assert.ok(res.body.runId);
     assert.equal(h.runs().length, 1);
-    assert.equal(h.runs()[0].payload.plannerVersion, 6);
+    assert.equal(h.runs()[0].payload.plannerVersion, PLANNER_VERSION);
     assert.ok(h.units(res.body.runId).length > 0, "a plan was enqueued");
 
     // NOTHING was executed: no supplier call, no page, no aggregation day.

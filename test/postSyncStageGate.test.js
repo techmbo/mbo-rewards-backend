@@ -832,12 +832,13 @@ describe("Phase 6d — the worker drives the whole post-sync phase, one unit at 
     assert.equal(done.percentComplete, 100);
   });
 
-  it("a non-current planner version is never advanced, so plannerVersion 6 stays the only shape", async () => {
+  it("a non-current planner version is never advanced, so one shape stays the only shape", async () => {
     resetClock();
     const h = app();
     const run = await runWithCompletedNetwork(h, { platforms: ["boostiny"] });
     assert.equal(h.parent(run.id).payload.plannerVersion, PLANNER_VERSION);
-    assert.equal(PLANNER_VERSION, 6, "Phase 6d does not change the planner version");
+    // Phase 6d did not move the version; later phases legitimately did.
+    assert.equal(typeof PLANNER_VERSION, "number");
 
     await h.prisma.jobRun.update({ where: { id: run.id }, data: { payload: { ...h.parent(run.id).payload, plannerVersion: 5 } } });
     const refused = await h.orchestration.advancePostSync(run.id);

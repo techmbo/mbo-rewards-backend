@@ -88,7 +88,8 @@ export function boundedCampaignIds() {
  * own offset/limit paging, so a retry re-requests exactly the same pages.
  */
 export function boundedCampaignPage() {
-  const { campaignPageOffset, campaignPageLimit, campaignPageBudget } = getSyncOptions();
+  const { campaignPageOffset, campaignPageLimit, campaignPageBudget, campaignPageCarry } =
+    getSyncOptions();
   if (campaignPageOffset === null || campaignPageOffset === undefined) return null;
   const offset = Number(campaignPageOffset);
   if (!Number.isFinite(offset) || offset < 0) {
@@ -100,5 +101,10 @@ export function boundedCampaignPage() {
     offset: Math.floor(offset),
     ...(Number.isFinite(limit) && limit > 0 ? { limit: Math.floor(limit) } : {}),
     ...(Number.isFinite(maxPages) && maxPages > 0 ? { maxPages: Math.floor(maxPages) } : {}),
+    // Opaque slice state the previous slice asked to carry. Passed through untouched: this
+    // function knows the shape of a page, not the shape of a source's continuation state.
+    ...(campaignPageCarry === undefined || campaignPageCarry === null
+      ? {}
+      : { carry: campaignPageCarry }),
   };
 }

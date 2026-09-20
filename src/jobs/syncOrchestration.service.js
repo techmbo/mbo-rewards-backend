@@ -86,8 +86,19 @@ export const DEFAULT_UNIT_MAX_ATTEMPTS = 3;
  * 0991cd7f did, and its completion would materialise commission groups from a catalog only
  * partly staged. Version-5 runs are therefore neither reused nor executed by this planner; they
  * stay readable and are retired deliberately.
+ *
+ * 7 — Awin offers became a DURABLE PAGED source. It was one unit that fetched the whole
+ * catalogue and staged it; production proved that cannot fit one invocation — 5,000 offers is
+ * ~96s of supplier time and ~247s of staging against a 300s cap. It is now one supplier page per
+ * unit, with the next unit planned from what the previous one reported.
+ *
+ * A version-6 Awin offers unit carries NO campaignPage descriptor and no campaignPageCarry. It
+ * therefore cannot be executed as a version-7 unit: with no slice it has no page to fetch and no
+ * digests to recognise a re-delivered page by, so running it would mean the whole-catalogue walk
+ * this version exists to retire. Version-6 runs are neither reused nor executed by this planner;
+ * like version-5 runs they stay readable and are retired deliberately.
  */
-export const PLANNER_VERSION = 6;
+export const PLANNER_VERSION = 7;
 
 /**
  * Why a unit was terminalised without ever reporting a failure: its worker was killed (a

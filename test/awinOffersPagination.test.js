@@ -50,6 +50,19 @@ const CERT_SRC = read("src/modules/ops/networkCertification.service.js");
 const codeOnly = (source) =>
   source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 
+/**
+ * The offers SOURCE OBJECT RUN block.
+ *
+ * Anchored on the endpoint label, which appears only there. `sourceObject: "offers"` alone is no
+ * longer unique — the durable-sync refusal logs the same field before the run is reached.
+ */
+function offersRunBlock() {
+  const marker = 'endpoint: "GET offers / coupons",';
+  const at = SYNC_SRC.indexOf(marker);
+  if (at < 0) throw new Error("the offers run block could not be located");
+  return SYNC_SRC.slice(at).split("\n    });")[0];
+}
+
 const TOKEN = "zzawinaccesstokenzz";
 const PUBLISHER_ID = "zzpublisheridzz";
 const VOUCHER = "zzvouchercodezz";
@@ -518,14 +531,25 @@ describe("9A.0b-ii — the run carries evidence, never row data", () => {
     ]);
   });
 
-  it("the page identity is local: it is never recorded, returned or logged", () => {
-    const fetcher = codeOnly(ADAPTER_SRC).split("async fetchCoupons(")[1].split("\n    },")[0];
-    assert.match(fetcher, /const identity = offersPageIdentity\(rows\);/);
-    assert.ok(!/recordExhaustion\([^)]*identity/.test(fetcher), "the fingerprint reached the run");
-    assert.ok(!fetcher.includes("console."), "the walk logs");
-    assert.match(codeOnly(ADAPTER_SRC), /recordExhaustion\(stats, reason, \{ pagesFetched \}\);/);
-    assert.ok(!codeOnly(ADAPTER_SRC).includes("seenPages }"), "the seen-page set is returned");
-    assert.ok(!/recordExhaustion\([^)]*seenPages/.test(fetcher), "the seen-page set reached the run");
+  it("no promotion id leaves the adapter — the identity is a one-way digest", async () => {
+    const code = codeOnly(ADAPTER_SRC);
+    // The identity is computed from row ids, so it must be hashed before it can be returned.
+    assert.match(code, /createHash\("sha1"\)\.update\(joined\)\.digest\("hex"\)/);
+    assert.ok(!code.includes("console."), "the walk logs");
+    assert.match(code, /recordExhaustion\(stats, reason, \{ pagesFetched \}\);/);
+    assert.ok(!/recordExhaustion\([^)]*identity/.test(code), "the fingerprint reached the run");
+
+    // Behavioural: a slice DOES carry its digests out, and they contain no supplier identifier.
+    const rows = fullPage(5000);
+    const client = spyTransport(() => ({ data: rows }));
+    const page = await adapterOn(client).fetchCouponsPage({ offset: 0 }, { requestCount: 0 });
+    assert.equal(page.seen.length, 1);
+    for (const digest of page.seen) assert.match(digest, /^[0-9a-f]{40}$/);
+    const carried = JSON.stringify(page.seen);
+    for (const row of rows.slice(0, 5)) {
+      assert.ok(!carried.includes(String(row.promotionId)), "a promotion id rode out in the digest");
+    }
+    assert.ok(!carried.includes(VOUCHER), "a voucher code rode out in the digest");
   });
 });
 
@@ -602,14 +626,19 @@ describe("9A.0b-ii — Awin programmes is UNCHANGED and remains UNKNOWN", () => 
     assert.match(programmes, /execute: \(\) => adapter\.fetchCampaigns\(\{\}, stats\),/);
     assert.ok(!programmes.includes("withSourceOutcome"), "programmes was given evidence it does not have");
     // And the reason is written down beside the offers run, not left to be rediscovered.
-    const offers = SYNC_SRC.split('sourceObject: "offers"')[1].split("});")[0];
+    // Sliced to the end of the offers run block, not to the first "});" — the wrapped fetcher
+    // nests calls of its own now.
+    const offers = offersRunBlock();
     assert.match(offers, /UNKNOWN and is not eligible for a reconciliation allow-list/);
   });
 
   it("the offers run is wrapped, with the cap's own stable code", () => {
-    const offers = SYNC_SRC.split('sourceObject: "offers"')[1].split("});")[0];
-    assert.match(offers, /withSourceOutcome\(stats, \(\) => adapter\.fetchCoupons\(\{\}, stats\), \{/);
+    const offers = offersRunBlock();
+    // The wrapper is unchanged; what it wraps is now a bounded page rather than a whole walk.
+    assert.match(offers, /withSourceOutcome\(/);
+    assert.match(offers, /adapter\.fetchCouponsPage\(/);
     assert.match(offers, /truncationCode: AWIN_OFFERS_PAGE_CAP_CODE,/);
+    assert.match(offers, /repeatedPageCode: AWIN_OFFERS_REPEATED_PAGE_CODE,/);
   });
 
   it("transactions, the 31-day rule and commission groups are untouched", () => {

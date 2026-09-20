@@ -194,6 +194,9 @@ async function executeUnit(req, descriptor) {
           campaignPageOffset: descriptor.campaignPageOffset,
           campaignPageLimit: descriptor.campaignPageLimit,
           campaignPageBudget: descriptor.campaignPageBudget,
+          ...(descriptor.campaignPageCarry === null || descriptor.campaignPageCarry === undefined
+            ? {}
+            : { campaignPageCarry: descriptor.campaignPageCarry }),
         }),
   });
 }

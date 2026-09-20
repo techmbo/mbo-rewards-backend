@@ -713,6 +713,19 @@ async function stageManyRawEntities({
   commissionRuleSkipCampaignIds = null,
   /** Skip the campaign-summary commission fan-out for every campaign (fail closed). */
   commissionRuleFanOutDisabled = false,
+  /**
+   * Whether this batch may roll its counters up onto the NetworkSyncRun in `evidence`.
+   *
+   * That run measures the SUPPLIER FETCH. finalizeRun recomputes the run's status from the patch
+   * it is given, so a batch that reports no quarantined rows resolves it to SUCCESS — which would
+   * erase a PARTIAL the fetch recorded truthfully, for example an Awin offers walk that stopped at
+   * its page cap holding part of the catalogue.
+   *
+   * It has never bitten because the invocation died before staging finished. A caller that stages
+   * one fetch in several batches would make it fire once per batch, each with that batch's
+   * counters, so such a caller turns this off and leaves the fetch's own verdict alone.
+   */
+  finalizeSyncRun = true,
 }) {
   if (!rows.length) {
     if (onTiming) onTiming({ dbWriteMs: 0, fieldExtractionMs: 0, batchUpsertMs: 0, rowUpsertMs: 0 });
@@ -973,7 +986,7 @@ async function stageManyRawEntities({
     recordsQuarantined: rawCounters.recordsQuarantined,
   };
 
-  if (evidence?.syncRunId) {
+  if (finalizeSyncRun && evidence?.syncRunId) {
     try {
       await sourceObjectSync.finalizeRun(evidence.syncRunId, {
         ...counters,

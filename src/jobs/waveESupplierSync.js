@@ -28,6 +28,28 @@ import {
   AWIN_OFFERS_PAGE_CAP_CODE,
   AWIN_OFFERS_REPEATED_PAGE_CODE,
 } from "../adapters/awin.adapter.js";
+import { stageAwinOfferRows, stagedCompletely } from "./awinOffersStaging.js";
+import { boundedCampaignPage } from "./syncContext.js";
+import { joinUserMessages } from "./syncErrors.js";
+
+/**
+ * Refusal code for an Awin offers sync asked for outside the durable orchestration.
+ *
+ * Not an error the supplier or the database produced — a refusal this service makes on purpose,
+ * before either is touched, because the honest answer to "sync the offers catalogue now, in one
+ * request" is that it does not fit in one request.
+ */
+export const AWIN_OFFERS_DURABLE_SYNC_REQUIRED = "AWIN_OFFERS_DURABLE_SYNC_REQUIRED";
+
+/**
+ * A bounded offers page whose supplier fetch succeeded but whose staging did not finish.
+ *
+ * Deliberately NOT one of the pagination reasons. page_cap, repeated_page, short_page and
+ * empty_page all describe how much of the CATALOGUE we have; this describes a failure to write
+ * down a page we already hold, which is a different thing and gets a different word. Reporting it
+ * as a truncation would tell an operator the supplier cut us short when it did not.
+ */
+export const AWIN_OFFERS_STAGING_FAILED = "AWIN_OFFERS_STAGING_FAILED";
 import { resultRows } from "../modules/networkOps/sourceObjectSync.service.js";
 import { unavailableOutcome, withFetchFailureSignal, withSourceOutcome } from "./sourceFetchOutcome.js";
 
@@ -573,6 +595,22 @@ export function clampAwinWindowStart({ start, end }) {
 }
 
 export async function syncAwinAccount(accountLabel = "default") {
+  // FIRST, before any database read, any credential use, any adapter and any supplier call.
+  //
+  // An offers-ONLY request with no durable slice asks for exactly the one thing this service
+  // cannot do in a single invocation: the catalogue is ~5,000 offers, roughly 96s of supplier
+  // time and 247s of staging against a 300s cap. Serving the first 200 and answering OK would
+  // tell an operator the offers catalogue had synced when it had not, so the request is refused
+  // and told which route can honour it. Refusing costs nothing because nothing has happened yet.
+  if (requestedSourceObject() === "offers" && !boundedCampaignPage()) {
+    return {
+      skipped: true,
+      code: AWIN_OFFERS_DURABLE_SYNC_REQUIRED,
+      reason:
+        "Awin offers is paged across multiple invocations and must run through the durable sync orchestration, which plans one supplier page per unit. Nothing was fetched or staged.",
+    };
+  }
+
   const flags = await getNetworkAccountSyncFlags("awin", accountLabel);
   if (flags.exists && flags.syncEnabled === false) {
     return {
@@ -592,6 +630,9 @@ export async function syncAwinAccount(accountLabel = "default") {
 
   const networkAccountId = await resolveNetworkAccountId("awin", accountLabel);
   const requested = requestedSourceObject();
+  /** Operator-facing reasons this run did less than it was asked to. Drives partialSuccess. */
+  const warnings = [];
+
   const unavailable = await runUnavailableIfRequested({
     network: "awin",
     networkAccountId,
@@ -643,11 +684,51 @@ export async function syncAwinAccount(accountLabel = "default") {
   }
 
   let couponsRaw = [];
-  if (includeSourceObject(requested, "offers") && typeof adapter.fetchCoupons === "function") {
+  /**
+   * The offers slice this invocation runs, or null when the caller supplied none.
+   *
+   * Awin offers is a durable paged source: orchestration plans unit 0 at offset 0 and plans each
+   * next unit from what the previous one reported, so an orchestrated unit always arrives
+   * carrying its slice. Arriving WITHOUT one means the caller is outside that orchestration.
+   *
+   * Such a caller is REFUSED rather than quietly served the first page. Staging 200 of ~5,000
+   * offers and answering 200 OK would report a source sync that did not happen: the operator
+   * asked for the offers catalogue and would be told it synced. The catalogue spans invocations
+   * now — ~96s of supplier time and ~247s of staging at the rate measured in the database's own
+   * region, against a 300s cap — so the only honest answer to an unbounded request is to say so
+   * and name the route that can do it.
+   */
+  const offersPage = boundedCampaignPage();
+  let offersPagination = null;
+  let offersRefusal = null;
+  if (includeSourceObject(requested, "offers") && !offersPage) {
+    offersRefusal = {
+      code: AWIN_OFFERS_DURABLE_SYNC_REQUIRED,
+      reason:
+        "Awin offers is paged across multiple invocations and must run through the durable sync orchestration, which plans one supplier page per unit. This request carried no bounded page, so nothing was fetched or staged.",
+    };
+    // A run that did NOT sync one of the source objects it was asked for is not a success.
+    // syncState resolves a run to "partial" from `partialSuccess` on any nested result, and shows
+    // the operator whatever `warnings` carries — so the withheld source object has to say so in
+    // both, or an unscoped manual Awin sync reports success while its coupons never moved.
+    warnings.push(
+      "Awin offers were not synced: the offers catalogue is paged across multiple invocations and must run through the durable sync orchestration. Programmes and transactions were unaffected.",
+    );
+    logger.warn(
+      { network: "awin", accountLabel, sourceObject: "offers", code: AWIN_OFFERS_DURABLE_SYNC_REQUIRED },
+      "awin offers refused: no durable bounded page context",
+    );
+  }
+  // Refused BEFORE the supplier is called and before anything is staged: the guard is on the
+  // gate, not inside the fetcher, so a refusal costs zero requests and zero rows.
+  if (includeSourceObject(requested, "offers") && offersPage && typeof adapter.fetchCouponsPage === "function") {
     const run = await runLiveSourceObject({
       ...runCtx,
       sourceObject: "offers",
       endpoint: "GET offers / coupons",
+      // programmes above is deliberately NOT wrapped: no page parameter is documented on that
+      // endpoint and its response is not read for metadata, so there is nothing truthful to
+      // record. It stays UNKNOWN and is not eligible for a reconciliation allow-list.
       // The offers walk stops at AWIN_MAX_OFFER_PAGES and returns what it has. That exit means the
       // catalogue was still offering pages when we stopped asking, so the run is PARTIAL rather
       // than a SUCCESS holding fewer rows. Every other exit is healthy and only carries evidence
@@ -657,11 +738,38 @@ export async function syncAwinAccount(accountLabel = "default") {
       // endpoint and its response is not read for metadata, so there is nothing truthful to
       // record. It stays UNKNOWN and is not eligible for a reconciliation allow-list.
       execute: () =>
-        withSourceOutcome(stats, () => adapter.fetchCoupons({}, stats), {
-          truncationCode: AWIN_OFFERS_PAGE_CAP_CODE,
-          repeatedPageCode: AWIN_OFFERS_REPEATED_PAGE_CODE,
-          endpoint: "POST /publisher/{publisherId}/promotions",
-        }),
+        withSourceOutcome(
+          stats,
+          async () => {
+            // ONE page, then return. Never the whole-catalogue walk: see offersPage above.
+            const page = await adapter.fetchCouponsPage(
+              {
+                offset: offersPage.offset,
+                limit: offersPage.limit ?? undefined,
+                seen: Array.isArray(offersPage.carry) ? offersPage.carry : [],
+              },
+              stats,
+            );
+            offersPagination = {
+              index: Math.floor(page.offset / page.pageSize),
+              offset: page.offset,
+              pagesFetched: page.pagesFetched,
+              rowsFetched: page.rows.length,
+              nextOffset: page.nextOffset,
+              hasMore: page.hasMore,
+              reason: page.reason,
+              // Carried into the next unit's descriptor so a re-delivered page is still
+              // recognisable after a cold start.
+              carry: page.seen,
+            };
+            return page.rows;
+          },
+          {
+            truncationCode: AWIN_OFFERS_PAGE_CAP_CODE,
+            repeatedPageCode: AWIN_OFFERS_REPEATED_PAGE_CODE,
+            endpoint: "POST /publisher/{publisherId}/promotions",
+          },
+        ),
     });
     sourceObjectRuns.push(summarizeSourceObjectRun(run));
     couponsRaw = resultRows(run);
@@ -692,15 +800,55 @@ export async function syncAwinAccount(accountLabel = "default") {
     }),
   });
 
+  let offersStaging = null;
   if (couponsRaw.length) {
-    await upsertManyRawEntities({
-      networkSource: "awin",
-      entityType: "coupon",
+    // Bounded chunks, not one 5,000-row batch. The walk can return a full catalogue now, and a
+    // single batch of it exhausted the invocation while staging. See awinOffersStaging.js.
+    offersStaging = await stageAwinOfferRows({
       rows: couponsRaw,
-      externalIdPrefix: "awin-coupon",
       sourceAccountKey: accountLabel !== "default" ? accountLabel : null,
       evidence: evidenceFromRunSummary(sourceObjectRuns.find((r) => r?.sourceObject === "offers")),
     });
+    if (!stagedCompletely(offersStaging)) {
+      // Never inferred from a resolved promise: the chunk runner reports how far it actually got.
+      logger.warn(
+        {
+          network: "awin",
+          accountLabel,
+          rows: offersStaging.rows,
+          chunksTotal: offersStaging.chunksTotal,
+          chunksCompleted: offersStaging.chunksCompleted,
+          rowsStaged: offersStaging.rowsStaged,
+          failedChunk: offersStaging.failedChunk,
+          err: offersStaging.error,
+        },
+        "awin offers staging did not complete every chunk",
+      );
+      /**
+       * A page we fetched but did not finish writing down is a UNIT FAILURE, and the unit must
+       * throw rather than return.
+       *
+       * Returning would hand the orchestrator a campaignPage, and a campaignPage is a claim that
+       * this page is DONE and the next one may be planned. It is not done: some of its rows are
+       * staged and some are not, and planning past it would leave that gap behind permanently,
+       * because nothing ever revisits a page the walk has moved beyond.
+       *
+       * Throwing routes it to failUnit, which returns the unit to PENDING with its descriptor
+       * untouched while attempts remain — same offset, same limit, same carry, same identity — so
+       * the retry re-runs exactly this page. Nothing already committed is rolled back: the rows
+       * staged before the failure stay, and the retry reaches them through the idempotent path.
+       *
+       * The offers NetworkSyncRun is left exactly as the fetch finalised it. The supplier answered
+       * correctly and that record stays true; it is our own write that failed.
+       */
+      offersPagination = null;
+      const failure = new Error(
+        `Awin offers page staging did not complete: ${offersStaging.chunksCompleted}/${offersStaging.chunksTotal} chunks, ${offersStaging.rowsStaged}/${offersStaging.rows} rows.`,
+      );
+      failure.code = AWIN_OFFERS_STAGING_FAILED;
+      failure.retryable = true;
+      throw failure;
+    }
   }
 
   const factPromo = await promotePerformanceRowsToFacts(performanceRows, {
@@ -726,6 +874,18 @@ export async function syncAwinAccount(accountLabel = "default") {
     campaigns: campaigns.length,
     conversions: conversions.length,
     coupons: couponsRaw.length,
+    offersStaging,
+    // Present only when an offers sync was asked for and refused. Never a silent omission: a
+    // caller that requested offers and received none is told which route can deliver them.
+    ...(offersRefusal ? { offersRefused: offersRefusal } : {}),
+    // Same three fields every other account sync in the estate reports, read by syncState to
+    // resolve the outer run to "partial" and to show the operator why.
+    partialSuccess: warnings.length > 0,
+    warnings,
+    userMessage: warnings.length > 0 ? joinUserMessages(warnings) : null,
+    // Read by the orchestration's nextPagedUnit to plan the next slice. Only ever set when this
+    // invocation ran as a bounded unit; a whole-catalogue walk has no next page to name.
+    campaignPage: offersPagination,
     performanceFacts: factPromo,
     mboClickEnrich,
     stats,
