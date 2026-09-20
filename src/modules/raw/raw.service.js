@@ -373,31 +373,60 @@ async function stageRawEntity({
    * second fan-out inside itself.
    */
   observeSchema = true,
+  /**
+   * Fix B1 — the record stageManyRawEntities already built for this exact row.
+   *
+   * The batch prepare pass resolves the external id, account-scopes it, normalizes the payload and
+   * validates its field usage for every row. Reaching this function then threw all of that away
+   * and did it again. Handing the record down instead makes the batch path prepare each row once.
+   *
+   * Reused only when it describes THIS write. A record whose identity does not match the one the
+   * caller asked for is ignored and the row is prepared here, because staging a payload under
+   * someone else's external id is worse than any amount of repeated work.
+   */
+  preparedRecord = null,
+  /**
+   * True when the caller has already written this row's RECEIVED lineage. Set per row by the batch
+   * path, and only for rows whose RECEIVED write actually returned a record, so a row that failed
+   * that pass still gets it here.
+   */
+  alreadyReceived = false,
 }) {
   const original = cloneRawJson(rawData ?? {});
-  const record = prepareEntityRecord({
-    networkSource,
-    entityType,
-    rawData: cloneRawJson(original),
-    externalId,
-  });
-
-  return runWithSourceEvidence(evidence || {}, async () => {
-    try {
-      await persistRawPayload({
+  const reusable =
+    preparedRecord &&
+    preparedRecord.externalId === externalId &&
+    preparedRecord.networkSource === networkSource &&
+    preparedRecord.entityType === entityType;
+  const record = reusable
+    ? preparedRecord
+    : prepareEntityRecord({
         networkSource,
         entityType,
+        rawData: cloneRawJson(original),
         externalId,
-        payload: original,
-        processingStatus: "RECEIVED",
-        observeSchema,
-        ...(evidence || {}),
       });
-    } catch (error) {
-      logger.warn(
-        { err: error?.message || String(error), networkSource, entityType, externalId },
-        "raw payload persist before entity staging failed",
-      );
+
+  return runWithSourceEvidence(evidence || {}, async () => {
+    // Skipped only when the caller proved it already wrote this row's RECEIVED row. The STAGED
+    // write below still runs, so the entityId lineage every raw row needs is unaffected.
+    if (!alreadyReceived) {
+      try {
+        await persistRawPayload({
+          networkSource,
+          entityType,
+          externalId,
+          payload: original,
+          processingStatus: "RECEIVED",
+          observeSchema,
+          ...(evidence || {}),
+        });
+      } catch (error) {
+        logger.warn(
+          { err: error?.message || String(error), networkSource, entityType, externalId },
+          "raw payload persist before entity staging failed",
+        );
+      }
     }
 
   let entity;
@@ -473,15 +502,37 @@ async function upsertCouponRows({
    * is the call site that knows.
    */
   alreadyStaged = false,
+  /**
+   * Fix B1 — the batch's own prepared records, as `{ record, alreadyReceived }` entries.
+   *
+   * When supplied, identity and normalization are taken from the record the batch already built
+   * rather than derived a second time from the raw row. That also removes a latent divergence:
+   * the fallback below calls resolveExternalId WITHOUT an entityType, while the batch prepare pass
+   * calls it WITH one. The two agree for coupons today, but only by accident of which branches
+   * that function takes.
+   *
+   * Null for the callers that genuinely have only raw rows — the Coupon CMS, and the coupons
+   * lifted out of campaign payloads, which are not in the campaign batch's prepared records.
+   */
+  preparedEntries = null,
 }) {
   const results = [];
-  const prepared = rows.map((rawData, index) => ({
-    rawData: rawData ?? {},
-    externalId: withAccountScopedExternalId(
-      resolveExternalId(rawData ?? {}, externalIdPrefix, index),
-      sourceAccountKey,
-    ),
-  }));
+  const prepared = preparedEntries
+    ? preparedEntries.map((entry) => ({
+        rawData: entry.record.originalPayload,
+        externalId: entry.record.externalId,
+        preparedRecord: entry.record,
+        alreadyReceived: entry.alreadyReceived === true,
+      }))
+    : rows.map((rawData, index) => ({
+        rawData: rawData ?? {},
+        externalId: withAccountScopedExternalId(
+          resolveExternalId(rawData ?? {}, externalIdPrefix, index),
+          sourceAccountKey,
+        ),
+        preparedRecord: null,
+        alreadyReceived: false,
+      }));
 
   if (!alreadyObserved) {
     // Batch observation also writes each row's RECEIVED lineage, exactly as the caller's own
@@ -514,6 +565,8 @@ async function upsertCouponRows({
       // Inside the batch participant already: one more per row buys nothing and costs three
       // round trips, exactly as observeSchema:false avoids a second schema fan-out per row.
       alreadyStaged,
+      preparedRecord: entry.preparedRecord,
+      alreadyReceived: entry.alreadyReceived,
     });
     results.push(entity);
   });
@@ -633,6 +686,10 @@ async function stageManyRawEntities({
   if (entityType === "coupon") {
     const couponStart = Date.now();
     // These are the rows the staging pass above already observed and wrote RECEIVED lineage for.
+    // Handing the prepared records down rather than the raw rows is Fix B1: identity and
+    // normalization are not derived twice, and the RECEIVED persist is not repeated for any row
+    // the pass above actually wrote. `alreadyReceived` is decided per row from that pass's own
+    // outcome, so a row it failed on still has its RECEIVED lineage written here.
     await upsertCouponRows({
       networkSource,
       rows,
@@ -640,6 +697,10 @@ async function stageManyRawEntities({
       sourceAccountKey,
       alreadyObserved: true,
       alreadyStaged: true,
+      preparedEntries: preparedRecords.map((record, index) => ({
+        record,
+        alreadyReceived: Boolean(rawOutcomes[index]?.record?.id),
+      })),
     });
     rowUpsertMs = Date.now() - couponStart;
   } else {

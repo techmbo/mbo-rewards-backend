@@ -336,7 +336,11 @@ describe("Fix A — nothing else changed", () => {
     // upsertRawEntity. The flag is the entire footprint of this change inside the coupon path.
     assert.equal((coupons.match(/alreadyStaged/g) ?? []).length, 2);
     assert.match(coupons, /alreadyStaged = false,/);
-    assert.match(coupons, /alreadyStaged,\n\s*\}\);/);
+    // Forwarded INTO the per-row call. Asserted against that call's own argument list rather than
+    // against the flag being its last property: a later change may legitimately pass more, and
+    // what this test protects is that the flag still reaches the row, not where it sits.
+    const rowCall = coupons.split("await upsertRawEntity({")[1].split("});")[0];
+    assert.match(rowCall, /^\s*alreadyStaged,\s*$/m, "the flag stopped reaching the per-row call");
   });
 
   it("non-coupon staging still goes through the bulk path, untouched", async () => {
