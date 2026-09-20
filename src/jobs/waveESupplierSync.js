@@ -25,11 +25,13 @@ import {
   evidenceFromRunSummary,
 } from "./sourceObjectRuns.js";
 import {
+  AWIN_MAX_OFFER_PAGES,
   AWIN_OFFERS_PAGE_CAP_CODE,
   AWIN_OFFERS_REPEATED_PAGE_CODE,
 } from "../adapters/awin.adapter.js";
 import { stageAwinOfferRows, stagedCompletely } from "./awinOffersStaging.js";
 import { boundedCampaignPage } from "./syncContext.js";
+import { AWIN_OFFERS_PAGE_LIMIT } from "./syncSourcePlan.js";
 import { joinUserMessages } from "./syncErrors.js";
 
 /**
@@ -50,6 +52,33 @@ export const AWIN_OFFERS_DURABLE_SYNC_REQUIRED = "AWIN_OFFERS_DURABLE_SYNC_REQUI
  * as a truncation would tell an operator the supplier cut us short when it did not.
  */
 export const AWIN_OFFERS_STAGING_FAILED = "AWIN_OFFERS_STAGING_FAILED";
+
+/**
+ * What to tell an operator about an Awin offers walk that ended PARTIAL.
+ *
+ * Keyed off the error code the run already carries, because the two truncations mean different
+ * things and the operator's next move differs: a cap means the catalogue had more and we stopped
+ * asking, a repeated page means the supplier stopped honouring `page`. Anything else is reported
+ * as partial without guessing at a cause.
+ */
+export function awinOffersPartialWarning(summary) {
+  const code = summary?.errorCode ?? null;
+  if (code === AWIN_OFFERS_PAGE_CAP_CODE) {
+    return (
+      `Awin offers ended at the configured page cap of ${AWIN_MAX_OFFER_PAGES} pages `
+      + `(${AWIN_OFFERS_PAGE_LIMIT} offers per page). The catalogue was still returning a full page, `
+      + "so additional supplier data may remain unsynced."
+    );
+  }
+  if (code === AWIN_OFFERS_REPEATED_PAGE_CODE) {
+    return (
+      "Awin offers stopped early: the supplier re-delivered a page already held, so it is not "
+      + "honouring the page parameter and the rest of the catalogue was unreachable. Additional "
+      + "supplier data may remain unsynced."
+    );
+  }
+  return "Awin offers did not complete: the run ended PARTIAL and additional supplier data may remain unsynced.";
+}
 import { resultRows } from "../modules/networkOps/sourceObjectSync.service.js";
 import { unavailableOutcome, withFetchFailureSignal, withSourceOutcome } from "./sourceFetchOutcome.js";
 
@@ -771,8 +800,30 @@ export async function syncAwinAccount(accountLabel = "default") {
           },
         ),
     });
-    sourceObjectRuns.push(summarizeSourceObjectRun(run));
+    const offersSummary = summarizeSourceObjectRun(run);
+    sourceObjectRuns.push(offersSummary);
     couponsRaw = resultRows(run);
+
+    /**
+     * A source object that ended PARTIAL has to reach the PARENT run, not just its own record.
+     *
+     * The parent's status comes from summarizeUnits, which reads `partialSuccess` off each unit's
+     * outcome and nothing else. A NetworkSyncRun that recorded PARTIAL is invisible to it: the
+     * source-object summaries travel on the result as data, and `hasPartial` looks for the
+     * `partialSuccess` key, not for a nested `status: "PARTIAL"`. So a certified 25-page Awin walk
+     * that stopped at its cap finalised the whole run as an unqualified success with no warning —
+     * the one outcome the exhaustion vocabulary exists to make impossible.
+     *
+     * Translating it here rather than in the orchestrator is deliberate. The account sync is what
+     * knows which of its source objects ended partial and WHY, and `warnings` + `partialSuccess`
+     * is the contract every other account sync in the estate already reports through.
+     *
+     * The unit itself stays COMPLETED. It did its work: it fetched its page and staged it. What is
+     * partial is the CATALOGUE, not this unit's execution.
+     */
+    if (offersSummary?.status === "PARTIAL") {
+      warnings.push(awinOffersPartialWarning(offersSummary));
+    }
   }
 
   const performanceRows =

@@ -223,12 +223,22 @@ describe("an unscoped manual Awin sync is PARTIAL, not SUCCESS", () => {
 
   it("a bounded durable unit is not made partial merely by being one page", () => {
     const code = SYNC_SRC.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
-    // The only push into warnings is the refusal, and the refusal only fires when there is NO
-    // bounded page — so an intermediate slice can never set partialSuccess this way.
-    assert.equal((code.match(/warnings\.push\(/g) ?? []).length, 1, "another warning source appeared");
-    const pushAt = code.indexOf("warnings.push(");
-    const guardAt = code.indexOf('includeSourceObject(requested, "offers") && !offersPage');
-    assert.ok(guardAt > 0 && pushAt > guardAt, "the warning is not inside the no-slice branch");
+    // Two things may push a warning, and NEITHER can fire for a mid-walk slice:
+    //   the durable-sync refusal, which requires there to be NO bounded page at all; and
+    //   a PARTIAL offers source run, which only a TERMINAL page can produce — a mid-walk slice
+    //   records no exhaustion, so its run is SUCCESS.
+    const pushes = [...code.matchAll(/warnings\.push\(/g)];
+    assert.equal(pushes.length, 2, "an unguarded warning source appeared");
+    const refusalGuard = code.indexOf('includeSourceObject(requested, "offers") && !offersPage');
+    const partialGuard = code.indexOf('offersSummary?.status === "PARTIAL"');
+    assert.ok(refusalGuard > 0 && partialGuard > 0, "a guard is missing");
+    // Each push sits after one of the two guards, and nowhere else.
+    for (const push of pushes) {
+      const guarded = push.index > refusalGuard || push.index > partialGuard;
+      assert.ok(guarded, "a warning is pushed outside both guards");
+    }
+    assert.ok(pushes[0].index > refusalGuard, "the refusal warning left its branch");
+    assert.ok(pushes[1].index > partialGuard, "the partial warning left its branch");
   });
 
   it("the offers-only refusal still reports skipped, not partial", async () => {

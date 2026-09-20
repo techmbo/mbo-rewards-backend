@@ -315,8 +315,12 @@ describe("a staging failure is distinct from every catalogue verdict", () => {
   it("the manual unscoped warning path is untouched", () => {
     const code = codeOnly(SYNC_SRC);
     assert.match(code, /warnings\.push\(\s*"Awin offers were not synced/);
-    assert.equal((code.match(/warnings\.push\(/g) ?? []).length, 1);
+    // A second warning source now exists — a PARTIAL offers source run — and it is NOT this one.
+    // What matters here is that a staging FAILURE still pushes neither: it throws.
+    assert.equal((code.match(/warnings\.push\(/g) ?? []).length, 2);
     assert.match(code, /partialSuccess: warnings\.length > 0,/);
+    const failureBlock = code.split("if (!stagedCompletely(offersStaging))")[1].split("\n  }")[0];
+    assert.ok(!failureBlock.includes("warnings.push"), "a staging failure was downgraded to a warning");
   });
 
   it("Trackier stages in one batch and cannot reach this failure path", async () => {
