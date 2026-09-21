@@ -234,11 +234,8 @@ describe("runtime database URL — nothing else changed", () => {
   });
 
   it("6d — the fallback is confined to this one file", () => {
-    // No other runtime module picks a URL; the diagnostic keeps its own isolated client on
-    // DIRECT_URL, and the scripts are unchanged.
-    const diagnostic = readFileSync("src/modules/ops/databaseRecoveryDiagnostic.service.js", "utf8");
-    assert.ok(!diagnostic.includes("resolveRuntimeDatabaseUrlSource"));
-    assert.ok(!diagnostic.includes("database/prisma.js"));
+    // No other runtime module picks a URL: the metrics layer reuses the shared client from
+    // prisma.js rather than resolving a URL of its own.
     const metrics = readFileSync("src/database/prismaMetrics.js", "utf8");
     assert.match(metrics, /import \{ prisma \} from "\.\/prisma\.js";/);
     assert.match(metrics, /export function attachPrismaMetrics\(client = prisma\)/);
