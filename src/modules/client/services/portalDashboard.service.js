@@ -1,4 +1,5 @@
 import { prisma } from "../../../database/prisma.js";
+import { BACKEND_URL } from "../../../config/urls.js";
 import { fail } from "../../../core/apiResponse.js";
 import { encryptSecret } from "../../../platform/security/encryption.js";
 import { PartnerCampaignService } from "./partnerCampaign.service.js";
@@ -8,6 +9,16 @@ import {
   FINANCE_CONSUMER_MODES,
 } from "../../finance/financeConsumer.service.js";
 import { auditService } from "../../../platform/audit/audit.service.js";
+
+/**
+ * The one mounted client API path (`app.use("/api", routes)` + `/v1/client/...`).
+ *
+ * Both client-facing surfaces derive from this: the settings panel reports it host-absolute
+ * against BACKEND_URL, the API docs report it host-relative. They previously disagreed — settings
+ * carried a hardcoded host and dropped the `/api` prefix and the `/client` segment — so a client
+ * integrating from the portal was sent somewhere that does not answer.
+ */
+const CLIENT_API_PATH = "/api/v1/client";
 
 function money(value) {
   const num = Number(value);
@@ -522,8 +533,10 @@ export class PortalDashboardService {
         clientCode: client.slug ? `MBO-${String(client.slug).toUpperCase()}` : null,
         authentication: "API Key",
         apiStatus: apiKeys.length ? "ACTIVE" : "NOT_CONFIGURED",
-        productionBaseUrl: "https://api.mbo-rewards.com/v1",
-        sandboxBaseUrl: "https://sandbox-api.mbo-rewards.com/v1",
+        productionBaseUrl: `${BACKEND_URL}${CLIENT_API_PATH}`,
+        // No sandbox API host exists. null says so; a guessed hostname would read as a working
+        // endpoint and send a client's sandbox integration nowhere.
+        sandboxBaseUrl: null,
         keys: (apiKeys || []).map((k) => ({
           id: k.id,
           name: k.name,
@@ -1092,8 +1105,8 @@ export class PortalDashboardService {
     await this.assertClient(clientId);
     return {
       // Host-absolute paths for documentation only — do NOT concatenate onto a base that already ends in /api.
-      canonicalBaseUrl: "/api/v1/client",
-      baseUrl: "/api/v1/client",
+      canonicalBaseUrl: CLIENT_API_PATH,
+      baseUrl: CLIENT_API_PATH,
       compatibilityAliases: {
         partner: "/api/partner/v1",
         portal: "/api/portal/v1",
