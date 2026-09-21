@@ -2,6 +2,10 @@ import { PROMOTION_BATCH_SIZE, SUPPLIER_ENTITY_TYPES } from "../modules/supplier
 import { EntityRepository, MapperErrorRepository } from "../modules/supplier/repositories/index.js";
 import { PromotionService } from "../modules/supplier/services/promotion.service.js";
 import { SupplierCampaignPromotionService } from "../modules/supplier/services/supplierCampaignPromotion.service.js";
+import {
+  TrackierPayoutPersistenceService,
+  TRACKIER_NETWORK_SOURCE,
+} from "../modules/commercial/trackierPayoutPersistence.service.js";
 import { SupplierCouponPromotionService } from "../modules/supplier/services/supplierCouponPromotion.service.js";
 import { CampaignNormalizationService } from "../modules/ops/campaignNormalization.service.js";
 import {
@@ -54,6 +58,7 @@ function shouldRunRakutenCommissionPromotion({ entityTypes, networkSource } = {}
 export class PromotionJob {
   constructor(deps = {}) {
     this.campaignPromotion = deps.campaignPromotion ?? new SupplierCampaignPromotionService();
+    this.trackierPayouts = deps.trackierPayouts ?? new TrackierPayoutPersistenceService();
     this.couponPromotion = deps.couponPromotion ?? new SupplierCouponPromotionService();
     this.promotionService = deps.promotionService ?? new PromotionService();
     this.mapperErrorRepo = deps.mapperErrorRepo ?? new MapperErrorRepository();
@@ -184,6 +189,21 @@ export class PromotionJob {
         result.normalization = await this.normalization.normalizeSupplierCampaign(result.record, {
           matchedBy: "promotion",
         });
+        // Trackier carries its payout table on the campaign object itself, so the rules are
+        // persisted here — the first moment the SupplierCampaign exists — from the rawData
+        // staged earlier in this same run. One ingestion cycle therefore yields Commission 1..N,
+        // with no second supplier fetch and no second sync. Reported, never fatal: a failure
+        // here must not undo a promotion that succeeded.
+        if (entity.networkSource === TRACKIER_NETWORK_SOURCE) {
+          try {
+            result.commissionRules = await this.trackierPayouts.persistPromotedCampaign({
+              entity,
+              supplierCampaign: result.record,
+            });
+          } catch (error) {
+            result.commissionRules = { error: error?.message || String(error) };
+          }
+        }
       }
       return result;
     }
