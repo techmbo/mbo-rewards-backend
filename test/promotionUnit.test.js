@@ -281,7 +281,7 @@ describe("Phase 6c — a promotion unit is exactly one typed cursor page", () =>
     assert.equal(second.cursorId, "e-0049");
   });
 
-  it("4. no updatedAt ordering survives anywhere in the durable page path", () => {
+  it("4. no updatedAt ordering survives in either promotion query", () => {
     const page = codeOnly(REPO_SRC).split("async findPageForPromotion(")[1].split("\n  }")[0];
     assert.ok(!page.includes("updatedAt"), "updatedAt in the durable page query");
     assert.ok(!page.includes("cursor:"), "Prisma cursor positioning in the durable page query");
@@ -289,8 +289,14 @@ describe("Phase 6c — a promotion unit is exactly one typed cursor page", () =>
     const runPage = codeOnly(JOB_SRC).split("async runPage(")[1].split("\n  }")[0];
     assert.ok(!runPage.includes("updatedAt"), "updatedAt in runPage");
     assert.ok(!runPage.includes("findManyForPromotion"), "the durable page must not use the legacy walk query");
-    // The legacy walk keeps its own ordering: this phase does not change what run() does.
-    assert.ok(REPO_SRC.includes("orderBy: [{ updatedAt: \"asc\" }, { id: \"asc\" }]"), "the legacy walk is untouched");
+    // The unbounded walk has since been converted to the same keyset shape, for the same reason:
+    // updatedAt is mutated by promotion itself, so it can never be a cursor ordering. The two
+    // queries stay separate methods, but neither may sort on a mutable column again.
+    const walk = codeOnly(REPO_SRC).split("async findManyForPromotion(")[1].split("\n  }")[0];
+    assert.ok(!walk.includes("updatedAt"), "updatedAt in the unbounded walk query");
+    assert.ok(!walk.includes("cursor:"), "Prisma cursor positioning in the unbounded walk query");
+    assert.ok(!walk.includes("skip"), "skip in the unbounded walk query");
+    assert.ok(walk.includes('orderBy: { id: "asc" }'), "the unbounded walk must order by id alone");
   });
 
   it("5. a full page appends exactly one continuation, carrying its last id and its own type", async () => {

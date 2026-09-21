@@ -145,26 +145,39 @@ export class PromotionJob {
 
     await this.promotionService.ensureSuppliersSeeded();
 
-    let cursorId = undefined;
+    // Types are walked ONE AT A TIME, to completion, in the order they were requested. A coupon
+    // connects to its parent SupplierCampaign by id and throws PARENT_CAMPAIGN_NOT_FOUND when it
+    // is absent, so every campaign in scope must be promoted before the first coupon is attempted.
+    // This walk previously asked for every requested type at once and let row order decide, which
+    // promoted coupons ahead of the parents they depend on. The default [campaign, coupon] is
+    // therefore a dependency order, not a list — postSyncStages already sequences the durable path
+    // the same way.
+    for (const entityType of entityTypes) {
+      // Each type starts its own keyset walk. The cursor is a primary key inside ONE type's
+      // ordering and carries no meaning across types, so it must not be carried over.
+      let cursorId = undefined;
 
-    while (true) {
-      const batch = await this.entityRepo.findManyForPromotion({
-        entityTypes,
-        networkSource,
-        entityIds,
-        batchSize,
-        cursorId,
-      });
+      while (true) {
+        // eslint-disable-next-line no-await-in-loop
+        const batch = await this.entityRepo.findManyForPromotion({
+          entityTypes: [entityType],
+          networkSource,
+          entityIds,
+          batchSize,
+          cursorId,
+        });
 
-      if (!batch.length) break;
+        if (!batch.length) break;
 
-      for (const entity of batch) {
-        const result = await this.promoteEntity(entity);
-        accumulate(summary, result);
+        for (const entity of batch) {
+          // eslint-disable-next-line no-await-in-loop
+          const result = await this.promoteEntity(entity);
+          accumulate(summary, result);
+        }
+
+        cursorId = batch[batch.length - 1].id;
+        if (batch.length < batchSize) break;
       }
-
-      cursorId = batch[batch.length - 1].id;
-      if (batch.length < batchSize) break;
     }
 
     if (shouldRunRakutenCommissionPromotion({ entityTypes, networkSource })) {

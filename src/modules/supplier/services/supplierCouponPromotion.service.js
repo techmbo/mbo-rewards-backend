@@ -166,6 +166,20 @@ export class SupplierCouponPromotionService extends PromotionService {
         outcome = { result, record };
       });
 
+      // A coupon that failed earlier — most often PARENT_CAMPAIGN_NOT_FOUND, because its parent
+      // campaign had not been promoted yet — leaves an OPEN MapperError behind. Promotion has now
+      // succeeded, so that error describes a state that no longer exists and must be closed here,
+      // on the normal walk, rather than waiting for an explicit retryFailed run. This is the same
+      // lifecycle SupplierCampaignPromotionService already applies, deliberately reusing its
+      // repository calls rather than introducing a second one: reached only after the transaction
+      // committed, so a coupon that still fails throws past it and its error stays OPEN.
+      const openError = await this.mapperErrorRepo.findOpenByEntityId(entity.id);
+      if (openError) {
+        await this.mapperErrorRepo.updateStatus(openError.id, "RESOLVED", {
+          message: openError.message,
+        });
+      }
+
       // CouponCodeMaster inventory — new codes alert Network Ops; never mutates client assignments.
       if (outcome.record?.couponCode) {
         try {
