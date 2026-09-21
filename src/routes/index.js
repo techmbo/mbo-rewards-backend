@@ -20,6 +20,7 @@ import {
   previewSyncPlanHandler,
   cancelSyncRunHandler,
   triggerIncrementalSync,
+  triggerAwinStagedOfferBackfill,
   triggerScopedDurableSync,
   triggerSyncAll,
   triggerSyncPlatform,
@@ -422,6 +423,20 @@ router.post(
   requirePermission(PERMISSIONS.SYNC_TRIGGER),
   auditAction("sync.worker", "sync:worker"),
   triggerSyncWorker,
+);
+// Start the durable Awin parent backfill over offers that are ALREADY STAGED. Registered BEFORE
+// the dynamic /sync/:platform/:accountLabel pattern, which would otherwise capture it as
+// platform=awin, accountLabel=backfill-staged-offers. Same chain as /sync/worker and the cancel
+// route: creating durable estate work is at least as consequential as advancing it, so it is
+// admin-only on top of SYNC_TRIGGER. It contacts no supplier.
+router.post(
+  "/sync/awin/backfill-staged-offers",
+  noStoreHeaders,
+  authenticate,
+  requireAdminRole,
+  requirePermission(PERMISSIONS.SYNC_TRIGGER),
+  auditAction("sync.awin.backfill-staged-offers", "sync:awin:backfill-staged-offers"),
+  triggerAwinStagedOfferBackfill,
 );
 // A durable run containing ONE account's ONE source object, for certifying a paged source in
 // production page by page. Registered BEFORE the dynamic /sync/:platform patterns so a three

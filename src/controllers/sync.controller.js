@@ -28,6 +28,7 @@ import {
   summarisePromotionUnitOutcome,
 } from "../jobs/promotionUnit.js";
 import {
+  AWIN_MATERIALIZATION_NETWORK_SOURCE,
   AWIN_MATERIALIZATION_PAGE_SIZE,
   executeAwinParentMaterializationUnit,
   nextAwinParentMaterializationUnit,
@@ -595,6 +596,94 @@ export async function triggerScopedDurableSync(req, res, next) {
       scope: { platform, accountLabel, sourceObject },
       // Counts and descriptors only — never a supplier payload.
       plan: summarisePlan({ units }, { kind: "full", options }),
+      syncStatus,
+    });
+  } catch (error) {
+    if (error?.code === "active_run_incompatible") {
+      return res.status(409).json({
+        ok: false,
+        code: "active_run_incompatible",
+        message:
+          "Another sync run is already active and cannot satisfy this request. Wait for it to "
+          + "finish, or cancel it explicitly with POST /api/sync/runs/:runId/cancel.",
+        activeRunId: error.activeRunId ?? null,
+      });
+    }
+    next(formatSyncError(error));
+  }
+}
+
+/**
+ * The reuse identity of the Awin staged-offer backfill. One run at a time, and never adopted by
+ * an unrelated request: an estate run carries no scopeKey, so it can neither reuse this nor be
+ * reused by it.
+ */
+export const AWIN_BACKFILL_SCOPE_KEY = "awin-staged-offers-backfill";
+
+/**
+ * POST /api/sync/awin/backfill-staged-offers — start the durable Awin parent backfill.
+ *
+ * Awin's programmes endpoint returns nothing, so its campaign parents are derived from offers that
+ * are ALREADY STAGED. Every mechanism to do that bounded exists — the materialization unit, its
+ * continuations, the stage barrier and the planner's support for an explicitly seeded run — and
+ * this is the one thing that was missing: a way to start it.
+ *
+ * It creates a run with exactly ONE unit and stops. No network unit is planned, so no supplier is
+ * contacted, nothing is refetched, and the 5,011 offers already on disk are the entire input. The
+ * existing orchestration then owns everything after: materialization pages continue themselves,
+ * the barrier opens the campaign walk when they resolve, the campaign walk opens the coupon walk,
+ * and conversion promotion and aggregation follow as they always do.
+ *
+ * Advancing it is the worker's job, one unit per invocation, exactly as for any other durable run.
+ * Nothing here loops, and nothing here writes a JobRun outside SyncOrchestrationService.
+ */
+export async function triggerAwinStagedOfferBackfill(req, res, next) {
+  try {
+    const orchestration = orchestrationServiceFor(req);
+
+    // Exactly one, and a first page: cursorId null is the start of the walk, and pageSize is the
+    // unit's own fixed width rather than anything a caller may choose.
+    const units = [
+      {
+        kind: UNIT_KINDS.AWIN_PARENT_MATERIALIZATION,
+        networkSource: AWIN_MATERIALIZATION_NETWORK_SOURCE,
+        cursorId: null,
+        pageSize: AWIN_MATERIALIZATION_PAGE_SIZE,
+        options: {},
+      },
+    ];
+
+    const options = {
+      fastSync: false,
+      // The barrier and every downstream walk live in post-sync. Without this the run would
+      // materialize parents and then stop before promoting anything.
+      promoteAfter: true,
+      scopeKey: AWIN_BACKFILL_SCOPE_KEY,
+    };
+
+    const run = await orchestration.getOrCreateRun({ kind: "full", trigger: "api", options, units });
+    const syncStatus = await orchestration.describeRun(run.id);
+
+    return res.status(202).json({
+      ok: true,
+      status: syncStatus?.status ?? "running",
+      message: run.created
+        ? "Durable Awin parent backfill created from staged offers. No supplier fetch was started. "
+          + "Advance it with POST /api/sync/worker."
+        : "An Awin parent backfill is already active; resuming it. No supplier fetch was started.",
+      runId: run.id,
+      created: Boolean(run.created),
+      reused: !run.created,
+      plannerVersion: run.plannerVersion ?? null,
+      scope: { networkSource: AWIN_MATERIALIZATION_NETWORK_SOURCE, scopeKey: AWIN_BACKFILL_SCOPE_KEY },
+      // Counts and a page width only — never an entity id or a supplier payload.
+      plan: {
+        initialUnits: units.length,
+        unitKind: UNIT_KINDS.AWIN_PARENT_MATERIALIZATION,
+        networkUnits: 0,
+        supplierFetch: false,
+        pageSize: AWIN_MATERIALIZATION_PAGE_SIZE,
+      },
       syncStatus,
     });
   } catch (error) {

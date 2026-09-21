@@ -263,6 +263,11 @@ describe("certification cache headers — a 429 is not cacheable either", () => 
       // and sync state. No more shared-cacheable than /sync/all's, and its 409 refusal names an
       // active run id that must not be served to the next caller from a cache.
       "/sync/:platform/:accountLabel/durable",
+      // The Awin staged-offer backfill answers with that same durable run projection — run id,
+      // created/reused and sync state — and its 409 names an active run id too. Whether a backfill
+      // was CREATED or REUSED is the operator's answer to "did my request start one", and a cached
+      // "created: true" would tell the next caller it started a run it did not.
+      "/sync/awin/backfill-staged-offers",
     ];
     const uses = [...routesSource.matchAll(/^\s*noStoreHeaders,\s*$/gm)];
     assert.equal(uses.length, allowed.length, "one use per approved route");
