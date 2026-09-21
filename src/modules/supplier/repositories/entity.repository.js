@@ -47,6 +47,25 @@ export class EntityRepository {
   }
 
   /**
+   * How many entities a promotion walk of this scope would take.
+   *
+   * The same WHERE the walk uses, minus the cursor: a caller can therefore learn the size of the
+   * work before starting it. A COUNT writes nothing, which is what lets an oversized request be
+   * refused with the estate untouched.
+   */
+  async countForPromotion({ entityTypes, networkSource, entityIds } = {}, client = null) {
+    const db = resolveClient(client);
+
+    return db.entity.count({
+      where: {
+        entityType: { in: entityTypes },
+        ...(networkSource ? { networkSource } : {}),
+        ...(entityIds?.length ? { id: { in: entityIds } } : {}),
+      },
+    });
+  }
+
+  /**
    * One page of promotable entities for a DURABLE bounded unit: one type, one network, keyset by
    * primary key alone.
    *

@@ -3,6 +3,7 @@ import {
   buildAwinCampaignExternalId,
   upsertManyRawEntities,
 } from "../../raw/raw.service.js";
+import { AWIN_MATERIALIZATION_PAGE_SIZE } from "../../../jobs/awinParentMaterializationUnit.js";
 
 /**
  * Awin advertiser parents, materialized from the offers already staged.
@@ -32,7 +33,7 @@ export const AWIN_CAMPAIGN_ENTITY_TYPE = "campaign";
 export const AWIN_DERIVED_RECORD_SOURCE = "advertiser_from_offer";
 export const AWIN_DERIVED_SOURCE_OBJECT = "offers";
 
-const SCAN_PAGE_SIZE = 500;
+const SCAN_PAGE_SIZE = AWIN_MATERIALIZATION_PAGE_SIZE;
 
 /**
  * The advertiser a staged CAMPAIGN row is about.
@@ -105,7 +106,15 @@ function emptySummary() {
     parentsStaged: 0,
     skippedProgrammeBacked: 0,
     offersWithoutAdvertiser: 0,
+    advertiserIds: [],
+    stagedAdvertiserIds: [],
+    skippedAdvertiserIds: [],
   };
+}
+
+/** The bounded page a durable unit runs. Exported so the unit can call it without the class. */
+export async function materializeAwinAdvertiserParentPage(input = {}, deps = {}) {
+  return new AwinAdvertiserParentService(deps).materializePage(input);
 }
 
 export class AwinAdvertiserParentService {
@@ -115,108 +124,132 @@ export class AwinAdvertiserParentService {
     this.pageSize = deps.pageSize ?? SCAN_PAGE_SIZE;
   }
 
-  /** Advertiser ids whose campaign Entity already holds real programme evidence. */
-  async programmeBackedAdvertiserIds() {
+  /**
+   * Which of THESE advertisers already hold real programme evidence.
+   *
+   * Scoped to the advertisers a single page found, never the whole Awin estate: the previous shape
+   * was one findMany with no take and no cursor that selected rawData for every Awin campaign
+   * Entity, which grows with the advertiser catalogue forever and has no place inside a bounded
+   * unit. The candidate list is at most one page wide, so this is bounded by construction.
+   *
+   * rawData is still selected, because `record_source` — the only thing that distinguishes
+   * programme evidence from our own derived evidence — lives inside it and nowhere else. It is
+   * read for at most one page's advertisers rather than for the catalogue.
+   *
+   * Both externalId shapes are matched: the canonical `awin-campaign-{id}` this repo now mints,
+   * and a bare id, which is what the generic resolver would have produced for a programme row
+   * staged before buildAwinCampaignExternalId existed.
+   */
+  async programmeBackedAdvertiserIds(advertiserIds = []) {
+    const ids = [...new Set((advertiserIds ?? []).filter(Boolean).map(String))];
+    if (!ids.length) return new Set();
+
     const rows = await this.db.entity.findMany({
-      where: { networkSource: AWIN_NETWORK_SOURCE, entityType: AWIN_CAMPAIGN_ENTITY_TYPE },
+      where: {
+        networkSource: AWIN_NETWORK_SOURCE,
+        entityType: AWIN_CAMPAIGN_ENTITY_TYPE,
+        externalId: { in: [...ids.map((id) => `awin-campaign-${id}`), ...ids] },
+      },
       select: { externalId: true, rawData: true },
     });
 
+    const candidates = new Set(ids);
     const backed = new Set();
     for (const row of rows) {
       if (isDerivedAwinCampaignRaw(row.rawData)) continue;
       const advertiserId = awinCampaignAdvertiserId(row.rawData);
-      if (advertiserId) backed.add(advertiserId);
+      if (advertiserId && candidates.has(advertiserId)) backed.add(advertiserId);
     }
     return backed;
   }
 
   /**
-   * Group staged Awin offers by advertiser.
+   * ONE bounded page of staged Awin offers → the parents its advertisers need.
    *
-   * Paged by primary key and accumulating only the id, the name and a count — the payloads
-   * themselves are dropped as each page is consumed, so 5,011 offers cost 1,418 small entries
-   * rather than 5,011 payloads held at once.
+   * This is what a durable unit executes. It reads one keyset page, stages the parents that page's
+   * advertisers need, and stops: no drain, no recursion, no supplier call. The continuation is a
+   * separate durable unit.
+   *
+   * An advertiser whose offers straddle a page boundary is staged on each page that sees it, and
+   * that is correct rather than merely tolerable: the Entity externalId is a pure function of the
+   * advertiser id, so the second write lands on the same Entity as the first and the whole walk
+   * still yields one Entity and one SupplierCampaign.
    */
-  async collectAdvertisers() {
+  async materializePage({ cursorId = null, pageSize = AWIN_MATERIALIZATION_PAGE_SIZE } = {}) {
+    const summary = emptySummary();
+    summary.lastCursor = null;
+    summary.hasMore = false;
+
+    const page = await this.db.entity.findMany({
+      where: {
+        networkSource: AWIN_NETWORK_SOURCE,
+        entityType: AWIN_COUPON_ENTITY_TYPE,
+        ...(cursorId ? { id: { gt: cursorId } } : {}),
+      },
+      orderBy: { id: "asc" },
+      take: pageSize,
+      select: { id: true, rawData: true },
+    });
+
+    if (!page.length) return summary;
+
     const advertisers = new Map();
-    let offersScanned = 0;
-    let offersWithoutAdvertiser = 0;
-    let cursorId = undefined;
-
-    while (true) {
-      // eslint-disable-next-line no-await-in-loop
-      const page = await this.db.entity.findMany({
-        where: {
-          networkSource: AWIN_NETWORK_SOURCE,
-          entityType: AWIN_COUPON_ENTITY_TYPE,
-          ...(cursorId ? { id: { gt: cursorId } } : {}),
-        },
-        orderBy: { id: "asc" },
-        take: this.pageSize,
-        select: { id: true, rawData: true },
-      });
-      if (!page.length) break;
-
-      for (const row of page) {
-        offersScanned += 1;
-        const identity = awinAdvertiserIdentity(row.rawData);
-        if (!identity) {
-          offersWithoutAdvertiser += 1;
-          continue;
-        }
-        const existing = advertisers.get(identity.advertiserId);
-        if (existing) {
-          existing.offerEntityCount += 1;
-          // First non-empty name wins. Production shows no advertiser id whose rows disagree, so
-          // this settles a case that does not arise rather than choosing between rival names.
-          existing.advertiserName = existing.advertiserName ?? identity.advertiserName;
-        } else {
-          advertisers.set(identity.advertiserId, {
-            advertiserId: identity.advertiserId,
-            advertiserName: identity.advertiserName,
-            offerEntityCount: 1,
-          });
-        }
+    for (const row of page) {
+      summary.offersScanned += 1;
+      const identity = awinAdvertiserIdentity(row.rawData);
+      if (!identity) {
+        summary.offersWithoutAdvertiser += 1;
+        continue;
       }
-
-      cursorId = page[page.length - 1].id;
-      if (page.length < this.pageSize) break;
+      const existing = advertisers.get(identity.advertiserId);
+      if (existing) {
+        existing.offerEntityCount += 1;
+        existing.advertiserName = existing.advertiserName ?? identity.advertiserName;
+      } else {
+        advertisers.set(identity.advertiserId, {
+          advertiserId: identity.advertiserId,
+          advertiserName: identity.advertiserName,
+          offerEntityCount: 1,
+        });
+      }
     }
 
-    return { advertisers, offersScanned, offersWithoutAdvertiser };
-  }
-
-  /**
-   * Derive one campaign Entity per advertiser from the offers already staged.
-   *
-   * Idempotent: the externalId is a pure function of the advertiser id, so a second run restages
-   * the same rows onto the same Entities rather than creating more.
-   */
-  async materialize() {
-    const summary = emptySummary();
-
-    const { advertisers, offersScanned, offersWithoutAdvertiser } = await this.collectAdvertisers();
-    summary.offersScanned = offersScanned;
-    summary.offersWithoutAdvertiser = offersWithoutAdvertiser;
     summary.advertisersFound = advertisers.size;
+    // The ids themselves, so a caller spanning several pages can count DISTINCT advertisers rather
+    // than adding per-page totals — an advertiser whose offers straddle a boundary appears on both
+    // pages. Counts only ever reach a durable unit's stored outcome; these do not.
+    summary.advertiserIds = [...advertisers.keys()];
+    // The cursor is this page's last PRIMARY KEY, which is immutable, so a row re-staged between
+    // two invocations cannot move the boundary. hasMore is a full page, exactly as a promotion
+    // page decides it.
+    summary.lastCursor = page[page.length - 1].id;
+    summary.hasMore = page.length >= pageSize;
 
     if (!advertisers.size) return summary;
 
-    const programmeBacked = await this.programmeBackedAdvertiserIds();
+    const programmeBacked = await this.programmeBackedAdvertiserIds([...advertisers.keys()]);
 
     const rows = [];
     for (const advertiser of advertisers.values()) {
       if (programmeBacked.has(advertiser.advertiserId)) {
         summary.skippedProgrammeBacked += 1;
+        summary.skippedAdvertiserIds.push(advertiser.advertiserId);
         continue;
       }
       rows.push(buildDerivedAwinCampaignRow(advertiser));
+      summary.stagedAdvertiserIds.push(advertiser.advertiserId);
     }
 
     if (!rows.length) return summary;
 
-    await this.stageEntities({
+    await this.stageParents(rows);
+    summary.parentsStaged = rows.length;
+    return summary;
+  }
+
+  /** The one staging call, shared by the paged unit and the drain below. */
+  async stageParents(rows) {
+    return this.stageEntities({
       networkSource: AWIN_NETWORK_SOURCE,
       entityType: AWIN_CAMPAIGN_ENTITY_TYPE,
       rows,
@@ -230,9 +263,49 @@ export class AwinAdvertiserParentService {
       // resolve any NetworkSyncRun's verdict.
       finalizeSyncRun: false,
     });
+  }
 
-    summary.parentsStaged = rows.length;
-    return summary;
+  /**
+   * Drain every page. TEST AND OPS ONLY — this is NOT the production path.
+   *
+   * Production materializes through bounded durable units, one page per invocation, because the
+   * whole estate does not fit in a 300s invocation. This is kept because it is the same work
+   * composed of the same pages, which makes it a faithful stand-in when a test wants the finished
+   * state rather than one step of it. Nothing in src/ calls it.
+   */
+  async materialize() {
+    const total = emptySummary();
+    let cursorId = null;
+    let pages = 0;
+
+    // DISTINCT across pages. An advertiser whose offers straddle a page boundary is seen by both,
+    // and both stage it — onto the same Entity, because the externalId is a pure function of the
+    // advertiser id. Summing per-page totals would report that one advertiser twice.
+    const seen = new Set();
+    const staged = new Set();
+    const skipped = new Set();
+
+    while (true) {
+      // eslint-disable-next-line no-await-in-loop
+      const page = await this.materializePage({ cursorId, pageSize: this.pageSize });
+      pages += 1;
+      total.offersScanned += page.offersScanned;
+      total.offersWithoutAdvertiser += page.offersWithoutAdvertiser;
+      for (const id of page.advertiserIds) seen.add(id);
+      for (const id of page.stagedAdvertiserIds) staged.add(id);
+      for (const id of page.skippedAdvertiserIds) skipped.add(id);
+      if (!page.hasMore || !page.lastCursor) break;
+      cursorId = page.lastCursor;
+    }
+
+    total.advertisersFound = seen.size;
+    total.parentsStaged = staged.size;
+    total.skippedProgrammeBacked = skipped.size;
+    total.advertiserIds = [...seen];
+    total.stagedAdvertiserIds = [...staged];
+    total.skippedAdvertiserIds = [...skipped];
+    total.pages = pages;
+    return total;
   }
 }
 

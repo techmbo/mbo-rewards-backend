@@ -27,6 +27,12 @@ import {
   nextPromotionUnit,
   summarisePromotionUnitOutcome,
 } from "../jobs/promotionUnit.js";
+import {
+  AWIN_MATERIALIZATION_PAGE_SIZE,
+  executeAwinParentMaterializationUnit,
+  nextAwinParentMaterializationUnit,
+  summariseAwinParentMaterializationUnitOutcome,
+} from "../jobs/awinParentMaterializationUnit.js";
 import { planScopedSourceUnits } from "../jobs/syncSourcePlan.js";
 import { SyncAccountLockService, accountLockKey } from "../jobs/syncAccountLock.service.js";
 import { isStagingFrozenError } from "../jobs/entityStagingBarrier.js";
@@ -142,6 +148,34 @@ function promotionPageFor(req) {
 }
 
 /**
+ * The Awin parent-materialization page entrypoint; overridable per app so the worker can be driven
+ * in tests.
+ *
+ * `materializePage` is deliberate and audited: the service's own `materialize()` drains every page
+ * in a `while (true)` loop, which is precisely the unbounded step a bounded unit exists to
+ * replace. Only the single-page entrypoint is reachable from here, and neither calls a supplier.
+ */
+function awinParentMaterializationPageFor(req) {
+  const override = req?.app?.locals?.awinParentMaterializationPage;
+  if (typeof override === "function") return override;
+  return async (input) => {
+    const { materializeAwinAdvertiserParentPage } = await import(
+      "../modules/supplier/services/awinAdvertiserParent.service.js"
+    );
+    return materializeAwinAdvertiserParentPage(input);
+  };
+}
+
+/** Append the ONE unit that continues the Awin materialization walk, or nothing when it is done. */
+async function appendAwinParentMaterializationContinuation(orchestration, runId, result) {
+  const next = nextAwinParentMaterializationUnit(result, {
+    kind: UNIT_KINDS.AWIN_PARENT_MATERIALIZATION,
+  });
+  if (!next) return { appended: 0 };
+  return await orchestration.appendUnits(runId, [next]);
+}
+
+/**
  * Append the ONE unit that continues a promotion walk, or nothing when this type's walk is done.
  *
  * At most one unit per completed page, and never one that crosses into another entity type: a
@@ -167,6 +201,11 @@ async function executeUnit(req, descriptor) {
   }
   if (descriptor.kind === UNIT_KINDS.PROMOTION) {
     return executePromotionUnit(descriptor, { runPage: promotionPageFor(req) });
+  }
+  if (descriptor.kind === UNIT_KINDS.AWIN_PARENT_MATERIALIZATION) {
+    return executeAwinParentMaterializationUnit(descriptor, {
+      runPage: awinParentMaterializationPageFor(req),
+    });
   }
   return accountSyncFor(req)(descriptor.platform, descriptor.accountLabel || undefined, {
     // The unit's own recorded options…
@@ -681,6 +720,7 @@ export async function triggerSyncWorker(req, res, next) {
     const isAggregation = descriptor.kind === UNIT_KINDS.AGGREGATION;
     const isConversionPromotion = descriptor.kind === UNIT_KINDS.CONVERSION_PROMOTION;
     const isPromotion = descriptor.kind === UNIT_KINDS.PROMOTION;
+    const isAwinMaterialization = descriptor.kind === UNIT_KINDS.AWIN_PARENT_MATERIALIZATION;
     const workerId = `worker:${process.env.VERCEL_DEPLOYMENT_ID || process.pid}:${Date.now()}`;
     const claim = await orchestration.claimUnit(unit.id, { workerId });
     if (!claim.claimed && claim.reason === "abandoned") {
@@ -740,6 +780,15 @@ export async function triggerSyncWorker(req, res, next) {
             networkSource: descriptor.networkSource ?? null,
             entityType: descriptor.entityType ?? null,
             pageSize: descriptor.pageSize ?? PROMOTION_PAGE_SIZE,
+            continued: Boolean(descriptor.cursorId),
+          }
+        : null,
+      // Whether this page continues the Awin materialization walk, and how wide it is. Counts and
+      // a page size only — never the cursor id, which is an entity identifier.
+      materializationPage: isAwinMaterialization
+        ? {
+            networkSource: descriptor.networkSource ?? null,
+            pageSize: descriptor.pageSize ?? AWIN_MATERIALIZATION_PAGE_SIZE,
             continued: Boolean(descriptor.cursorId),
           }
         : null,
@@ -818,9 +867,11 @@ export async function triggerSyncWorker(req, res, next) {
         ? await appendConversionPromotionContinuation(orchestration, run.id, result)
         : isPromotion
           ? await appendPromotionContinuation(orchestration, run.id, result)
-          : await orchestration.materialiseFollowOnUnits(run.id, descriptor, result, {
-              completingUnitId: unit.id,
-            });
+          : isAwinMaterialization
+            ? await appendAwinParentMaterializationContinuation(orchestration, run.id, result)
+            : await orchestration.materialiseFollowOnUnits(run.id, descriptor, result, {
+                completingUnitId: unit.id,
+              });
     await orchestration.completeUnit(
       unit.id,
       isAggregation
@@ -829,7 +880,9 @@ export async function triggerSyncWorker(req, res, next) {
           ? summariseConversionPromotionUnitOutcome(result)
           : isPromotion
             ? summarisePromotionUnitOutcome(result)
-            : summariseSyncUnitOutcome(result, { accountLabel: descriptor.accountLabel }),
+            : isAwinMaterialization
+              ? summariseAwinParentMaterializationUnitOutcome(result)
+              : summariseSyncUnitOutcome(result, { accountLabel: descriptor.accountLabel }),
     );
     // Phase 6d — completing this unit may have settled a whole stage. The gate opens the next one
     // if and only if the rows say every dependency is finished; it appends nothing otherwise, and

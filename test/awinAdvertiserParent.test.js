@@ -153,20 +153,29 @@ describe("Phase 18 — derived advertiser parents", () => {
       }
     }
 
-    // pageSize below the row count so the grouping has to survive paging.
+    // pageSize below the row count so the grouping has to survive paging: each page stages its own
+    // advertisers, so the assertions are across every page rather than one call.
     const { svc, staged } = service(rows, { pageSize: 7 });
     const summary = await svc.materialize();
 
     assert.equal(summary.offersScanned, 120);
-    assert.equal(summary.advertisersFound, 40);
-    assert.equal(staged[0].rows.length, 40);
-    for (const row of staged[0].rows) {
+    assert.equal(summary.advertisersFound, 40, "DISTINCT advertisers, not the sum of page totals");
+    assert.equal(summary.parentsStaged, 40);
+
+    const allRows = staged.flatMap((call) => call.rows);
+    const byAdvertiser = new Map();
+    for (const row of allRows) {
       const index = Number(row.advertiserId) - 1000;
       assert.equal(row.advertiser.name, `Brand ${index}`, "each parent kept its own name");
-      assert.equal(row._mboDerivedFrom.offerEntityCount, 3);
+      byAdvertiser.set(row.advertiserId, (byAdvertiser.get(row.advertiserId) ?? 0) + 1);
     }
-    const ids = new Set(staged[0].rows.map((r) => r.advertiserId));
-    assert.equal(ids.size, 40, "no advertiser derived twice");
+    assert.equal(byAdvertiser.size, 40, "one parent per advertiser across the whole walk");
+
+    // G. An advertiser whose offers straddle a page boundary is staged on each page that sees it,
+    // and every one of those writes lands on the SAME Entity, because the externalId is a pure
+    // function of the advertiser id. One advertiser, one Entity, one SupplierCampaign.
+    const externalIds = new Set(allRows.map((r) => buildAwinCampaignExternalId(r)));
+    assert.equal(externalIds.size, 40, "a spanning advertiser must not mint a second Entity");
   });
 
   it("F. rerunning derivation is idempotent — same rows, same ids", async () => {
@@ -526,73 +535,5 @@ describe("Phase 18 — other suppliers are untouched", () => {
   it("the Awin campaign id builder is not applied to other networks' campaigns", () => {
     // usesAwinCampaignIdentity gates the wiring; the builder itself is Awin-only by construction.
     assert.equal(derivedAwinCampaignExternalId("1418"), "awin-campaign-1418");
-  });
-});
-
-describe("Phase 18 — the materialization runs before the Awin campaign walk", () => {
-  async function runJob({ networkSource, entityTypes } = {}) {
-    const { PromotionJob } = await import("../src/jobs/promotion.job.js");
-    const order = [];
-    const job = new PromotionJob({
-      promotionService: { ensureSuppliersSeeded: async () => {} },
-      normalization: { normalizeSupplierCampaign: async () => ({}) },
-      rakutenCommissionPromotion: async () => ({}),
-      awinParentMaterialization: async () => {
-        order.push("materialize");
-        return { parentsStaged: 2 };
-      },
-      entityRepo: {
-        findManyForPromotion: async ({ entityTypes: types }) => {
-          order.push(`walk:${types[0]}`);
-          return [];
-        },
-      },
-      campaignPromotion: { promoteEntity: async () => ({ result: "skipped" }) },
-      couponPromotion: { promoteEntity: async () => ({ result: "skipped" }) },
-    });
-    const summary = await job.run({ networkSource, entityTypes });
-    return { order, summary };
-  }
-
-  it("materializes before the campaign walk, and reports what it did", async () => {
-    const { order, summary } = await runJob({ networkSource: "awin" });
-    assert.deepEqual(order, ["materialize", "walk:campaign", "walk:coupon"]);
-    assert.deepEqual(summary.awinParentMaterialization, { parentsStaged: 2 });
-  });
-
-  it("runs on an unscoped promotion run too, since that covers Awin", async () => {
-    const { order } = await runJob({});
-    assert.equal(order[0], "materialize");
-  });
-
-  it("does not run for another network", async () => {
-    const { order, summary } = await runJob({ networkSource: "trackier" });
-    assert.ok(!order.includes("materialize"));
-    assert.equal(summary.awinParentMaterialization, undefined);
-  });
-
-  it("does not run when campaigns are not part of the requested walk", async () => {
-    const { order } = await runJob({ networkSource: "awin", entityTypes: ["coupon"] });
-    assert.ok(!order.includes("materialize"), "a coupon-only walk stages no parents");
-  });
-
-  it("a materialization failure is reported, never fatal to the run", async () => {
-    const { PromotionJob } = await import("../src/jobs/promotion.job.js");
-    const job = new PromotionJob({
-      promotionService: { ensureSuppliersSeeded: async () => {} },
-      normalization: { normalizeSupplierCampaign: async () => ({}) },
-      rakutenCommissionPromotion: async () => ({}),
-      awinParentMaterialization: async () => {
-        throw new Error("Entity staging is frozen");
-      },
-      entityRepo: { findManyForPromotion: async () => [] },
-      campaignPromotion: { promoteEntity: async () => ({ result: "skipped" }) },
-      couponPromotion: { promoteEntity: async () => ({ result: "skipped" }) },
-    });
-
-    const summary = await job.run({ networkSource: "awin" });
-    assert.equal(summary.awinParentMaterialization.failed, true);
-    assert.match(summary.awinParentMaterialization.error, /frozen/);
-    assert.equal(typeof summary.durationMs, "number", "the run still completed");
   });
 });

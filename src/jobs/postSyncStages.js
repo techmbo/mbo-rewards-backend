@@ -31,6 +31,10 @@ import { AGGREGATION_AFTER_SYNC_DAYS } from "./syncConfig.js";
 import { UNIT_KINDS } from "./syncOrchestration.service.js";
 import { CONVERSION_PROMOTION_PAGE_SIZE } from "./conversionPromotionUnit.js";
 import { OFFER_ENTITY_TYPE, OFFER_NETWORK_SOURCE, PROMOTION_PAGE_SIZE } from "./promotionUnit.js";
+import {
+  AWIN_MATERIALIZATION_NETWORK_SOURCE,
+  AWIN_MATERIALIZATION_PAGE_SIZE,
+} from "./awinParentMaterializationUnit.js";
 
 const TERMINAL_STATUSES = Object.freeze(["COMPLETED", "FAILED", "CANCELLED", "DEAD_LETTER"]);
 const FAILED_STATUSES = Object.freeze(["FAILED", "CANCELLED", "DEAD_LETTER"]);
@@ -58,6 +62,20 @@ export const FAILURE_STAGES = Object.freeze({
 export const PROMOTION_FIRST_TYPE = "campaign";
 export const PROMOTION_FOLLOWING_TYPES = Object.freeze(["coupon", OFFER_ENTITY_TYPE]);
 
+/**
+ * The post-sync kinds whose presence marks a run as explicitly seeded.
+ *
+ * A FUNCTION, not a frozen const: this module and syncOrchestration import each other, so a
+ * top-level const reading UNIT_KINDS is evaluated while that binding is still in its temporal dead
+ * zone and throws at import time. Read lazily, the cycle resolves before anyone asks.
+ */
+const postSyncKinds = () => [
+  UNIT_KINDS.AWIN_PARENT_MATERIALIZATION,
+  UNIT_KINDS.PROMOTION,
+  UNIT_KINDS.CONVERSION_PROMOTION,
+  UNIT_KINDS.AGGREGATION,
+];
+
 const descriptorOf = (unit) => unit?.payload ?? unit ?? {};
 const kindOf = (unit) => descriptorOf(unit).kind ?? null;
 const statusOf = (unit) => unit?.status ?? null;
@@ -84,7 +102,17 @@ function isBoundedStageUnit(unit, kind) {
  */
 export function networkPhaseState(units = [], { deferredSources = [] } = {}) {
   const network = units.filter((unit) => kindOf(unit) === UNIT_KINDS.NETWORK);
-  if (!network.length) return { complete: false, reason: "no_network_units" };
+  if (!network.length) {
+    // A run created with EXPLICIT post-sync units and no network unit is a backfill over evidence
+    // that is already staged — Awin's 5,011 offers, promotable with no supplier call. Its network
+    // phase is vacuously complete: there was never a fetch to wait for. Requiring one would leave
+    // such a run awaiting forever, which is what it did before. A run with no units of any kind is
+    // still incomplete, so an empty plan cannot read as finished.
+    if (postSyncKinds().some((kind) => units.some((unit) => isBoundedStageUnit(unit, kind)))) {
+      return { complete: true, reason: null, explicitUnits: true };
+    }
+    return { complete: false, reason: "no_network_units" };
+  }
 
   for (const unit of network) {
     const status = statusOf(unit);
@@ -114,6 +142,18 @@ export function postSyncNetworks(units = []) {
     if (statusOf(unit) !== "COMPLETED") continue;
     const platform = descriptorOf(unit).platform;
     if (typeof platform === "string" && platform !== "") networks.add(platform);
+  }
+  if (networks.size) return [...networks].sort();
+
+  // An explicitly seeded run has no network unit to read, so the networks it covers are the ones
+  // its own post-sync units name. Only consulted when there is no network evidence at all, so a
+  // real run's coverage still comes from what it actually fetched.
+  for (const kind of postSyncKinds()) {
+    for (const unit of units) {
+      if (!isBoundedStageUnit(unit, kind)) continue;
+      const networkSource = descriptorOf(unit).networkSource;
+      if (typeof networkSource === "string" && networkSource !== "") networks.add(networkSource);
+    }
   }
   return [...networks].sort();
 }
@@ -190,6 +230,18 @@ export function promotionNetworksSeeded(units = []) {
   return [...networks].sort();
 }
 
+/**
+ * Whether this run has to materialize Awin parents before promoting.
+ *
+ * True when Awin completed its network phase on this run — the same evidence that decides which
+ * networks get promotion seeded — OR when a materialization unit already exists, which is how an
+ * explicit-unit backfill run (no network unit at all) still gets its barrier honoured.
+ */
+export function awinParentMaterializationRequired(units = []) {
+  if (postSyncNetworks(units).includes(AWIN_MATERIALIZATION_NETWORK_SOURCE)) return true;
+  return units.some((unit) => isBoundedStageUnit(unit, UNIT_KINDS.AWIN_PARENT_MATERIALIZATION));
+}
+
 /** The networks that actually have bounded conversion-promotion units on this run. */
 export function conversionNetworksSeeded(units = []) {
   const networks = new Set();
@@ -253,6 +305,14 @@ const promotionSeed = (networkSource, entityType) => ({
   options: {},
 });
 
+const awinParentMaterializationSeed = () => ({
+  kind: UNIT_KINDS.AWIN_PARENT_MATERIALIZATION,
+  networkSource: AWIN_MATERIALIZATION_NETWORK_SOURCE,
+  cursorId: null,
+  pageSize: AWIN_MATERIALIZATION_PAGE_SIZE,
+  options: {},
+});
+
 const conversionSeed = (networkSource) => ({
   kind: UNIT_KINDS.CONVERSION_PROMOTION,
   networkSource,
@@ -286,6 +346,39 @@ export function planPostSyncTransition(
 
   const network = networkPhaseState(units, { deferredSources });
   if (!network.complete) return { stage: POST_SYNC_STAGES.AWAITING, seeds: [], reason: network.reason };
+
+  /* ---- awin parent materialization ---- */
+  //
+  // Awin's campaign parents do not arrive from a supplier; they are derived from staged offers.
+  // The whole walk must RESOLVE before the Awin campaign walk is seeded, because a campaign page
+  // only ever sees the campaign Entities that existed when it started — a parent staged after that
+  // walk resolved would never be promoted, and its coupons would fail PARENT_CAMPAIGN_NOT_FOUND
+  // exactly as before. Seeding the campaign walk early is therefore not a small loss of ordering,
+  // it is the whole defect coming back, so this gate returns rather than falling through.
+  //
+  // It is part of the PROMOTING stage rather than a stage of its own: it exists only to make
+  // promotion possible, and a separate stage name would appear in every status payload that reads
+  // POST_SYNC_STAGES without telling an operator anything the reason string does not.
+  if (awinParentMaterializationRequired(units)) {
+    const materialization = walkState(units, {
+      kind: UNIT_KINDS.AWIN_PARENT_MATERIALIZATION,
+      networkSource: AWIN_MATERIALIZATION_NETWORK_SOURCE,
+    });
+    if (materialization === "absent") {
+      return {
+        stage: POST_SYNC_STAGES.PROMOTING,
+        seeds: [awinParentMaterializationSeed()],
+        reason: "awin_parent_materialization_seeded",
+      };
+    }
+    if (materialization !== "resolved") {
+      return {
+        stage: POST_SYNC_STAGES.PROMOTING,
+        seeds: [],
+        reason: "awin_parent_materialization_outstanding",
+      };
+    }
+  }
 
   /* ---- promotion ---- */
   const promotion = stageState(units, UNIT_KINDS.PROMOTION);
@@ -366,6 +459,9 @@ export function failureStageOf(units = []) {
   const failedOf = (kind) =>
     units.some((unit) => kindOf(unit) === kind && !isPlaceholderUnit(unit) && FAILED_STATUSES.includes(statusOf(unit)));
   if (failedOf(UNIT_KINDS.NETWORK)) return FAILURE_STAGES.NETWORK;
+  // Materialization exists to make promotion possible, so its failure IS a promotion failure:
+  // nothing downstream can run, and reporting it under its own stage would only add a vocabulary.
+  if (failedOf(UNIT_KINDS.AWIN_PARENT_MATERIALIZATION)) return FAILURE_STAGES.PROMOTION;
   if (failedOf(UNIT_KINDS.PROMOTION)) return FAILURE_STAGES.PROMOTION;
   if (failedOf(UNIT_KINDS.CONVERSION_PROMOTION)) return FAILURE_STAGES.CONVERSION_PROMOTION;
   if (failedOf(UNIT_KINDS.AGGREGATION)) return FAILURE_STAGES.AGGREGATION;

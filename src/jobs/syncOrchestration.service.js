@@ -55,6 +55,13 @@ export const UNIT_JOB_NAME = "sync:unit";
 
 export const UNIT_KINDS = Object.freeze({
   NETWORK: "network",
+  /**
+   * Awin has no programmes to stage, so its campaign parents are derived from staged offers. That
+   * is a STAGING step, not a promotion, and it must finish before the Awin campaign walk begins —
+   * a campaign page only sees the Entities that existed when it ran. Its own kind is what lets
+   * postSyncStages express that as a barrier instead of a hope.
+   */
+  AWIN_PARENT_MATERIALIZATION: "awin-parent-materialization",
   PROMOTION: "promotion",
   CONVERSION_PROMOTION: "conversion-promotion",
   AGGREGATION: "aggregation",
@@ -127,6 +134,7 @@ export const EXECUTABLE_UNIT_KINDS = Object.freeze([
   UNIT_KINDS.AGGREGATION,
   UNIT_KINDS.CONVERSION_PROMOTION,
   UNIT_KINDS.PROMOTION,
+  UNIT_KINDS.AWIN_PARENT_MATERIALIZATION,
 ]);
 export const UNIT_BLOCKED_REASON = "bounded_units_not_implemented";
 

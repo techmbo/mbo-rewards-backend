@@ -7,10 +7,7 @@ import {
   TRACKIER_NETWORK_SOURCE,
 } from "../modules/commercial/trackierPayoutPersistence.service.js";
 import { SupplierCouponPromotionService } from "../modules/supplier/services/supplierCouponPromotion.service.js";
-import {
-  AWIN_NETWORK_SOURCE,
-  materializeAwinAdvertiserParents,
-} from "../modules/supplier/services/awinAdvertiserParent.service.js";
+import { AWIN_NETWORK_SOURCE } from "../modules/supplier/services/awinAdvertiserParent.service.js";
 import { CampaignNormalizationService } from "../modules/ops/campaignNormalization.service.js";
 import {
   RakutenCommissionPersistenceService,
@@ -53,18 +50,62 @@ function accumulate(summary, result) {
 }
 
 /**
- * Whether this run should materialize Awin advertiser parents before walking campaigns.
+ * The most Awin entities this UNBOUNDED walk may be asked to drain in one invocation.
  *
- * Same shape as the Rakuten gate below: a campaign walk that covers Awin. It runs BEFORE the walk
- * because the rows it stages are the rows the campaign walk has to find, and it stages from
- * Entities already on disk rather than from a supplier call, which is what lets offers staged in
- * an earlier sync become promotable without refetching them.
+ * Four durable promotion pages. An Awin campaign carries the full promotion cost — supplier
+ * lookup, raw-payload lookup, an interactive transaction, a mapper-error lookup, then merchant
+ * matching and possible merchant creation — and its coupons carry most of it again, so a drain of
+ * the real estate is tens of thousands of serial queries and a Vercel invocation is 300 seconds.
+ * Production proved it: 5,011 offers and ~1,418 advertisers timed out at exactly that limit.
  */
-function shouldMaterializeAwinParents({ entityTypes, networkSource } = {}) {
-  const types = Array.isArray(entityTypes) ? entityTypes : [];
-  if (!types.includes(SUPPLIER_ENTITY_TYPES.CAMPAIGN)) return false;
+export const AWIN_UNBOUNDED_RUN_BUDGET = PROMOTION_PAGE_SIZE * 4;
+
+/** The code an operator sees when the legacy drain is refused. */
+export const AWIN_DURABLE_PROMOTION_REQUIRED = "awin_durable_promotion_required";
+
+function scopeIncludesAwin(networkSource) {
   const network = String(networkSource || "").toLowerCase();
   return !network || network === AWIN_NETWORK_SOURCE;
+}
+
+/**
+ * Refuse an Awin promotion that the unbounded endpoint cannot finish, BEFORE anything is written.
+ *
+ * Fail fast and whole. The alternative shapes are both worse: draining times the request out after
+ * doing partial, unreported work, and quietly promoting one page would return success for a
+ * fraction of the estate, which is a lie an operator would act on. Refusing costs one COUNT and
+ * leaves the estate exactly as it was, so the caller can re-issue it as a durable run.
+ *
+ * Scoped runs are unaffected: an explicit entityIds list, or any network other than Awin, is
+ * counted on its own terms and passes when it is small.
+ */
+export async function assertAwinPromotionWithinBudget(
+  { entityTypes, networkSource, entityIds } = {},
+  { entityRepo = new EntityRepository(), budget = AWIN_UNBOUNDED_RUN_BUDGET } = {},
+) {
+  if (!scopeIncludesAwin(networkSource)) return { checked: false, pending: null, budget };
+
+  const types = Array.isArray(entityTypes)
+    ? entityTypes
+    : [SUPPLIER_ENTITY_TYPES.CAMPAIGN, SUPPLIER_ENTITY_TYPES.COUPON];
+
+  const pending = await entityRepo.countForPromotion({
+    entityTypes: types,
+    networkSource: AWIN_NETWORK_SOURCE,
+    entityIds,
+  });
+
+  if (pending <= budget) return { checked: true, pending, budget };
+
+  const error = new Error(
+    `Awin has ${pending} entities pending promotion, above the ${budget} this endpoint can finish inside one invocation. ` +
+      "Nothing was processed. Run Awin promotion as a durable run so it advances one bounded page per invocation.",
+  );
+  error.code = AWIN_DURABLE_PROMOTION_REQUIRED;
+  error.statusCode = 422;
+  error.pending = pending;
+  error.budget = budget;
+  throw error;
 }
 
 function shouldRunRakutenCommissionPromotion({ entityTypes, networkSource } = {}) {
@@ -87,7 +128,6 @@ export class PromotionJob {
     // The PER-OFFER Rakuten commission writer. The hook above is the legacy whole-sweep call and
     // stays exactly as it was for run(); a bounded offer page promotes one offer at a time.
     this.rakutenOfferPromotion = deps.rakutenOfferPromotion ?? new RakutenCommissionPersistenceService();
-    this.awinParentMaterialization = deps.awinParentMaterialization ?? materializeAwinAdvertiserParents;
   }
 
   /**
@@ -164,21 +204,6 @@ export class PromotionJob {
     const summary = emptySummary();
 
     await this.promotionService.ensureSuppliersSeeded();
-
-    // Awin has no programmes to stage, so its advertiser parents are derived from the offers
-    // already staged — before the walk, because the walk is what has to find them. Reported and
-    // never fatal: a refusal here (entity staging frozen by a durable run mid-walk, for instance)
-    // must not fail a promotion run that can still promote everything else.
-    if (shouldMaterializeAwinParents({ entityTypes, networkSource })) {
-      try {
-        summary.awinParentMaterialization = await this.awinParentMaterialization();
-      } catch (error) {
-        summary.awinParentMaterialization = {
-          failed: true,
-          error: error?.message || "Awin advertiser parent materialization failed",
-        };
-      }
-    }
 
     // Types are walked ONE AT A TIME, to completion, in the order they were requested. A coupon
     // connects to its parent SupplierCampaign by id and throws PARENT_CAMPAIGN_NOT_FOUND when it
