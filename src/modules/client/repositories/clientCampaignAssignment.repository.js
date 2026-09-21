@@ -137,8 +137,13 @@ function buildWhere(filters = {}) {
 }
 
 /**
- * Tenant-scoped partner listing filters.
- * Always requires clientId. Defaults to ACTIVE assignments; REVOKED is never listed.
+ * Tenant-scoped partner listing filters — the client delivery boundary.
+ *
+ * Every condition below is unconditional: a published ACTIVE grant on a PUBLISHED, non-hidden,
+ * non-deleted catalog campaign, for exactly one client. This function serves ONLY the two partner
+ * listing methods, so there is no staff or internal caller that needs a wider view, and nothing a
+ * caller passes can relax it — matching what the public redirect independently enforces before it
+ * will resolve a destination. REVOKED, PAUSED and merely-ASSIGNED grants are never listed.
  */
 function buildPartnerWhere(filters = {}) {
   if (!filters.clientId) {
@@ -150,10 +155,6 @@ function buildPartnerWhere(filters = {}) {
     status: "PUBLISHED",
     visibility: { not: "HIDDEN" },
   };
-
-  if (filters.includeInactive === true) {
-    campaignWhere.status = { not: "ARCHIVED" };
-  }
 
   if (filters.category) {
     campaignWhere.category = { equals: filters.category, mode: "insensitive" };
@@ -172,20 +173,9 @@ function buildPartnerWhere(filters = {}) {
     canonicalCampaign: campaignWhere,
   };
 
-  if (filters.status) {
-    where.status = filters.status;
-  } else if (filters.includeInactive === true) {
-    where.status = { in: ACTIVE_ASSIGNMENT_STATUSES };
-  } else {
-    where.status = "ACTIVE";
-  }
-
-  // Default partner catalog = published ACTIVE grants (portal + API parity).
-  if (filters.published === true) where.published = true;
-  else if (filters.published === false) where.published = false;
-  else if (filters.requirePublished !== false && filters.includeInactive !== true) {
-    where.published = true;
-  }
+  // Partner catalog = published ACTIVE grants only (portal + API parity).
+  where.status = "ACTIVE";
+  where.published = true;
 
   if (filters.search) {
     const term = String(filters.search).trim();

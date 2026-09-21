@@ -227,7 +227,7 @@ describe("PartnerCampaignService tenant isolation", () => {
     assert.equal(findManyForPartner.mock.calls[0].arguments[1].take, 2);
   });
 
-  it("forwards search / category / brand / country / status filters to the repository", async () => {
+  it("forwards search / category / brand / country filters to the repository", async () => {
     const clientA = { id: "client-a", name: "A", slug: "a", status: "ACTIVE", deletedAt: null };
     const findManyForPartner = mock.fn(async () => ({ rows: [], total: 0 }));
 
@@ -252,7 +252,9 @@ describe("PartnerCampaignService tenant isolation", () => {
     assert.equal(filters.category, "Electronics");
     assert.equal(filters.brand, "Ubuy");
     assert.equal(filters.country, "AE");
-    assert.equal(filters.status, "ACTIVE");
+    // `status` is deliberately NOT forwarded: the partner where clause pins ACTIVE itself, so a
+    // caller-supplied assignment status can never widen the client delivery boundary.
+    assert.ok(!("status" in filters));
   });
 });
 

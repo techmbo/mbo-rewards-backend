@@ -119,28 +119,21 @@ export class PartnerCampaignService {
   async listCampaigns(clientId, query = {}) {
     const client = await this.assertPartnerClient(clientId);
 
-    const includeInactive = query.includeInactive === true;
-    const requirePublished = !includeInactive && query.published !== false;
+    // The client delivery boundary is not negotiable by the caller. Not every client surface
+    // validates its query first — the /v1/client/campaigns alias forwards req.query verbatim — so
+    // widening flags are dropped here rather than trusted to a schema upstream. `search`,
+    // `category`, `brand` and `country` only ever narrow, so they are passed through.
     const filters = {
       clientId,
-      status: query.status,
       category: query.category,
       brand: query.brand,
       country: query.country,
       search: query.search,
-      published:
-        query.published !== undefined
-          ? query.published
-          : includeInactive
-            ? undefined
-            : true,
-      includeInactive,
-      requirePublished,
     };
 
     const { page, pageSize, skip } = getPagination(query);
     const useCursor = Boolean(query.cursor);
-    const projectOpts = { requirePublished };
+    const projectOpts = { requirePublished: true };
 
     if (useCursor) {
       const cursor = decodeCursor(query.cursor, ["createdAt", "id"]);

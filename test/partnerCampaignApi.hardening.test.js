@@ -105,10 +105,13 @@ describe("Partner campaign published visibility", () => {
     assert.equal(JSON.stringify(dto).includes("mboCommission"), false);
   });
 
-  it("defaults list filters to published=true", async () => {
+  it("defaults list filters to the tenant, leaving the published boundary to the repository", async () => {
     const findManyForPartner = mock.fn(async (filters) => {
       assert.equal(filters.clientId, "client-a");
-      assert.equal(filters.published, true);
+      // published/status are no longer passed as filters — buildPartnerWhere pins published ACTIVE
+      // unconditionally, so there is no flag here for a caller to flip.
+      assert.ok(!("published" in filters));
+      assert.ok(!("requirePublished" in filters));
       return { rows: [], total: 0 };
     });
     const service = new PartnerCampaignService({

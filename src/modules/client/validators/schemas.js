@@ -340,10 +340,6 @@ export const partnerCampaignListQuerySchema = paginationSchema.extend({
     .union([z.literal("true"), z.literal("false")])
     .transform((v) => v === "true")
     .optional(),
-  includeInactive: z
-    .union([z.literal("true"), z.literal("false")])
-    .transform((v) => v === "true")
-    .optional(),
 });
 
 export const partnerCampaignParamsSchema = z.object({
