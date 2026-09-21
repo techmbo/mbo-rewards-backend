@@ -52,6 +52,39 @@ function toCouponWriteData(mapped, supplierCampaignId, { isCreate = false, rawPa
   return data;
 }
 
+/**
+ * Whether a coupon found by NATURAL KEY may be adopted as this entity's row.
+ *
+ * The natural key is (parent, couponType, couponCode | couponLink). It does NOT contain the
+ * supplier's own coupon identity, so two GENUINELY DIFFERENT supplier offers that share a parent
+ * and a link — or a parent and a code — look identical to it. Awin proves this at scale: a
+ * code-less promotion carries the advertiser's generic tracking link, so every such promotion for
+ * one advertiser shares one natural key. Adopting the match then made each offer overwrite the
+ * previous one's entityId and supplierCouponId, leaving the earlier entities with no row at all
+ * while every one of them reported "updated" — a success that resolved its mapper error.
+ *
+ * The key remains useful for what it was built for: a row staged before entityId linkage existed,
+ * which has no owner and no supplier identity to contradict. So a match is adopted only when it
+ * cannot belong to some OTHER supplier coupon:
+ *
+ *   - it is unowned, or already owned by this entity; AND
+ *   - it carries no supplierCouponId, or the same one this entity maps to.
+ *
+ * Anything else is a different coupon that happens to share a link, and it gets its own row.
+ */
+export function canAdoptCouponByNaturalKey(candidate, { entityId, supplierCouponId } = {}) {
+  if (!candidate) return false;
+  if (candidate.entityId && candidate.entityId !== entityId) return false;
+  if (
+    candidate.supplierCouponId &&
+    supplierCouponId &&
+    String(candidate.supplierCouponId) !== String(supplierCouponId)
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export class SupplierCouponPromotionService extends PromotionService {
   constructor(deps = {}) {
     super(deps);
@@ -115,9 +148,19 @@ export class SupplierCouponPromotionService extends PromotionService {
 
       await this.runInTransaction(async (tx) => {
         const existingByEntity = await this.couponRepo.findByEntityId(entity.id, tx);
+        // The entity's OWN row always wins. Only when it has none does the natural key get a say,
+        // and then only over a row that no other supplier coupon has claimed.
+        const byNaturalKey = existingByEntity
+          ? null
+          : await this.couponRepo.findByNaturalKey(naturalKey, tx);
         const existing =
           existingByEntity ??
-          (await this.couponRepo.findByNaturalKey(naturalKey, tx));
+          (canAdoptCouponByNaturalKey(byNaturalKey, {
+            entityId: entity.id,
+            supplierCouponId: mapped.supplierCouponId,
+          })
+            ? byNaturalKey
+            : null);
 
         const createData = toCouponWriteData(mapped, parent.id, { isCreate: true, rawPayloadId });
         const updateData = toCouponWriteData(mapped, parent.id, { isCreate: false, rawPayloadId });
@@ -134,9 +177,20 @@ export class SupplierCouponPromotionService extends PromotionService {
             result = "created";
           } catch (error) {
             if (!isPrismaUniqueViolation(error)) throw error;
+            // Same rule on the race path: a row another coupon owns is not ours to take, so a
+            // genuine unique violation is re-thrown rather than resolved by overwriting a stranger.
+            const racedByEntity = await this.couponRepo.findByEntityId(entity.id, tx);
+            const racedByNaturalKey = racedByEntity
+              ? null
+              : await this.couponRepo.findByNaturalKey(naturalKey, tx);
             const raced =
-              (await this.couponRepo.findByNaturalKey(naturalKey, tx)) ??
-              (await this.couponRepo.findByEntityId(entity.id, tx));
+              racedByEntity ??
+              (canAdoptCouponByNaturalKey(racedByNaturalKey, {
+                entityId: entity.id,
+                supplierCouponId: mapped.supplierCouponId,
+              })
+                ? racedByNaturalKey
+                : null);
             if (!raced) throw error;
             record = await this.couponRepo.update(raced.id, updateData, tx);
             result = "updated";
