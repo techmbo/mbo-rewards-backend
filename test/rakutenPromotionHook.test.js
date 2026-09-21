@@ -8,6 +8,7 @@ describe("Rakuten commission promotion hook", () => {
     const job = new PromotionJob({
       promotionService: { ensureSuppliersSeeded: async () => {} },
       entityRepo: { findManyForPromotion: async () => [] },
+      awinParentMaterialization: async () => ({}),
       rakutenCommissionPromotion: async () => {
         hookCalls += 1;
         return { examined: 2, persisted: 1, financeReady: 1, reviewRequired: 1, skipped: 0 };
@@ -26,6 +27,7 @@ describe("Rakuten commission promotion hook", () => {
     const job = new PromotionJob({
       promotionService: { ensureSuppliersSeeded: async () => {} },
       entityRepo: { findManyForPromotion: async () => [] },
+      awinParentMaterialization: async () => ({}),
       rakutenCommissionPromotion: async () => {
         hookCalls += 1;
         return {};

@@ -72,6 +72,9 @@ function buildJob(rows) {
     promotionService: { ensureSuppliersSeeded: async () => {} },
     normalization: { normalizeSupplierCampaign: async () => ({}) },
     rakutenCommissionPromotion: async () => ({}),
+    // Awin parent materialization runs before the walk; stubbed so these ordering tests exercise
+    // the walk alone and never reach a database.
+    awinParentMaterialization: async () => ({}),
     entityRepo: {
       findManyForPromotion: (args) => repo.findManyForPromotion(args, store.client),
     },

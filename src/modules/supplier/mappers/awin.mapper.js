@@ -84,9 +84,22 @@ export function mapAwinOffer(entity) {
       base.couponDescription ?? firstPresent(raw.description, raw.title, raw.name) ?? null,
     couponStartDate: base.couponStartDate ?? firstPresent(raw.startDate, raw.validFrom) ?? null,
     couponEndDate: base.couponEndDate ?? firstPresent(raw.endDate, raw.validTo) ?? null,
+    // An Awin promotion row carries its parent as NESTED advertiser.id. raw.advertiserId is not a
+    // field Awin sends on promotions — buildAwinCouponExternalId records that from production
+    // FieldRegistry evidence, and the coupon externalId is built from advertiser.id for exactly
+    // that reason. Reading only the flat field left every canonically-identified Awin offer with
+    // no parent at all. The flat field is kept as a fallback because the voucher rows fanned out
+    // of a campaign payload carry it.
     parentSupplierCampaignId:
       base.parentSupplierCampaignId ??
+      (raw.advertiser?.id != null ? String(raw.advertiser.id) : null) ??
       (raw.advertiserId != null ? String(raw.advertiserId) : null),
+    // The name is the same evidence in the same place, and resolveParentCampaign falls back to it
+    // when the id misses. base wins when it found one, so nothing that resolves today changes.
+    parentCampaignName:
+      base.parentCampaignName ??
+      (raw.advertiser?.name != null ? String(raw.advertiser.name) : null) ??
+      (raw.advertiserName != null ? String(raw.advertiserName) : null),
   };
 }
 

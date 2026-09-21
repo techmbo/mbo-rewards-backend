@@ -7,6 +7,10 @@ import {
   TRACKIER_NETWORK_SOURCE,
 } from "../modules/commercial/trackierPayoutPersistence.service.js";
 import { SupplierCouponPromotionService } from "../modules/supplier/services/supplierCouponPromotion.service.js";
+import {
+  AWIN_NETWORK_SOURCE,
+  materializeAwinAdvertiserParents,
+} from "../modules/supplier/services/awinAdvertiserParent.service.js";
 import { CampaignNormalizationService } from "../modules/ops/campaignNormalization.service.js";
 import {
   RakutenCommissionPersistenceService,
@@ -48,6 +52,21 @@ function accumulate(summary, result) {
   }
 }
 
+/**
+ * Whether this run should materialize Awin advertiser parents before walking campaigns.
+ *
+ * Same shape as the Rakuten gate below: a campaign walk that covers Awin. It runs BEFORE the walk
+ * because the rows it stages are the rows the campaign walk has to find, and it stages from
+ * Entities already on disk rather than from a supplier call, which is what lets offers staged in
+ * an earlier sync become promotable without refetching them.
+ */
+function shouldMaterializeAwinParents({ entityTypes, networkSource } = {}) {
+  const types = Array.isArray(entityTypes) ? entityTypes : [];
+  if (!types.includes(SUPPLIER_ENTITY_TYPES.CAMPAIGN)) return false;
+  const network = String(networkSource || "").toLowerCase();
+  return !network || network === AWIN_NETWORK_SOURCE;
+}
+
 function shouldRunRakutenCommissionPromotion({ entityTypes, networkSource } = {}) {
   const types = Array.isArray(entityTypes) ? entityTypes : [];
   const includesCampaign = types.includes(SUPPLIER_ENTITY_TYPES.CAMPAIGN);
@@ -68,6 +87,7 @@ export class PromotionJob {
     // The PER-OFFER Rakuten commission writer. The hook above is the legacy whole-sweep call and
     // stays exactly as it was for run(); a bounded offer page promotes one offer at a time.
     this.rakutenOfferPromotion = deps.rakutenOfferPromotion ?? new RakutenCommissionPersistenceService();
+    this.awinParentMaterialization = deps.awinParentMaterialization ?? materializeAwinAdvertiserParents;
   }
 
   /**
@@ -144,6 +164,21 @@ export class PromotionJob {
     const summary = emptySummary();
 
     await this.promotionService.ensureSuppliersSeeded();
+
+    // Awin has no programmes to stage, so its advertiser parents are derived from the offers
+    // already staged — before the walk, because the walk is what has to find them. Reported and
+    // never fatal: a refusal here (entity staging frozen by a durable run mid-walk, for instance)
+    // must not fail a promotion run that can still promote everything else.
+    if (shouldMaterializeAwinParents({ entityTypes, networkSource })) {
+      try {
+        summary.awinParentMaterialization = await this.awinParentMaterialization();
+      } catch (error) {
+        summary.awinParentMaterialization = {
+          failed: true,
+          error: error?.message || "Awin advertiser parent materialization failed",
+        };
+      }
+    }
 
     // Types are walked ONE AT A TIME, to completion, in the order they were requested. A coupon
     // connects to its parent SupplierCampaign by id and throws PARENT_CAMPAIGN_NOT_FOUND when it

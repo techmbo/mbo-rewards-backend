@@ -224,6 +224,33 @@ export function buildAwinCouponExternalId(rawData) {
   return `awin-coupon-${advertiserId}-${promotionId}`;
 }
 
+/**
+ * Awin CAMPAIGN identity — the advertiser, under one deterministic id.
+ *
+ * Awin programmes currently return nothing, so the only evidence of an advertiser's existence is
+ * the nested `advertiser` object on its promotion rows. Parents derived from that evidence and
+ * parents staged from a real programme row must land on the SAME Entity, or the two would share
+ * one SupplierCampaign business key while being two Entity rows — and whichever promoted last
+ * would overwrite the other, because toCampaignWriteData writes every column on update.
+ *
+ * One id, minted the same way from either shape, is what removes that class of problem entirely:
+ * a real programme row arriving later UPDATES the derived Entity in place rather than racing it.
+ *
+ * Returns null when no id is present, so the caller falls back to the generic resolver rather than
+ * minting `awin-campaign-undefined`.
+ */
+export function buildAwinCampaignExternalId(rawData) {
+  const id = rawData?.id ?? rawData?.advertiserId ?? rawData?.advertiser?.id ?? null;
+  const value = id == null ? "" : String(id).trim();
+  if (!value) return null;
+  return `awin-campaign-${value}`;
+}
+
+/** True for an Awin campaign row, whose identity is the advertiser rather than a generic id. */
+export function usesAwinCampaignIdentity(networkSource, entityType) {
+  return entityType === "campaign" && String(networkSource ?? "").toLowerCase() === "awin";
+}
+
 /** Bare digits only. See buildAwinCouponExternalId for why this is required, not merely expected. */
 const AWIN_ID_PART = /^[0-9]+$/;
 
@@ -735,6 +762,7 @@ async function stageManyRawEntities({
   return runWithSourceEvidence(evidence || {}, async () => {
     const useOptimiseCampaignIds =
       entityType === "campaign" && String(networkSource).startsWith("optimise_");
+    const useAwinCampaignIds = usesAwinCampaignIdentity(networkSource, entityType);
     const benchmark = String(process.env.SYNC_UPSERT_BENCHMARK || "").toLowerCase() === "true";
 
     /**
@@ -766,11 +794,16 @@ async function stageManyRawEntities({
     const preparedRecords = rows
       .map((rawData, index) => {
         const original = cloneRawJson(rawData ?? {});
+        const genericId = () => resolveExternalId(original, externalIdPrefix, index, entityType);
         const resolvedId = useOptimiseCampaignIds
           ? buildOptimiseCampaignExternalId(networkSource, original, index)
           : entityType === "coupon"
             ? resolveCouponEntityExternalId(networkSource, original, externalIdPrefix, index)
-            : resolveExternalId(original, externalIdPrefix, index, entityType);
+            : useAwinCampaignIds
+              // Both the programmes path and the derived advertiser parents come through here, so
+              // this is the one place that has to agree with itself for them to converge.
+              ? (buildAwinCampaignExternalId(original) ?? genericId())
+              : genericId();
         if (entityType === "coupon" && !resolvedId) {
           // Fail closed for the Entity, open for the evidence. The refusal is the same one
           // upsertCouponRows makes, so lineage and the Entity cannot disagree about which rows
