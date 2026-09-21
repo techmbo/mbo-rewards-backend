@@ -1,4 +1,5 @@
 import { buildCampaignBaseFromEntity, buildCouponBaseFromEntity, toDecimalString } from "./shared.js";
+import { normalizeCouponStatus } from "./status.js";
 import { brandLabelFromLandingUrl } from "../../merchant/brandIdentity.js";
 import {
   normalizeCampaignStatus,
@@ -143,7 +144,13 @@ export function mapTrackierCoupon(entity) {
       (raw.campaignId != null ? String(raw.campaignId) : null),
     couponCode,
     couponLink: firstNonEmpty(base.couponLink, raw.url, raw.deeplink, raw.deep_link) ?? null,
-    couponStatus: firstNonEmpty(raw.coupon_status, raw.status, base.couponStatus) ?? base.couponStatus,
+    // couponStatus is the Prisma enum CouponStatus, NOT a passthrough of whatever Trackier sent.
+    // This line used to prefer the raw value over the already-normalized one, so a coupon whose
+    // payload said "active" wrote "active" into an enum column and every Trackier coupon failed on
+    // create. Trackier's own priority is kept — coupon_status before status — but it now runs
+    // through the canonical normalizer, and base.couponStatus (already canonical) is the fallback.
+    // The raw supplier status stays verbatim in rawPayload as evidence.
+    couponStatus: normalizeCouponStatus(raw.coupon_status, raw.status, base.couponStatus),
     couponType: couponCode ? "CODE" : base.couponLink || raw.url ? "LINK" : base.couponType,
   };
 }

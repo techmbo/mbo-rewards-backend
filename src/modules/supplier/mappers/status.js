@@ -102,6 +102,17 @@ export function normalizeParticipationStatus(...candidates) {
   return "UNKNOWN";
 }
 
+/**
+ * The ONLY way a coupon status may reach SupplierCoupon.couponStatus.
+ *
+ * That column is the Prisma enum CouponStatus, so a supplier's raw string can never be written
+ * through: an unrecognised value is not a lenient write, it is a rejected one, and it fails the
+ * whole coupon. Every return below is an enum member, and an unrecognised candidate falls through
+ * to UNKNOWN rather than being passed along.
+ *
+ * Already-canonical values round-trip unchanged, so a mapper may pass its own fallback in as the
+ * last candidate without special-casing it.
+ */
 export function normalizeCouponStatus(...candidates) {
   for (const raw of candidates) {
     if (raw === undefined || raw === null || raw === "") continue;
@@ -110,6 +121,11 @@ export function normalizeCouponStatus(...candidates) {
     if (["active", "live", "enabled", "running"].includes(value)) return "ACTIVE";
     if (["expired", "ended", "closed"].includes(value)) return "EXPIRED";
     if (["scheduled", "upcoming", "pending"].includes(value)) return "SCHEDULED";
+    // A supplier saying "not active" is evidence, not absence of evidence: DISABLED is an existing
+    // CouponStatus member and keeps that distinct from UNKNOWN, which means we were told nothing.
+    if (["disabled", "inactive", "paused", "suspended", "deactivated", "stopped"].includes(value)) {
+      return "DISABLED";
+    }
   }
   return "UNKNOWN";
 }

@@ -16,6 +16,7 @@ import { brandLabelFromLandingUrl } from "../../merchant/brandIdentity.js";
 import {
   normalizeParticipationStatus,
   normalizeCampaignStatus,
+  normalizeCouponStatus,
   normalizePricingModel,
 } from "./status.js";
 
@@ -329,7 +330,11 @@ export function mapPartnerizeCoupon(entity) {
       (raw.end_date_time || raw.end_date || nested?.end_date
         ? new Date(raw.end_date_time || raw.end_date || nested?.end_date)
         : null),
-    couponStatus: statusFromActive ?? base.couponStatus,
+    // statusFromActive carries PARTNERIZE's own semantics ("not active"), which is not itself a
+    // CouponStatus member — "INACTIVE" written straight through would be rejected by the enum and
+    // fail the coupon. The canonical normalizer turns it into DISABLED, and re-normalizes the
+    // already-canonical fallback harmlessly when the supplier said nothing about active.
+    couponStatus: normalizeCouponStatus(statusFromActive, base.couponStatus),
     normalizedPayload: {
       ...(base.normalizedPayload && typeof base.normalizedPayload === "object"
         ? base.normalizedPayload
