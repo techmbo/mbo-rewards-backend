@@ -274,6 +274,27 @@ model AccessLog {
   @@index([action, createdAt])
 }
 
+/// Durable, single-use OAuth `state` for the marketplace connect flow.
+///
+/// The callback is a public endpoint, so the `state` it receives is attacker-supplied text. It is
+/// trusted only as far as locating this row: the platform and accountLabel that credentials are
+/// written under come from here, never from the inbound string. The nonce is stored hashed so a
+/// read of this table cannot forge a callback, and `consumedAt` makes each state single-use.
+model OAuthState {
+  id                String    @id @default(uuid())
+  /// SHA-256 of the issued nonce. The nonce itself is never stored.
+  nonceHash         String    @unique
+  platform          String
+  accountLabel      String    @default("default")
+  /// Staff user who initiated the connect, for audit. Not a relation: no cascade behaviour needed.
+  initiatedByUserId String?
+  expiresAt         DateTime
+  consumedAt        DateTime?
+  createdAt         DateTime  @default(now())
+
+  @@index([expiresAt])
+}
+
 model MarketplaceAccount {
   id                    String    @id @default(uuid())
   platform              String

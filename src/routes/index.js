@@ -464,8 +464,18 @@ router.post(
   triggerSyncPlatform,
 );
 
-router.get("/auth/connect/:platform", oauthConnect);
-router.get("/auth/callback/marketplace/:platform", oauthCallback);
+// Staff-only: issuing a connect URL also issues a durable OAuth state, so it must be attributable
+// to a real operator holding integrations rights, not to anyone who can reach the host.
+router.get(
+  "/auth/connect/:platform",
+  authRateLimiter,
+  authenticate,
+  requirePermission(PERMISSIONS.INTEGRATIONS_MANAGE),
+  oauthConnect,
+);
+// The callback stays public — the supplier redirects the browser here — but it is now only as
+// trusted as the stored state it carries, and rate-limited like the other public auth routes.
+router.get("/auth/callback/marketplace/:platform", authRateLimiter, oauthCallback);
 
 router.get(
   "/marketplace/accounts",

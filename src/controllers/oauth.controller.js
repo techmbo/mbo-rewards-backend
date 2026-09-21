@@ -11,7 +11,9 @@ export async function oauthConnect(req, res, next) {
   try {
     const { platform } = req.params;
     const { accountLabel } = req.query;
-    const { url } = getOAuthConnectUrl(platform, accountLabel ? String(accountLabel) : undefined);
+    const { url } = await getOAuthConnectUrl(platform, accountLabel ? String(accountLabel) : undefined, {
+      userId: req.user?.id ?? null,
+    });
     res.redirect(url);
   } catch (error) {
     next(error);
@@ -33,11 +35,14 @@ export async function oauthCallback(req, res, next) {
     redirect.searchParams.set("accountLabel", result.accountLabel);
     res.redirect(redirect.toString());
   } catch (error) {
+    // The message lands in a URL, so it outlives the response in history and Referer headers.
+    // Sanitize it for the same reason the log line is sanitized.
+    const safeMessage = sanitizeSecretError(error?.message) || "OAuth callback failed";
     const redirect = new URL(FRONTEND_INTEGRATIONS_URL);
     redirect.searchParams.set("oauth", "error");
-    redirect.searchParams.set("message", error?.message || "OAuth callback failed");
+    redirect.searchParams.set("message", safeMessage);
     res.redirect(redirect.toString());
-    logger.error({ err: sanitizeSecretError(error?.message) || error?.message }, "oauth callback failed");
+    logger.error({ err: safeMessage }, "oauth callback failed");
   }
 }
 

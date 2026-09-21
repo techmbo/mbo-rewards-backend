@@ -43,16 +43,28 @@ const PLATFORM_CONFIG = {
   },
 };
 
-function parseState(state) {
+/** How long an issued `state` stays usable. Long enough for a human consent screen, no longer. */
+export const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+
+/** The refusal for every state that cannot be proven to be one we issued and have not yet used. */
+export const OAUTH_STATE_REFUSAL = "Invalid or expired OAuth state";
+
+export function hashOAuthNonce(nonce) {
+  return crypto.createHash("sha256").update(String(nonce)).digest("hex");
+}
+
+/**
+ * The nonce inside an inbound `state`, or null.
+ *
+ * This is deliberately the ONLY thing read out of the inbound string. It is a lookup key, not a
+ * claim: the platform and accountLabel that credentials get written under are read from the stored
+ * row. Anything a caller puts in the other segments is ignored.
+ */
+export function extractStateNonce(state) {
   const parts = String(state || "").split(".");
-  if (parts.length === 2) {
-    const [platform, nonce] = parts;
-    if (!platform || !nonce) return null;
-    return { platform, accountLabel: "default", nonce };
-  }
-  const [platform, accountLabel, nonce] = parts;
-  if (!platform || !nonce) return null;
-  return { platform, accountLabel: accountLabel || "default", nonce };
+  if (parts.length < 2) return null;
+  const nonce = parts[parts.length - 1];
+  return /^[0-9a-f]{32,128}$/.test(nonce) ? nonce : null;
 }
 
 function normalizeAccountLabel(value) {
@@ -73,11 +85,26 @@ function assertPlatformConfig(platformKey) {
   };
 }
 
-export function getOAuthConnectUrl(platformKey, requestedAccountLabel) {
+export async function getOAuthConnectUrl(platformKey, requestedAccountLabel, { userId = null } = {}) {
   const config = assertPlatformConfig(platformKey);
   const accountLabel = normalizeAccountLabel(requestedAccountLabel);
-  const nonce = crypto.randomBytes(12).toString("hex");
-  const state = `${platformKey}.${accountLabel}.${nonce}`;
+  const nonce = crypto.randomBytes(32).toString("hex");
+
+  // Persist BEFORE redirecting. A state that was never stored is not one we issued, and the
+  // callback refuses it — so the store must be written while we still control the flow.
+  await prisma.oAuthState.create({
+    data: {
+      nonceHash: hashOAuthNonce(nonce),
+      platform: platformKey,
+      accountLabel,
+      initiatedByUserId: userId,
+      expiresAt: new Date(Date.now() + OAUTH_STATE_TTL_MS),
+    },
+  });
+
+  // The label is NOT carried in the state: it is read back from the row at callback time, so a
+  // caller cannot retarget the write by editing this string.
+  const state = `${platformKey}.${nonce}`;
   const url = new URL(config.authUrl);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("client_id", config.clientId);
@@ -91,9 +118,23 @@ export function getOAuthConnectUrl(platformKey, requestedAccountLabel) {
 
 export async function handleOAuthCallback({ code, state, platformFromPath }) {
   if (!code) throw new Error("Missing OAuth code in callback");
-  const parsed = parseState(state);
-  if (!parsed) throw new Error("Invalid OAuth state");
-  const { platform, accountLabel } = parsed;
+
+  // The inbound string is trusted only to locate a row we issued.
+  const nonce = extractStateNonce(state);
+  if (!nonce) throw new Error(OAUTH_STATE_REFUSAL);
+
+  const nonceHash = hashOAuthNonce(nonce);
+  const issued = await prisma.oAuthState.findUnique({ where: { nonceHash } });
+
+  // One refusal for never-issued, already-consumed and expired alike: a caller learns only that
+  // the state is not usable, not which of the three it was.
+  if (!issued) throw new Error(OAUTH_STATE_REFUSAL);
+  if (issued.consumedAt) throw new Error(OAUTH_STATE_REFUSAL);
+  if (issued.expiresAt.getTime() <= Date.now()) throw new Error(OAUTH_STATE_REFUSAL);
+
+  // Authorization comes from the stored row, never from the inbound text.
+  const platform = issued.platform;
+  const accountLabel = issued.accountLabel;
   if (platformFromPath && platform !== platformFromPath) {
     throw new Error("OAuth state/platform mismatch");
   }
@@ -126,33 +167,45 @@ export async function handleOAuthCallback({ code, state, platformFromPath }) {
   const accountExternalId =
     tokenData.account_id || tokenData.user_id || tokenData.merchant_id || tokenData.advertiser_id || null;
 
-  const row = await prisma.marketplaceAccount.upsert({
-    where: { platform_accountLabel: { platform, accountLabel } },
-    update: {
-      accountLabel,
-      authType: "oauth",
-      accountExternalId,
-      encryptedAccessToken: encryptText(accessToken),
-      encryptedRefreshToken: refreshToken ? encryptText(refreshToken) : null,
-      tokenExpiresAt,
-      scope: tokenData.scope || config.scope || null,
-      connectedAt: new Date(),
-    },
-    create: {
-      platform,
-      accountLabel,
-      authType: "oauth",
-      accountExternalId,
-      encryptedAccessToken: encryptText(accessToken),
-      encryptedRefreshToken: refreshToken ? encryptText(refreshToken) : null,
-      tokenExpiresAt,
-      scope: tokenData.scope || config.scope || null,
-    },
-  });
+  // Consume the state and write the credentials in ONE transaction. The consume is a conditional
+  // update, so two concurrent callbacks carrying the same state race on a single row: exactly one
+  // sees count === 1 and proceeds, the other aborts before any credential is touched. The token
+  // exchange above stays outside the transaction — a network call must not hold one open.
+  const stamped = await prisma.$transaction(async (tx) => {
+    const consumed = await tx.oAuthState.updateMany({
+      where: { nonceHash, consumedAt: null, expiresAt: { gt: new Date() } },
+      data: { consumedAt: new Date() },
+    });
+    if (consumed.count !== 1) throw new Error(OAUTH_STATE_REFUSAL);
 
-  const stamped = await prisma.marketplaceAccount.update({
-    where: { id: row.id },
-    data: networkAccountStampData(row, { tokenExpiresAt }),
+    const row = await tx.marketplaceAccount.upsert({
+      where: { platform_accountLabel: { platform, accountLabel } },
+      update: {
+        accountLabel,
+        authType: "oauth",
+        accountExternalId,
+        encryptedAccessToken: encryptText(accessToken),
+        encryptedRefreshToken: refreshToken ? encryptText(refreshToken) : null,
+        tokenExpiresAt,
+        scope: tokenData.scope || config.scope || null,
+        connectedAt: new Date(),
+      },
+      create: {
+        platform,
+        accountLabel,
+        authType: "oauth",
+        accountExternalId,
+        encryptedAccessToken: encryptText(accessToken),
+        encryptedRefreshToken: refreshToken ? encryptText(refreshToken) : null,
+        tokenExpiresAt,
+        scope: tokenData.scope || config.scope || null,
+      },
+    });
+
+    return tx.marketplaceAccount.update({
+      where: { id: row.id },
+      data: networkAccountStampData(row, { tokenExpiresAt }),
+    });
   });
 
   return {
