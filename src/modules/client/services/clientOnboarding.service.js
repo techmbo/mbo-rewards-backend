@@ -1441,13 +1441,20 @@ export class ClientOnboardingService {
   }
 }
 
-export async function acceptInviteAndSetPassword({ token, password }) {
+/**
+ * Accept a client portal invitation and set the account's first password.
+ *
+ * The optional `client` follows the same convention the repositories use (`client = null` →
+ * module prisma): it lets a caller pass a transaction, and lets a test drive the flow without a
+ * database. It changes no HTTP contract — the controller still calls this with one argument.
+ */
+export async function acceptInviteAndSetPassword({ token, password }, { client = prisma } = {}) {
   if (!token || !password || String(password).length < 8) {
     throw fail("A valid invite token and password (min 8 characters) are required.", 400);
   }
 
   const inviteTokenHash = hashInviteToken(token);
-  const user = await prisma.user.findFirst({
+  const user = await client.user.findFirst({
     where: {
       inviteTokenHash,
       role: "CLIENT",
@@ -1461,7 +1468,7 @@ export async function acceptInviteAndSetPassword({ token, password }) {
   }
 
   const passwordHash = await hashPassword(password);
-  const updated = await prisma.user.update({
+  const updated = await client.user.update({
     where: { id: user.id },
     data: {
       passwordHash,
@@ -1480,10 +1487,11 @@ export async function acceptInviteAndSetPassword({ token, password }) {
   };
 }
 
-export async function getInviteStatus(token) {
+/** Read-only invite lookup. `client` is the same optional injection as above. */
+export async function getInviteStatus(token, { client = prisma } = {}) {
   if (!token) throw fail("Invite token is required.", 400);
   const inviteTokenHash = hashInviteToken(token);
-  const user = await prisma.user.findFirst({
+  const user = await client.user.findFirst({
     where: { inviteTokenHash, role: "CLIENT" },
     include: { client: true },
   });
