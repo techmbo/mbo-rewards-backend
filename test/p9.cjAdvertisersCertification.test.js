@@ -561,11 +561,16 @@ describe("the other networks are unchanged", () => {
   it("32 - optimise, partnerize and awin registries are untouched", () => {
     assert.equal(listProbeSourceObjects("optimise").length, 11);
     assert.equal(listProbeSourceObjects("partnerize").length, 8);
+    // programme_relationships joined this list in a LATER phase, after this CJ one: a read-only
+    // Awin diagnostic that asks /programmes for each documented relationship state. It is listed
+    // here so this guard keeps doing its job — proving the CJ work changed no other registry —
+    // rather than being loosened into one that would miss a real cross-network change.
     assert.deepEqual([...listProbeSourceObjects("awin")].sort(), [
       "campaigns",
       "commission_groups",
       "conversions",
       "coupons",
+      "programme_relationships",
     ]);
   });
 

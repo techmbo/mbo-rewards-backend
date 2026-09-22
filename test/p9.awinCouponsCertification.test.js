@@ -109,8 +109,11 @@ describe("awin coupons is registered", () => {
       assert.ok(probes.includes(spec), `${spec} has a spec but no probe`);
     }
     assert.deepEqual(
-      probes.filter((name) => !listAwinCertificationSamples().includes(name)),
-      ["commission_groups"],
+      probes.filter((name) => !listAwinCertificationSamples().includes(name)).sort(),
+      // Both take a DEDICATED sampler rather than fetchCertificationSample, for the same reason:
+      // each needs an argument (an advertiser id, a relationship) that the shared ctx surface
+      // deliberately does not carry. Anything else here has neither and must be justified.
+      ["commission_groups", "programme_relationships"],
       "a probe exists with neither a spec nor a dedicated sampler",
     );
   });

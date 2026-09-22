@@ -251,9 +251,21 @@ describe("the 31-day ceiling still holds", () => {
 describe("the isolation probes are gone", () => {
   it("18 - neither variant is registered any more", () => {
     const objects = listProbeSourceObjects("awin");
-    // commission_groups was added after this phase and is probed by a dedicated sampler, so it has
-    // a probe and no adapter sample spec. Neither isolation variant appears in either list.
-    assert.deepEqual([...objects].sort(), ["campaigns", "commission_groups", "conversions", "coupons"]);
+    // commission_groups and, later, programme_relationships were both added after this phase and
+    // are both probed by a dedicated sampler, so each has a probe and no adapter sample spec.
+    // Neither isolation variant appears in either list.
+    assert.deepEqual([...objects].sort(), [
+      "campaigns",
+      "commission_groups",
+      "conversions",
+      "coupons",
+      "programme_relationships",
+    ]);
+    // The point of this guard, stated directly so a later probe cannot dilute it: the two
+    // isolation variants are registered nowhere.
+    for (const removed of ["conversions_enddate_iso", "conversions_both_dates_iso"]) {
+      assert.ok(!objects.includes(removed), `${removed} is registered again`);
+    }
     assert.deepEqual([...listAwinCertificationSamples()].sort(), ["campaigns", "conversions", "coupons"]);
   });
 

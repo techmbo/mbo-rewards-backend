@@ -21,6 +21,7 @@ import { resolveRakutenCertificationCredentials } from "../integrations/rakutenC
 import { resolveTrackierCertificationCredentials } from "../integrations/trackierCredentials.js";
 import { resolveBoostinyCertificationCredentials } from "../integrations/boostinyCredentials.js";
 import { comparePathSets, summarisePayloads } from "./payloadShape.js";
+import { AWIN_PROGRAMME_RELATIONSHIPS } from "../../adapters/awin.adapter.js";
 
 /**
  * Live supplier certification probe.
@@ -351,6 +352,15 @@ const AWIN_PROBES = Object.freeze({
     method: "POST_READONLY",
     endpointKey: "POST /publisher/{publisherId}/promotions",
     chain: "awinCoupons",
+  },
+  // Diagnostic, and the only probe that deliberately makes more than two requests: it asks the
+  // SAME endpoint one question per relationship state, because the answer is a property of this
+  // account rather than of a schema. Five states, five requests, no retries, and one failure never
+  // stops the rest — telling "empty" apart from "refused" is the entire point.
+  programme_relationships: {
+    method: "GET",
+    endpointKey: "GET /publishers/{publisherId}/programmes (relationship=*)",
+    chain: "awinProgrammeRelationships",
   },
 });
 
@@ -2001,6 +2011,85 @@ export class NetworkCertificationService {
    * commission rate, amount or currency can reach the response — summarisePayloads reports paths,
    * types and categories and never a value, and the discovered id is used and discarded.
    */
+  /**
+   * Which Awin programme relationship states actually hold rows for this account.
+   *
+   * Not a schema probe. commission_groups certified live that an estate-derived advertiser is real
+   * and simply unrelated to this publisher (401, "No relationship exists"), and /programmes reads
+   * relationship=joined, which returns nothing — so the open question is which states DO return
+   * rows. That is a fact about the account, and only the supplier can answer it.
+   *
+   * Five states, one request each, no retries. Each is isolated: a failure is recorded and the
+   * walk continues, because collapsing on the first error is exactly what would stop us telling a
+   * genuinely EMPTY state apart from a REFUSED one — the distinction this probe exists to make.
+   *
+   * Counts and booleans only. The rows are counted and discarded inside the adapter's sampler;
+   * nothing about an advertiser reaches this method, so nothing about one can reach a response.
+   * It reports coverage and refuses to interpret it: whether a state's rows mean commercial
+   * eligibility is a decision for a human with the whole picture, not for a diagnostic.
+   */
+  async certifyAwinProgrammeRelationships({ adapter, key, probe, budgetLeft }) {
+    const base = {
+      network: key,
+      sourceObject: "programme_relationships",
+      endpointKey: probe.endpointKey,
+      httpMethod: probe.method,
+      sampleCount: 0,
+      fieldPaths: [],
+    };
+
+    const deadline = Date.now() + Math.max(0, Math.min(SOURCE_BUDGET_MS, budgetLeft()));
+    const timeLeft = () => Math.max(MIN_ATTEMPT_MS, deadline - Date.now());
+
+    const relationships = {};
+    let supplierRequestCount = 0;
+
+    for (const relationship of AWIN_PROGRAMME_RELATIONSHIPS) {
+      const entryBase = { relationship, sampleCount: 0, hasRows: false };
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const sample = await adapter.fetchCertificationProgrammeRelationshipSample({
+          relationship,
+          timeoutMs: timeLeft(),
+        });
+        supplierRequestCount += 1;
+        const count = Number.isFinite(sample?.observedRowCount) ? sample.observedRowCount : 0;
+        relationships[relationship] = {
+          ...entryBase,
+          ok: true,
+          statusCategory: count > 0 ? "OK" : "OK_NO_ROWS",
+          sampleCount: count,
+          hasRows: count > 0,
+        };
+      } catch (error) {
+        // The request was still made; it is the answer that failed. Counting it keeps the reported
+        // budget honest about what the supplier was asked.
+        supplierRequestCount += 1;
+        // The SHARED failure builder, not a hand-rolled entry: it already produces exactly this
+        // shape — ok, statusCategory, and the status and message only when something safe survives
+        // redaction — so a per-relationship failure is redacted by the same code path as every
+        // other probe's, and cannot drift from it.
+        relationships[relationship] = certificationFailure(entryBase, error, {}, redactionValuesFor(adapter));
+      }
+    }
+
+    const entries = Object.values(relationships);
+    const anyRows = entries.some((entry) => entry.hasRows);
+    const anyOk = entries.some((entry) => entry.ok);
+
+    return {
+      ...base,
+      ok: anyOk,
+      // OK means the account HAS rows somewhere; OK_NO_ROWS means every state answered and every
+      // one was empty. Neither says anything about eligibility.
+      statusCategory: anyRows ? "OK" : anyOk ? "OK_NO_ROWS" : "SUPPLIER_ERROR",
+      schema: "UNKNOWN_NEEDS_LIVE_DATA",
+      relationships,
+      relationshipsProbed: AWIN_PROGRAMME_RELATIONSHIPS.length,
+      supplierRequestCount,
+    };
+  }
+
   async certifyAwinCommissionGroups({ adapter, key, probe, budgetLeft }) {
     const base = {
       network: key,
@@ -3845,6 +3934,11 @@ export class NetworkCertificationService {
 
       if (probe.chain === "awinCommissionGroups") {
         results.push(await this.certifyAwinCommissionGroups({ adapter, key, probe, budgetLeft }));
+        continue;
+      }
+
+      if (probe.chain === "awinProgrammeRelationships") {
+        results.push(await this.certifyAwinProgrammeRelationships({ adapter, key, probe, budgetLeft }));
         continue;
       }
 

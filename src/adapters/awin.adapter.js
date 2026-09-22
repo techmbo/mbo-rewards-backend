@@ -292,6 +292,19 @@ const AWIN_CONVERSIONS_SPEC = Object.freeze({
   }),
 });
 
+/**
+ * The relationship states Awin documents on GET /programmes, copied from the parameter list on
+ * fetchCampaigns and not extended. Production still asks only for "joined"; this set exists so a
+ * diagnostic probe can ask for each one explicitly without any of them being invented.
+ */
+export const AWIN_PROGRAMME_RELATIONSHIPS = Object.freeze([
+  "joined",
+  "pending",
+  "suspended",
+  "rejected",
+  "notjoined",
+]);
+
 const AWIN_CERTIFICATION_SAMPLES = Object.freeze({
   campaigns: {
     method: "GET",
@@ -805,6 +818,46 @@ export function createAwinAdapter({
         0,
         AWIN_CERTIFICATION_MAX_ROWS,
       );
+    },
+
+    /**
+     * One bounded programme-relationship certification request.
+     *
+     * Certified live: commission_groups reached the endpoint with an estate-derived advertiser and
+     * Awin answered 401 "No relationship exists between publisherId and advertiserId". So the
+     * advertiser is real and simply not related to this account — and /programmes defaults to
+     * relationship=joined, which returns nothing. Which relationship states DO hold rows is now the
+     * open question, and it is a question about this account, not about a schema.
+     *
+     * Same path and same parameter name fetchCampaigns builds, so the probe can never certify a
+     * request production could not make. `relationship` is checked against the evidenced set the
+     * supplier documents on that call and nothing else is accepted — a caller cannot steer this.
+     *
+     * Deliberately NOT the sync fetcher: certification goes to httpClient directly so
+     * requestWithRetry's three retries are not inherited, exactly as the commission sampler does.
+     * One request per call, and /programmes takes no page parameter, so there is nothing to bound
+     * in the REQUEST — only what is kept.
+     *
+     * The rows are COUNTED AND DROPPED HERE. The question is which states hold rows, not what a
+     * programme looks like, so no row leaves this function: a programme row carries advertiser ids,
+     * names and URLs, and the narrowest way to keep those out of a certification response is for
+     * the caller never to be handed one.
+     */
+    async fetchCertificationProgrammeRelationshipSample({ relationship, timeoutMs } = {}) {
+      const value = String(relationship ?? "").trim();
+      if (!AWIN_PROGRAMME_RELATIONSHIPS.includes(value)) {
+        throw new Error("Awin programme relationship certification requires an evidenced relationship");
+      }
+
+      await awinRateLimiter.acquireSlot();
+      const response = await httpClient.get(`/publishers/${pubId}/programmes`, {
+        params: { relationship: value },
+        timeout: Number(timeoutMs || AWIN_CERTIFICATION_TIMEOUT_MS),
+      });
+
+      // Production's own collection keys, so the probe cannot certify a shape sync would not read.
+      const rows = extractCollection(response?.data, ["programmes", "data"]);
+      return { relationship: value, observedRowCount: rows.length };
     },
 
     async fetchAll(options = {}) {

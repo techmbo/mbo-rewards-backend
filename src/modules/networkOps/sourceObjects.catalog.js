@@ -173,6 +173,25 @@ const CATALOG = Object.freeze({
         "economics; client commission stays derived by MBO commercial rules. Schema is " +
         "UNKNOWN_NEEDS_LIVE_DATA until a row is certified.",
     }),
+    // DIAGNOSTIC, not an ingestion source. It reads the same /programmes endpoint the campaigns
+    // source already uses, once per relationship state, and reports counts and booleans so an
+    // operator can see which states hold rows for this account. Nothing is staged, mapped or
+    // persisted from it, and it will never become live: an entityType would be a claim that it
+    // produces canonical rows, which it does not.
+    obj({
+      sourceObject: "programme_relationships",
+      label: "Programme Relationship Coverage",
+      endpoint: "GET /publishers/{publisherId}/programmes (relationship=*)",
+      live: false,
+      availability: SOURCE_OBJECT_AVAILABILITY.IMPLEMENTED_NOT_INGESTED,
+      entityType: null,
+      notes:
+        "Diagnostic only. Production sync still reads relationship=joined and is unchanged. This " +
+        "probe asks each documented state — joined, pending, suspended, rejected, notjoined — " +
+        "exactly once, with no retries, and continues past a failure so an empty state can be " +
+        "told apart from a refused one. Counts and booleans only; no advertiser row, id or name " +
+        "leaves it. Coverage is reported, never interpreted as commercial eligibility.",
+    }),
     // live:false was already correct, but silent about WHY. There is no feed endpoint, no fetcher
     // and not even a src/network-mappings/awin directory — so this is weaker than Partnerize
     // products, which at least has a mapping file. Nothing to certify without inventing a path.
