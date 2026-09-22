@@ -93,7 +93,34 @@ export const createClientBodySchema = z.object({
   apiEnvironmentConfig: apiEnvironmentConfigSchema,
 });
 
-export const updateClientBodySchema = createClientBodySchema.omit({ slug: true }).partial();
+/**
+ * The statuses a generic PATCH may set. ACTIVE is deliberately absent.
+ *
+ * Activation is a gated transition, not a field edit: POST /clients/:id/onboarding/activate runs
+ * seven prerequisite checks (signed agreement, commercial model, allotted campaigns, a published
+ * assignment, a production API key where API delivery is enabled, a portal administrator where
+ * portal delivery is enabled, and provisioning) before it writes ACTIVE. Leaving ACTIVE on this
+ * enum made PATCH a second, unchecked route to the same state under the same permission.
+ *
+ * The other three stay: suspending, off-boarding and returning a client to PROSPECT are ordinary
+ * edits with no prerequisites to check.
+ */
+export const clientPatchStatusSchema = z.enum(["PROSPECT", "SUSPENDED", "OFFBOARDED"]);
+
+/**
+ * STRICT, unlike the create schema it derives from.
+ *
+ * A non-strict object silently drops what it does not recognise, so a PATCH carrying
+ * commercialModel or clientSharePercent — neither of which this schema has ever accepted — was
+ * answered 200 having written nothing. The caller had no way to tell. Strict turns that into a 400
+ * naming the offending key, and keeps those two fields where they belong: the commercial-model
+ * endpoint, which is the only thing that writes them.
+ */
+export const updateClientBodySchema = createClientBodySchema
+  .omit({ slug: true })
+  .partial()
+  .extend({ status: clientPatchStatusSchema.optional() })
+  .strict();
 
 export const brandRequestListQuerySchema = paginationSchema.extend({
   clientId: resourceIdSchema.optional(),

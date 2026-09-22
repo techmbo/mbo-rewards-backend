@@ -89,6 +89,17 @@ export class ClientService {
     const record = await this.clientRepo.findById(id, {}, client);
     if (!record) throw fail("Client not found.", 404);
 
+    // The invariant, restated where the write happens rather than only at the request boundary:
+    // a generic field edit never activates a client. Activation runs seven prerequisite checks and
+    // writes ACTIVE through the repository itself, so refusing it here cannot block that path — it
+    // only stops this one, and any caller added to it later, from becoming a second way in.
+    if (input.status === "ACTIVE") {
+      throw fail(
+        "A client cannot be activated by updating its status. Use POST /clients/:id/onboarding/activate, which checks the activation prerequisites.",
+        409,
+      );
+    }
+
     const data = {};
     if (input.name !== undefined) data.name = input.name.trim();
     if (input.legalName !== undefined) data.legalName = input.legalName;
