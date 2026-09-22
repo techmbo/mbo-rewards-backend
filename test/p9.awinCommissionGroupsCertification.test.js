@@ -372,15 +372,41 @@ describe("bounds and safety", () => {
     for (const forbidden of ["ctx.", "options.", "req.", "probe.advertiserId", "body."]) {
       assert.ok(!body.includes(forbidden), forbidden);
     }
-    // The id has exactly one origin: the campaign row this chain read itself.
+    // The id has exactly TWO origins, both read by this chain itself: the campaign row it sampled,
+    // and MBO's own canonical Awin campaign estate. Neither is caller input, and there is no third.
     assert.match(body, /awinAdvertiserIdOf\(campaignRows\[0\]\)/);
-    assert.equal((body.match(/advertiserId =/g) || []).length, 1, "the id is assigned more than once");
+    assert.match(body, /this\.db\?\.supplierCampaign\?\.findMany/);
+    assert.match(body, /const advertiserId = sampledAdvertiserId \?\? estateAdvertiserId;/);
+    assert.equal(
+      (body.match(/AdvertiserId = |advertiserId = /g) || []).length,
+      // sampled, estate declaration, estate assignment, estate reset on failure, and the resolved
+      // id built from the two. Any sixth assignment is a new origin and must be justified here.
+      5,
+      "an unexpected advertiser-id assignment appeared",
+    );
   });
 
-  it("24 - read-only: the chain writes nothing", () => {
+  it("24 - read-only: the chain writes nothing, and reads exactly one bounded row", () => {
     const start = SERVICE_SRC.indexOf("async certifyAwinCommissionGroups(");
     const body = SERVICE_SRC.slice(start, SERVICE_SRC.indexOf("\n  }\n", start));
-    assert.ok(!/this\.db\.|prisma\.|\.create\(|\.update\(|\.upsert\(/.test(body), "the chain writes");
+
+    // Every mutating verb, whatever client it is reached through. `this.db.` alone is no longer a
+    // proxy for "touches the database": the chain now performs one deliberate READ, so the guard
+    // names what is actually forbidden instead.
+    for (const write of [
+      ".create(", ".createMany(", ".update(", ".updateMany(", ".upsert(",
+      ".delete(", ".deleteMany(", "$executeRaw", "$transaction",
+    ]) {
+      assert.ok(!body.includes(write), `the chain writes: ${write}`);
+    }
+    assert.ok(!/prisma\./.test(body), "the chain reaches a client other than the injected one");
+
+    // And the one read it does perform is bounded to a single row of a single column.
+    const reads = body.match(/this\.db\?\.[A-Za-z]+\?\.[A-Za-z]+/g) || [];
+    assert.deepEqual(reads, ["this.db?.supplierCampaign?.findMany"], "an unexpected database call");
+    assert.match(body, /take: 1,/);
+    assert.match(body, /select: \{ supplierCampaignId: true \},/);
+    assert.match(body, /orderBy: \{ supplierCampaignId: "asc" \},/);
   });
 
   it("25 - no mapper and no SupplierCommissionRule write was added", async () => {

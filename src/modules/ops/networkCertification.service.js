@@ -2026,7 +2026,50 @@ export class NetworkCertificationService {
       return certificationFailure(base, error, {}, redactionValuesFor(adapter));
     }
 
-    const advertiserId = campaignRows.length ? awinAdvertiserIdOf(campaignRows[0]) : null;
+    const sampledAdvertiserId = campaignRows.length ? awinAdvertiserIdOf(campaignRows[0]) : null;
+
+    /**
+     * The canonical fallback, and the reason this chain has one at all.
+     *
+     * Discovery reads /programmes with relationship=joined. This account has joined nothing, so
+     * that sample is empty and the probe skipped without ever reaching the endpoint under test —
+     * certified live as SKIPPED_NO_ADVERTISER_ID, campaignsInspectedCount 0. The advertisers are
+     * not unknown, though: 1,418 Awin SupplierCampaign rows already exist, derived from staged
+     * offers and certified in production, and their supplierCampaignId IS the advertiser id.
+     *
+     * So the second origin is MBO's own canonical estate, never a caller and never a supplier
+     * response. It is one row, selected on one column, ordered deterministically so two runs pick
+     * the same advertiser. Nothing about the row is reported: the id is spent on the request and
+     * only structure comes back.
+     *
+     * Tried only when the sample gave nothing, so a joined account's behaviour is unchanged. A
+     * database that cannot answer is not an error here — it simply leaves the id unresolved and
+     * the chain skips exactly as before.
+     */
+    let estateAdvertiserId = null;
+    if (!sampledAdvertiserId) {
+      try {
+        const estateRows = await this.db?.supplierCampaign?.findMany?.({
+          where: { supplier: "AWIN", archivedAt: null },
+          select: { supplierCampaignId: true },
+          orderBy: { supplierCampaignId: "asc" },
+          take: 1,
+        });
+        const candidate = Array.isArray(estateRows) && estateRows.length
+          ? String(estateRows[0]?.supplierCampaignId ?? "").trim()
+          : "";
+        estateAdvertiserId = candidate || null;
+      } catch {
+        estateAdvertiserId = null;
+      }
+    }
+
+    const advertiserId = sampledAdvertiserId ?? estateAdvertiserId;
+    const advertiserIdSource = sampledAdvertiserId
+      ? "campaigns_sample"
+      : estateAdvertiserId
+        ? "canonical_supplier_campaign"
+        : null;
     const discovery = { ...base, campaignsInspectedCount: campaignRows.length };
 
     if (!advertiserId) {
@@ -2035,9 +2078,11 @@ export class NetworkCertificationService {
         ok: false,
         statusCategory: "SKIPPED_NO_ADVERTISER_ID",
         schema: "UNKNOWN_NEEDS_LIVE_DATA",
+        advertiserIdSource: null,
         note:
-          "No advertiser id was available from a bounded campaigns sample, so no commission-group " +
-          "request was made. Awin campaigns currently return no rows for this account.",
+          "No advertiser id was available from a bounded campaigns sample or from the canonical " +
+          "Awin campaign estate, so no commission-group request was made. Awin campaigns " +
+          "currently return no rows for this account.",
       };
     }
 
@@ -2058,6 +2103,7 @@ export class NetworkCertificationService {
           fieldCount: 0,
           schema: "UNKNOWN_NEEDS_LIVE_DATA",
           advertiserIdResolved: true,
+          advertiserIdSource,
         };
       }
 
@@ -2070,12 +2116,13 @@ export class NetworkCertificationService {
         fieldCount: fieldPaths.length,
         fieldPaths,
         advertiserIdResolved: true,
+        advertiserIdSource,
       };
     } catch (error) {
       return certificationFailure(
         base,
         error,
-        { campaignsInspectedCount: campaignRows.length, advertiserIdResolved: true },
+        { campaignsInspectedCount: campaignRows.length, advertiserIdResolved: true, advertiserIdSource },
         redactionValuesFor(adapter),
       );
     }
