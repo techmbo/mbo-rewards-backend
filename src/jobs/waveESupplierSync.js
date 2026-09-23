@@ -110,6 +110,8 @@ async function resolveImpactCredentials(accountLabel = "default") {
   const token =
     process.env.IMPACT_AUTH_TOKEN ||
     (await getOAuthAccessToken("impact", accountLabel)) ||
+    // Accounts connected from the admin store the Auth Token as the second secret.
+    (await getMarketplaceRefreshToken("impact", accountLabel)) ||
     null;
   if (sid && String(sid).includes(":") && !token) {
     const [a, b] = String(sid).split(":");

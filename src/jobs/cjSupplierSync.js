@@ -1,6 +1,7 @@
 import { createSupplierAdapter } from "../adapters/registry.js";
 import { upsertManyRawEntities } from "../modules/raw/raw.service.js";
 import {
+  getMarketplaceAccountIdentifiers,
   getMarketplaceApiKey,
   getOAuthAccessToken,
   getNetworkAccountSyncFlags,
@@ -31,9 +32,13 @@ async function resolveCjCredentials(accountLabel = "default") {
     (await getMarketplaceApiKey("cj", accountLabel)) ||
     null;
 
-  // These are identifiers, not secrets. Keep them configurable per deployment.
-  const requestorCid = process.env.CJ_PUBLISHER_CID || process.env.CJ_REQUESTOR_CID || null;
-  const websiteId = process.env.CJ_WEBSITE_ID || process.env.CJ_PID || null;
+  // These are identifiers, not secrets: deployment config first, then the connected account
+  // (company CID in accountExternalId, website ID in contactId — see marketplaceAccounts.controller).
+  const envCid = process.env.CJ_PUBLISHER_CID || process.env.CJ_REQUESTOR_CID || null;
+  const envWebsiteId = process.env.CJ_WEBSITE_ID || process.env.CJ_PID || null;
+  const ids = envCid && envWebsiteId ? null : await getMarketplaceAccountIdentifiers("cj", accountLabel);
+  const requestorCid = envCid || ids?.accountExternalId || null;
+  const websiteId = envWebsiteId || ids?.contactId || null;
 
   if (!accessToken || !requestorCid || !websiteId) return null;
   return { accessToken, requestorCid, websiteId };

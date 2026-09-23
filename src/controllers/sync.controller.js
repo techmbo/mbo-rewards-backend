@@ -47,6 +47,11 @@ const SUPPORTED_SYNC_PLATFORMS = new Set([
   "impact",
   "partnerize",
   "awin",
+  // Dispatched by syncPlatformAccount like the rest; they were only missing from this allow-list,
+  // so an account connected from the admin could not be synced on demand.
+  "admitad",
+  "cj",
+  "rakuten",
 ]);
 
 function parseBoolQuery(value, defaultValue = false) {

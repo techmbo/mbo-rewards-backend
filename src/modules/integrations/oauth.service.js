@@ -261,10 +261,44 @@ export async function getMarketplaceExternalId(platformKey, accountLabel = "defa
   return account?.accountExternalId || null;
 }
 
+/**
+ * Accounts connected with a client id + secret (Admitad) store the client SECRET in the primary
+ * slot. That secret must only ever be exchanged for a token, never sent as a bearer token itself,
+ * so it is withheld here and served only by getMarketplaceClientCredentials.
+ */
+export const CLIENT_CREDENTIALS_AUTH_TYPE = "client_credentials";
+
 export async function getMarketplaceApiKey(platformKey, accountLabel = "default") {
   const account = await findMarketplaceAccount(platformKey, accountLabel);
   if (!account?.encryptedAccessToken) return null;
+  if (account.authType === CLIENT_CREDENTIALS_AUTH_TYPE) return null;
   return decryptText(account.encryptedAccessToken);
+}
+
+/** Client id + secret (+ scope) for an account connected with client credentials, else null. */
+export async function getMarketplaceClientCredentials(platformKey, accountLabel = "default") {
+  const account = await findMarketplaceAccount(platformKey, accountLabel);
+  if (account?.authType !== CLIENT_CREDENTIALS_AUTH_TYPE) return null;
+  if (!account.accountExternalId || !account.encryptedAccessToken) return null;
+  return {
+    clientId: account.accountExternalId,
+    clientSecret: decryptText(account.encryptedAccessToken),
+    scope: account.scope || null,
+  };
+}
+
+/**
+ * Non-secret identifiers saved with an account. Which column holds what is fixed per network by
+ * the connect endpoint (e.g. CJ: accountExternalId = company CID, contactId = website ID).
+ */
+export async function getMarketplaceAccountIdentifiers(platformKey, accountLabel = "default") {
+  const account = await findMarketplaceAccount(platformKey, accountLabel);
+  if (!account) return null;
+  return {
+    accountExternalId: account.accountExternalId || null,
+    agencyId: account.agencyId || null,
+    contactId: account.contactId || null,
+  };
 }
 
 /** Second secret for Basic-auth networks (Partnerize user API key, Impact auth token). */

@@ -22,6 +22,9 @@ export const NETWORK_PLATFORM_MAP = Object.freeze({
   partnerize: "PARTNERIZE",
   impact: "IMPACT",
   awin: "AWIN",
+  admitad: "ADMITAD",
+  cj: "CJ",
+  rakuten: "RAKUTEN",
 });
 
 /** Platforms accepted by POST /sync/:platform (manual sync). */
@@ -32,6 +35,9 @@ export const MANUAL_SYNC_PLATFORMS = Object.freeze({
   PARTNERIZE: ["partnerize"],
   IMPACT: ["impact"],
   AWIN: ["awin"],
+  ADMITAD: ["admitad"],
+  CJ: ["cj"],
+  RAKUTEN: ["rakuten"],
 });
 
 /** Entity.networkSource values that roll up to a SupplierKey. */
@@ -42,6 +48,9 @@ export const ENTITY_NETWORK_SOURCES = Object.freeze({
   PARTNERIZE: ["partnerize"],
   IMPACT: ["impact"],
   AWIN: ["awin"],
+  ADMITAD: ["admitad"],
+  CJ: ["cj"],
+  RAKUTEN: ["rakuten"],
 });
 
 export const CAPABILITY_STATE = Object.freeze({

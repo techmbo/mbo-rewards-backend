@@ -1,6 +1,10 @@
 import axios from "axios";
 import { fail } from "../../core/apiResponse.js";
-import { getMarketplaceApiKey, getOAuthAccessToken } from "./oauth.service.js";
+import {
+  getMarketplaceApiKey,
+  getMarketplaceClientCredentials,
+  getOAuthAccessToken,
+} from "./oauth.service.js";
 
 /**
  * Admitad client-credentials token provider.
@@ -177,16 +181,19 @@ export async function acquireAdmitadClientCredentialsToken({
  *   1. ADMITAD_ACCESS_TOKEN — an explicit manual override, kept for isolation probes. It WINS,
  *      which means leaving it set in an environment stops the client-credentials flow from ever
  *      running there.
- *   2. A stored MarketplaceAccount credential, exactly as before. Unreachable today — "admitad" is
- *      in neither PLATFORM_CONFIG nor SUPPORTED_PLATFORMS, so no such row can be created — but it
- *      is the existing production contract and is left in place rather than quietly removed.
- *   3. The client-credentials exchange.
+ *   2. A stored access token on the connected MarketplaceAccount (an admin who pasted a token that
+ *      Admitad already issued).
+ *   3. Client credentials saved on the connected MarketplaceAccount (authType client_credentials:
+ *      client id in accountExternalId, client secret encrypted, optional scope), exchanged here.
+ *      Scope falls back to ADMITAD_OAUTH_SCOPE when the account did not save one.
+ *   4. The client-credentials exchange from deployment env (ADMITAD_CLIENT_ID / _SECRET).
  *
  * Returns null only when nothing is configured at all. A configured-but-broken setup throws, so
  * "not configured" and "misconfigured" stay distinguishable to the caller.
  */
 export async function resolveAdmitadAccessToken(accountLabel = "default", options = {}) {
   const env = options.env ?? process.env;
+  const readStoredClientCredentials = options.readStoredClientCredentials ?? getMarketplaceClientCredentials;
 
   const override = env.ADMITAD_ACCESS_TOKEN || null;
   if (override) return override;
@@ -196,6 +203,19 @@ export async function resolveAdmitadAccessToken(accountLabel = "default", option
     (await getMarketplaceApiKey("admitad", accountLabel).catch(() => null)) ||
     null;
   if (stored) return stored;
+
+  const storedClient = await readStoredClientCredentials("admitad", accountLabel).catch(() => null);
+  if (storedClient?.clientId && storedClient?.clientSecret) {
+    return acquireAdmitadClientCredentialsToken({
+      ...options,
+      env: {
+        ...env,
+        ADMITAD_CLIENT_ID: storedClient.clientId,
+        ADMITAD_CLIENT_SECRET: storedClient.clientSecret,
+        ADMITAD_OAUTH_SCOPE: storedClient.scope || env.ADMITAD_OAUTH_SCOPE,
+      },
+    });
+  }
 
   if (!hasAdmitadClientCredentials(readAdmitadOAuthConfig(env))) return null;
 
