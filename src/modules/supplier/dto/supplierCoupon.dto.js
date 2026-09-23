@@ -1,4 +1,5 @@
 import { toCouponVoucherDto } from "../../coupons/couponVoucher.contract.js";
+import { mapCampaignStatus } from "../../ops/v15FieldContract.js";
 
 function toIso(value) {
   if (!value) return null;
@@ -30,7 +31,8 @@ export function toSupplierCouponDto(record) {
           supplierCampaignId: campaign.supplierCampaignId,
           campaignName: campaign.campaignName,
           merchantNameRaw: campaign.merchantNameRaw,
-          campaignStatus: campaign.campaignStatus,
+          campaignStatus: mapCampaignStatus(campaign.campaignStatus),
+          sourceCampaignStatus: campaign.campaignStatus ?? null,
         }
       : undefined,
   };

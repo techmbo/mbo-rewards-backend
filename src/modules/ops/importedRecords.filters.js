@@ -12,12 +12,12 @@ const DB_CAMPAIGN_STATUS = new Set(["ACTIVE", "PAUSED", "PENDING", "RETIRED", "U
 const DB_RELATIONSHIP = new Set(["JOINED", "NOT_JOINED", "PENDING", "UNKNOWN"]);
 const PRICING_MODELS = new Set(["CPA", "CPC", "CPL", "CPS", "HYBRID"]);
 
-const CAMPAIGN_STATUS_ORDER = ["ACTIVE", "PAUSED", "PENDING", "EXPIRED", "NOTAPPLIED", "INACTIVE"];
+const CAMPAIGN_STATUS_ORDER = ["ACTIVE", "PAUSED", "EXPIRED", "INACTIVE", "NOTAPPLIED"];
 const RELATIONSHIP_ORDER = [
   "JOINED",
   "APPROVED",
+  "NOT_APPLIED",
   "PENDING",
-  "NOT_JOINED",
   "REJECTED",
   "SUSPENDED",
   "UNKNOWN",
@@ -29,7 +29,7 @@ export const NO_MATCH = Object.freeze({ id: { equals: "__no_match__" } });
 export function facetLabel(value) {
   const raw = String(value ?? "").trim();
   if (!raw) return "";
-  if (raw === "NOT_JOINED" || raw === "NOT_APPLIED") return "Not Joined";
+  if (raw === "NOT_JOINED" || raw === "NOT_APPLIED") return "Not Applied";
   if (raw === "NOTAPPLIED") return "Not Applied";
   return raw
     .replaceAll("_", " ")
@@ -111,14 +111,14 @@ export function resolveDisplayedCampaignStatus({ stored, raw = {}, networkSource
 }
 
 /**
- * List/API campaignStatus → Prisma CampaignStatus values.
- * EXPIRED is stored as RETIRED. INACTIVE is display-only and has no DB enum.
+ * List/API campaignStatus → Prisma CampaignStatus values (the inverse of mapCampaignStatus).
+ * EXPIRED is stored as RETIRED; INACTIVE is stored as PENDING (not live yet).
  */
 export function campaignStatusToDb(raw) {
   if (raw == null || raw === "") return [];
   const v = String(raw).toUpperCase().trim();
   if (v === "EXPIRED") return ["RETIRED"];
-  if (v === "INACTIVE" || v === "DISABLED") return [];
+  if (v === "INACTIVE" || v === "DISABLED") return ["PENDING"];
   if (isNotAppliedCampaignStatus(v)) return [];
   if (DB_CAMPAIGN_STATUS.has(v)) return [v];
   return [];
@@ -218,7 +218,7 @@ export function campaignTypeFacetOptions(types, pricingModels = []) {
   for (const type of types || []) mapped.push(mapCampaignType(type, null));
   for (const model of pricingModels || []) mapped.push(mapCampaignType(null, model));
   return toFacetOptions(mapped.filter(Boolean), {
-    order: ["CPS", "CPA", "CPL", "CPI", "CPC", "HYBRID", "TIERED"],
+    order: ["CPS", "CPA", "CPL", "CPI", "CPC", "HYBRID"],
     labelFn: (v) => String(v),
     omit: ["UNKNOWN"],
   });

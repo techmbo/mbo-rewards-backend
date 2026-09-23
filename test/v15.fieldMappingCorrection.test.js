@@ -32,7 +32,8 @@ describe("v15 helpers — no fake data", () => {
   });
 
   it("maps relationship and campaign statuses without merging", () => {
-    assert.equal(mapRelationshipStatus("NOT_JOINED"), "NOT_JOINED");
+    assert.equal(mapRelationshipStatus("NOT_JOINED"), "NOT_APPLIED");
+    assert.equal(mapRelationshipStatus("REQUIRES_APPROVAL"), "PENDING");
     assert.equal(mapRelationshipStatus("JOINED"), "JOINED");
     assert.equal(mapRelationshipStatus(null), null);
     assert.equal(mapCampaignStatus("RETIRED"), "EXPIRED");
@@ -233,7 +234,8 @@ describe("v15 03G admin campaign contract", () => {
     });
     assert.equal(dto.brandName, "Raw Brand");
     assert.equal(dto.campaignName, "Raw Campaign");
-    assert.equal(dto.relationshipStatus, "NOT_JOINED");
+    assert.equal(dto.relationshipStatus, "NOT_APPLIED");
+    assert.equal(dto.sourceRelationshipStatus, "NOT_JOINED");
     assert.equal(dto.isAssignable, false);
   });
 

@@ -169,11 +169,12 @@ export class AdminContractService {
     }
     if (campaignStatus) {
       const rawStatus = String(campaignStatus).toUpperCase();
+      // Canonical filter value → stored source values (inverse of mapCampaignStatus).
       const statusIn =
         rawStatus === "EXPIRED"
           ? ["RETIRED"]
           : rawStatus === "INACTIVE"
-            ? ["PAUSED", "RETIRED"]
+            ? ["PENDING"]
             : [rawStatus];
       sourceSome.supplierCampaign = {
         ...(sourceSome.supplierCampaign || {}),
@@ -184,7 +185,11 @@ export class AdminContractService {
       const type = String(campaignType).toUpperCase();
       sourceSome.supplierCampaign = {
         ...(sourceSome.supplierCampaign || {}),
-        OR: [{ campaignType: { contains: type, mode: "insensitive" } }, { pricingModel: type }],
+        // pricingModel is an enum without CPI; only compare values it can hold.
+        OR: [
+          { campaignType: { contains: type, mode: "insensitive" } },
+          ...(["CPA", "CPC", "CPL", "CPS", "HYBRID"].includes(type) ? [{ pricingModel: type }] : []),
+        ],
       };
     }
     if (relationshipStatus) {

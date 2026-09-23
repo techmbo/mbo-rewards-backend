@@ -5,7 +5,7 @@
  */
 
 import { FIELD_MAPPING_OUTCOME } from "../mapping/mappingOutcome.contract.js";
-import { formatCommissionSummary } from "../ops/v15FieldContract.js";
+import { formatCommissionSummary, normalizeCommissionType } from "../ops/v15FieldContract.js";
 import { assessSupplierCommissionReadiness, readinessMetadata } from "./supplierCommissionReadiness.js";
 
 /**
@@ -166,7 +166,9 @@ export function toSupplierCommissionRuleDto(record, context = {}) {
     outcomeKey: record.outcomeKey ?? null,
     outcomeSlot: record.outcomeSlot ?? null,
     commissionSequence: record.commissionSequence ?? null,
-    commissionType: record.supplierRuleType ?? record.basis ?? "UNKNOWN",
+    // MBO canonical commission type; the network's own wording is kept as rawCommissionType.
+    commissionType: normalizeCommissionType({ supplierRuleType: record.supplierRuleType, basis: record.basis }),
+    rawCommissionType: record.supplierRuleType ?? record.basis ?? null,
     basis: record.basis ?? null,
     commissionValue,
     ratePercent,

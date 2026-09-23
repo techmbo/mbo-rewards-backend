@@ -20,6 +20,9 @@ import {
   monthYearFromDate,
   mapCanonicalPaymentStatus,
   buildMappingCertificationChecklist,
+  resolveMboCampaignCurrency,
+  normalizeCommissionType,
+  mapMboOrderStatus,
 } from "./v15FieldContract.js";
 import {
   extractMboActualReceipt,
@@ -109,8 +112,12 @@ export function toAdminCampaignListDto(row) {
       : Array.isArray(row.countries) && row.countries.length
         ? row.countries
         : null;
-  // Do not invent currency from country (v15 regional rule is not a silent USD/INR default).
-  const currency = sc?.currencyCode || row.defaultCurrency || null;
+  // MBO regional campaign currency (India → INR, other regions → USD); the network's own
+  // currency is kept separately as originalCurrency for finance and reconciliation.
+  const { currency, originalCurrency } = resolveMboCampaignCurrency({
+    countries: countryCodes,
+    originalCurrency: sc?.currencyCode || row.defaultCurrency || null,
+  });
 
   const campaignType = mapCampaignType(sc?.campaignType, sc?.pricingModel);
   const campaignStatus = mapCampaignStatus(sc?.campaignStatus);
@@ -221,7 +228,9 @@ export function toAdminCampaignListDto(row) {
     secondaryCategory: row.secondaryCategory ?? null,
     country: countryCodes,
     currency,
+    originalCurrency,
     campaignType,
+    sourceCampaignType: sc?.campaignType ?? sc?.pricingModel ?? null,
     campaignDescription: sc?.campaignDescription ?? null,
     campaignTermsAndCondition: row.campaignTermsAndCondition ?? null,
     campaignCommission,
@@ -230,11 +239,14 @@ export function toAdminCampaignListDto(row) {
     campaignStartDate: isoDate(sc?.campaignStartDate),
     campaignEndDate: row.campaignEndDate ?? null,
     campaignStatus,
+    // Source values as stored for this source (the network's raw token stays in rawPayload).
+    sourceCampaignStatus: sc?.campaignStatus ?? null,
     campaignPromotionDescription: row.campaignPromotionDescription ?? null,
     discountPercent,
     couponCode: row.couponCode ?? null,
     couponExpiry: row.couponExpiry ?? null,
     relationshipStatus,
+    sourceRelationshipStatus: primary?.relationshipStatus ?? sc?.participationStatus ?? null,
     isAssignable,
     mboReady,
     campaignChannelType,
@@ -260,6 +272,7 @@ export function toAdminCampaignListDto(row) {
     supplierCommissionRules: Array.isArray(rules)
       ? rules.map((r) => ({
           id: r.id,
+          commissionType: normalizeCommissionType({ supplierRuleType: r.supplierRuleType, basis: r.basis }),
           basis: r.basis ?? "UNKNOWN",
           supplierRuleType: r.supplierRuleType ?? null,
           ratePercent: money(r.ratePercent),
@@ -311,6 +324,7 @@ export function toAdminCampaignDetailDto(row) {
         id: s.id,
         networkSource: sc?.supplier ?? s.supplier ?? null,
         relationshipStatus: resolveRelationshipStatus(s, sc),
+        sourceRelationshipStatus: s.relationshipStatus ?? sc?.participationStatus ?? null,
         isPrimary: Boolean(s.isPrimary),
         isActive: Boolean(s.isActive),
         linkSupport: Boolean(s.supportsLink) || hasHttpUrl(sc?.trackingUrl),
@@ -321,7 +335,13 @@ export function toAdminCampaignDetailDto(row) {
         supplierCampaignId: sc?.supplierCampaignId ?? null,
         campaignTrackingLink: sc?.trackingUrl ?? null,
         campaignStatus: mapCampaignStatus(sc?.campaignStatus),
+        sourceCampaignStatus: sc?.campaignStatus ?? null,
         campaignType: mapCampaignType(sc?.campaignType, sc?.pricingModel),
+        currency: resolveMboCampaignCurrency({
+          countries: sc?.countryCodes,
+          originalCurrency: sc?.currencyCode ?? null,
+        }).currency,
+        originalCurrency: sc?.currencyCode ?? null,
         lastSyncedAt: iso(sc?.lastSyncedAt),
         grossCommissionEstimate: money(s.grossCommission),
         estimateOnly: true,
@@ -530,7 +550,14 @@ export function toAdminOrderDto(order, { includeFinancial = false } = {}) {
     validationStatus: validation,
     supplierPaymentStatus: payment,
     clientPaymentStatus: order.clientPaymentStatus ?? "UNKNOWN",
-    paymentStatus: nc.paymentStatus ?? null,
+    // Payment lifecycle lives here, never in orderStatus.
+    paymentStatus:
+      nc.paymentStatus ??
+      mapCanonicalPaymentStatus({
+        supplierPaymentStatus: payment,
+        clientPaymentStatus: order.clientPaymentStatus,
+        validationStatus: validation,
+      }),
     orderDate: iso(order.orderDate),
     confirmedDate: iso(nc.confirmedDate),
     paymentConfirmedDate: iso(nc.paymentConfirmedDate),
@@ -566,7 +593,8 @@ export function toAdminOrderDto(order, { includeFinancial = false } = {}) {
     networkRawStatus: nc.networkRawStatus ?? nc.rawStatus ?? null,
     mboOrderStatus: nc.mboOrderStatus ?? null,
     mboStatus,
-    orderStatus: canonicalOrderStatus ?? mboStatus,
+    // Order lifecycle only: PENDING / CONFIRMED / REJECTED / CANCELLED / REVERSED / UNKNOWN.
+    orderStatus: mapMboOrderStatus({ mboOrderStatus: canonicalOrderStatus, validationStatus: validation }),
     rawPayloadId: nc.rawPayloadId ?? order.rawPayloadId ?? null,
     billingMonth: orderDate && !Number.isNaN(orderDate.getTime()) ? orderDate.getUTCMonth() + 1 : null,
     billingYear: orderDate && !Number.isNaN(orderDate.getTime()) ? orderDate.getUTCFullYear() : null,

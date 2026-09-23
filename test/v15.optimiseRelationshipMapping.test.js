@@ -210,7 +210,7 @@ describe("resolveRelationshipStatus + eligibility gates", () => {
         { relationshipStatus: "UNKNOWN" },
         { isJoined: false, participationStatus: "NOT_JOINED" },
       ),
-      "NOT_JOINED",
+      "NOT_APPLIED",
     );
   });
 

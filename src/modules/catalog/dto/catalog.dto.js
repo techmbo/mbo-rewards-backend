@@ -1,3 +1,4 @@
+import { mapCampaignStatus, mapRelationshipStatus } from "../../ops/v15FieldContract.js";
 function toIso(value) {
   if (!value) return null;
   return value instanceof Date ? value.toISOString() : value;
@@ -49,7 +50,8 @@ export function toCampaignSourceDto(record) {
     supplierCampaignId: record.supplierCampaignId,
     priority: record.priority,
     isPrimary: record.isPrimary,
-    relationshipStatus: record.relationshipStatus,
+    relationshipStatus: mapRelationshipStatus(record.relationshipStatus),
+    sourceRelationshipStatus: record.relationshipStatus ?? null,
     supportsLink: record.supportsLink,
     supportsCoupon: record.supportsCoupon,
     grossCommission: decimalToString(record.grossCommission),
@@ -65,7 +67,8 @@ export function toCampaignSourceDto(record) {
           supplierRegion: record.supplierCampaign.supplierRegion,
           campaignName: record.supplierCampaign.campaignName,
           merchantNameRaw: record.supplierCampaign.merchantNameRaw,
-          campaignStatus: record.supplierCampaign.campaignStatus,
+          campaignStatus: mapCampaignStatus(record.supplierCampaign.campaignStatus),
+          sourceCampaignStatus: record.supplierCampaign.campaignStatus ?? null,
           participationStatus: record.supplierCampaign.participationStatus,
           isJoined: record.supplierCampaign.isJoined,
         }

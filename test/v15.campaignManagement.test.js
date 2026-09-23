@@ -130,14 +130,16 @@ describe("campaign management — field sources", () => {
     assert.equal(dto.deeplinkSupport, true);
     assert.equal(dto.commissionRuleCount, 5);
     assert.deepEqual(dto.country, ["IN", "SG"]);
-    assert.equal(dto.currency, "INR");
+    // IN + SG is not India-only, so the MBO regional currency is USD; the network's INR is kept.
+    assert.equal(dto.currency, "USD");
+    assert.equal(dto.originalCurrency, "INR");
     assert.ok(String(dto.campaignCommission).includes("Up to 16%"));
     assert.equal(dto.mappingStatus, "NEEDS_REVIEW");
     assert.equal(dto.campaignSourceId, "src");
     assert.equal(dto.supplierCampaignId, "tr-9");
   });
 
-  it("keeps currency null when only country is known", () => {
+  it("applies the MBO regional currency when only country is known", () => {
     const dto = toAdminCampaignListDto({
       id: "1",
       displayName: "C",
@@ -155,7 +157,8 @@ describe("campaign management — field sources", () => {
       },
     });
     assert.deepEqual(dto.country, ["AE"]);
-    assert.equal(dto.currency, null);
+    assert.equal(dto.currency, "USD");
+    assert.equal(dto.originalCurrency, null);
   });
 });
 

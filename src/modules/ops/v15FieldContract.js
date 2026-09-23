@@ -1,7 +1,37 @@
 /**
  * v15 workbook field helpers (03A/03G, 04C, 06C).
  * Never invent discount %, customer type, or campaign start from createdAt.
+ *
+ * MBO normalization boundary. Stored columns hold the SOURCE value (already one step from the
+ * network's raw token, which stays in rawPayload); the functions below turn source values into
+ * the MBO canonical vocabulary for every admin / client contract. Nothing here writes, so source
+ * values are never overwritten.
  */
+
+/** MBO canonical vocabularies (MBO → Network mapping workbook; locked decisions 2026-09-23). */
+export const MBO_CAMPAIGN_STATUSES = Object.freeze(["ACTIVE", "PAUSED", "EXPIRED", "INACTIVE", "UNKNOWN"]);
+export const MBO_RELATIONSHIP_STATUSES = Object.freeze([
+  "JOINED",
+  "APPROVED",
+  "NOT_APPLIED",
+  "PENDING",
+  "REJECTED",
+  "SUSPENDED",
+  "UNKNOWN",
+]);
+export const MBO_CAMPAIGN_TYPES = Object.freeze(["CPS", "CPA", "CPL", "CPI", "CPC", "HYBRID", "UNKNOWN"]);
+export const MBO_COMMISSION_TYPES = Object.freeze([
+  "PERCENT",
+  "FIXED",
+  "CPC",
+  "CPA",
+  "CPS",
+  "CPL",
+  "TIER",
+  "HYBRID",
+  "OTHER",
+]);
+export const MBO_ORDER_STATUSES = Object.freeze(["PENDING", "CONFIRMED", "REJECTED", "CANCELLED", "REVERSED", "UNKNOWN"]);
 
 export function iso(v) {
   if (!v) return null;
@@ -135,19 +165,17 @@ export function resolveAssignedCampaignType({
 }
 
 /**
- * Workbook relationshipStatus vocabulary.
- * DB enum: JOINED | NOT_JOINED | PENDING | UNKNOWN
- * Workbook API: JOINED | APPROVED | NOT_JOINED | PENDING | REJECTED | SUSPENDED | UNKNOWN
- * Absent input → null (do not invent UNKNOWN).
+ * Canonical relationship: JOINED / APPROVED / NOT_APPLIED / PENDING / REJECTED / SUSPENDED / UNKNOWN.
+ * DB enum (source value): JOINED | NOT_JOINED | PENDING | UNKNOWN. NOT_JOINED and
+ * REQUIRES_APPROVAL are translated, never passed through. Absent input → null (do not invent).
  */
 export function mapRelationshipStatus(raw) {
   if (raw == null || raw === "") return null;
   const v = String(raw).toUpperCase().trim();
-  if (v === "JOINED" || v === "APPROVED") return v === "APPROVED" ? "APPROVED" : "JOINED";
-  if (v === "NOT_JOINED" || v === "NOT_APPLIED") return "NOT_JOINED";
-  if (v === "PENDING" || v === "REQUIRES_APPROVAL") return v === "REQUIRES_APPROVAL" ? "REQUIRES_APPROVAL" : "PENDING";
+  if (v === "JOINED" || v === "APPROVED") return v;
+  if (v === "NOT_JOINED" || v === "NOT_APPLIED") return "NOT_APPLIED";
+  if (v === "PENDING" || v === "REQUIRES_APPROVAL") return "PENDING";
   if (v === "REJECTED" || v === "SUSPENDED") return v;
-  if (v === "UNKNOWN") return "UNKNOWN";
   return "UNKNOWN";
 }
 
@@ -165,7 +193,7 @@ export function resolveRelationshipStatus(campaignSource, supplierCampaign = nul
   const participation = String(sc?.participationStatus || "").toUpperCase();
   if (participation === "JOINED") return "JOINED";
   if (participation === "PENDING") return "PENDING";
-  if (participation === "NOT_JOINED" || participation === "NOT_APPLIED") return "NOT_JOINED";
+  if (participation === "NOT_JOINED" || participation === "NOT_APPLIED") return "NOT_APPLIED";
   if (fromSource) return mapRelationshipStatus(fromSource);
   if (!campaignSource && !sc) return null;
   return "UNKNOWN";
@@ -174,6 +202,7 @@ export function resolveRelationshipStatus(campaignSource, supplierCampaign = nul
 /**
  * Workbook campaignStatus: ACTIVE / PAUSED / EXPIRED / INACTIVE / UNKNOWN
  * DB CampaignStatus: ACTIVE | PAUSED | PENDING | RETIRED | UNKNOWN
+ * PENDING (not live yet) is INACTIVE in the MBO standard; the stored value stays as the source.
  * Absent input → null (do not invent UNKNOWN).
  */
 export function mapCampaignStatus(raw) {
@@ -181,8 +210,7 @@ export function mapCampaignStatus(raw) {
   const v = String(raw).toUpperCase().trim();
   if (v === "ACTIVE" || v === "PAUSED" || v === "UNKNOWN") return v;
   if (v === "RETIRED" || v === "EXPIRED") return "EXPIRED";
-  if (v === "INACTIVE" || v === "DISABLED") return "INACTIVE";
-  if (v === "PENDING") return "PENDING";
+  if (v === "INACTIVE" || v === "DISABLED" || v === "PENDING") return "INACTIVE";
   return "UNKNOWN";
 }
 
@@ -198,27 +226,39 @@ const CHANNEL_TYPE_WORDS = new Set([
   "LINK_COUPON",
 ]);
 
+/** Conversion models a campaign-type text can name, with the words that identify each. */
+const CAMPAIGN_MODEL_PATTERNS = [
+  ["CPS", /\bCPS\b|\bSALES?\b/],
+  ["CPA", /\bCPA\b|\bACTIONS?\b/],
+  ["CPL", /\bCPL\b|\bLEADS?\b/],
+  ["CPI", /\bCPI\b|\bINSTALLS?\b/],
+  ["CPC", /\bCPC\b|\bCLICKS?\b/],
+];
+
+/** Genuine conversion models named by one source value; tier wording is ignored. */
+function campaignModelsIn(value) {
+  const text = String(value || "").toUpperCase().replace(/[^A-Z0-9]+/g, " ").trim();
+  if (!text || CHANNEL_TYPE_WORDS.has(text.replace(/ /g, "_"))) return { models: [], hybrid: false };
+  const models = CAMPAIGN_MODEL_PATTERNS.filter(([, re]) => re.test(text)).map(([model]) => model);
+  return { models, hybrid: /\bHYBRID\b/.test(text) };
+}
+
 /**
- * Workbook campaignType commercial model: CPS/CPA/CPL/CPI/CPC/HYBRID/TIERED/UNKNOWN
- * Absent input → null. Unmappable present value → UNKNOWN.
+ * Canonical campaign type: CPS / CPA / CPL / CPI / CPC / HYBRID / UNKNOWN.
+ *
+ * TIERED is a commission structure (SupplierCommissionRule commission_type TIER), not a
+ * conversion model, so tier wording never decides the type. The type comes from the underlying
+ * model: the supplier campaign type first, the stored pricing model only when that names none.
+ * HYBRID only when the source says HYBRID or genuinely names more than one model.
+ * Absent input → null. Present but undeterminable → UNKNOWN.
  */
 export function mapCampaignType(campaignType, pricingModel) {
-  const candidates = [campaignType, pricingModel]
-    .map((x) => String(x || "").toUpperCase().trim())
-    .filter(Boolean);
-  if (!candidates.length) return null;
-
-  const allowed = new Set(["CPS", "CPA", "CPL", "CPI", "CPC", "HYBRID", "TIERED", "UNKNOWN"]);
-  for (const c of candidates) {
-    if (CHANNEL_TYPE_WORDS.has(c)) continue;
-    if (allowed.has(c)) return c === "UNKNOWN" ? "UNKNOWN" : c;
-    if (c.includes("TIER")) return "TIERED";
-    if (c.includes("CPS") || c.includes("SALE")) return "CPS";
-    if (c.includes("CPA") || c.includes("ACTION")) return "CPA";
-    if (c.includes("CPL") || c.includes("LEAD")) return "CPL";
-    if (c.includes("CPI") || c.includes("INSTALL")) return "CPI";
-    if (c.includes("CPC") || c.includes("CLICK")) return "CPC";
-    if (c.includes("HYBRID")) return "HYBRID";
+  const present = [campaignType, pricingModel].some((x) => String(x || "").trim());
+  if (!present) return null;
+  for (const candidate of [campaignType, pricingModel]) {
+    const { models, hybrid } = campaignModelsIn(candidate);
+    if (hybrid || models.length > 1) return "HYBRID";
+    if (models.length === 1) return models[0];
   }
   return "UNKNOWN";
 }
@@ -461,5 +501,75 @@ export function mapCanonicalPaymentStatus({
   if (client === "CLIENT_PAYMENT_INVOICED") return "ADVERTISER_INVOICED";
   if (client === "CLIENT_PAYMENT_ON_HOLD" || client === "CLIENT_PAYMENT_NOT_READY") return "NOT_PAYABLE";
 
+  return "UNKNOWN";
+}
+
+/**
+ * MBO regional campaign currency: India → INR, every other mapped region → USD.
+ *
+ * `countries` (ISO2) decides the region. Only an India-only campaign is INR; a campaign that
+ * also covers other markets (or GLOBAL) is USD. With no countries the region is read from the
+ * original currency (INR → INR, any other currency → USD). Nothing known → null (never invented).
+ * The network's own currency is returned untouched as `originalCurrency` — finance and
+ * reconciliation depend on it.
+ */
+export function resolveMboCampaignCurrency({ countries = null, originalCurrency = null } = {}) {
+  const original = originalCurrency ? String(originalCurrency).trim().toUpperCase() || null : null;
+  const codes = (Array.isArray(countries) ? countries : countries ? [countries] : [])
+    .map((c) => String(c || "").trim().toUpperCase())
+    .filter(Boolean);
+  let currency = null;
+  if (codes.length) currency = codes.every((c) => c === "IN") ? "INR" : "USD";
+  else if (original) currency = original === "INR" ? "INR" : "USD";
+  return { currency, originalCurrency: original };
+}
+
+/**
+ * Canonical supplier commission type: PERCENT / FIXED / CPC / CPA / CPS / CPL / TIER / HYBRID / OTHER.
+ *
+ * Both the network's wording (supplierRuleType) and the stored basis are read, in priority order:
+ * a tier structure → TIER; an explicit hybrid → HYBRID; an explicit model code (CPS/CPA/CPL/CPC)
+ * → that model; a percent or fixed payout structure → PERCENT / FIXED; a bare model word
+ * (sale / lead / action / click) → that model. Anything with no MBO equivalent (CPM, CPI,
+ * performance incentives, unknown words) → OTHER. Absent input → null.
+ */
+const COMMISSION_TYPE_RULES = [
+  ["TIER", /\bTIER(S|ED)?\b/],
+  ["HYBRID", /\bHYBRID\b/],
+  ["CPS", /\bCPS\b/],
+  ["CPA", /\bCPA\b/],
+  ["CPL", /\bCPL\b/],
+  ["CPC", /\bCPC\b/],
+  ["PERCENT", /\bPERCENT(AGE)?\b|\bPCT\b|\bREVSHARE\b|\bREVENUE SHARE\b/],
+  ["FIXED", /\bFIXED\b|\bFLAT\b|\bAMOUNT\b/],
+  ["CPS", /\bSALES?\b/],
+  ["CPL", /\bLEADS?\b/],
+  ["CPA", /\bACTIONS?\b/],
+  ["CPC", /\bCLICKS?\b/],
+];
+
+export function normalizeCommissionType({ supplierRuleType = null, basis = null } = {}) {
+  const sources = [supplierRuleType, basis]
+    .map((v) => String(v || "").toUpperCase().replace(/[^A-Z0-9]+/g, " ").trim())
+    .filter((v) => v && v !== "UNKNOWN");
+  if (!sources.length) return null;
+  const hit = COMMISSION_TYPE_RULES.find(([, re]) => sources.some((text) => re.test(text)));
+  return hit ? hit[0] : "OTHER";
+}
+
+/**
+ * Canonical ORDER lifecycle status: PENDING / CONFIRMED / REJECTED / CANCELLED / REVERSED / UNKNOWN.
+ *
+ * Payment states (PAID, PAYABLE, invoiced, on hold) are never an order status — they belong to
+ * paymentStatus. A verified network mapping (mboOrderStatus) wins; otherwise MBO validation
+ * decides; anything else is UNKNOWN.
+ */
+export function mapMboOrderStatus({ mboOrderStatus = null, validationStatus = null } = {}) {
+  const verified = String(mboOrderStatus || "").toUpperCase().trim();
+  if (MBO_ORDER_STATUSES.includes(verified)) return verified;
+  const validation = String(validationStatus || "").toUpperCase().trim();
+  if (validation === "VALIDATION_APPROVED") return "CONFIRMED";
+  if (validation === "VALIDATION_REJECTED") return "REJECTED";
+  if (validation === "VALIDATION_PENDING") return "PENDING";
   return "UNKNOWN";
 }

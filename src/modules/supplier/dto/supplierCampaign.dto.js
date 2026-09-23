@@ -1,4 +1,5 @@
 import { resolveBoostinyDefaultCommission } from "../mappers/boostiny.mapper.js";
+import { mapCampaignStatus, mapCampaignType, mapRelationshipStatus } from "../../ops/v15FieldContract.js";
 
 function toIso(value) {
   if (!value) return null;
@@ -72,14 +73,9 @@ function parseDiscountPercent(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+/** MBO canonical relationship (single vocabulary: ops/v15FieldContract). */
 function normalizeRelationship(raw) {
-  if (raw == null || raw === "") return null;
-  const v = String(raw).toUpperCase().trim();
-  if (v === "JOINED" || v === "APPROVED") return v === "APPROVED" ? "APPROVED" : "JOINED";
-  if (v === "NOT_JOINED" || v === "NOT_APPLIED") return "NOT_JOINED";
-  if (v === "PENDING" || v === "REQUIRES_APPROVAL") return v;
-  if (v === "REJECTED" || v === "SUSPENDED" || v === "UNKNOWN") return v;
-  return "UNKNOWN";
+  return mapRelationshipStatus(raw);
 }
 
 function sourceSupportsDeeplink(source, record) {
@@ -144,7 +140,8 @@ function mapCampaignSources(record) {
       networkSource: source.supplierCampaign?.supplier || supplier,
       supplier: source.supplierCampaign?.supplier || supplier,
       campaignName: record.campaignName ?? null,
-      campaignStatus: record.campaignStatus ?? null,
+      campaignStatus: mapCampaignStatus(record.campaignStatus),
+      sourceCampaignStatus: record.campaignStatus ?? null,
       brandName:
         record.merchant?.displayName ||
         record.merchantNameRaw ||
@@ -224,7 +221,7 @@ export function toMasterSupplierCampaignDto(record) {
     ...base,
     networkSource: record.supplier,
     isAssignable,
-    relationshipStatus: bestSource?.relationshipStatus ?? null,
+    relationshipStatus: normalizeRelationship(bestSource?.relationshipStatus),
     supportsLink: bestSource?.supportsLink ?? Boolean(record.trackingUrl),
     supportsCoupon: bestSource?.supportsCoupon ?? false,
     supportsDeeplink: bestSource?.supportsDeeplink ?? Boolean(record.deepLinkingEnabled),
@@ -317,7 +314,8 @@ export function toSupplierCampaignDto(record) {
     merchantNameRaw: record.merchantNameRaw,
     merchantVertical: record.merchantVertical,
     categoryName: record.categoryName,
-    campaignType: record.campaignType,
+    campaignType: mapCampaignType(record.campaignType, record.pricingModel),
+    sourceCampaignType: record.campaignType ?? null,
     pricingModel: record.pricingModel,
     defaultCommissionValue:
       decimalToString(record.defaultCommissionValue) ??
@@ -334,7 +332,8 @@ export function toSupplierCampaignDto(record) {
     mboTrackingUrl: record.mboTrackingUrl,
     deepLinkingEnabled: record.deepLinkingEnabled,
     cookieDurationDays: record.cookieDurationDays,
-    campaignStatus: record.campaignStatus,
+    campaignStatus: mapCampaignStatus(record.campaignStatus),
+    sourceCampaignStatus: record.campaignStatus ?? null,
     participationStatus: record.participationStatus,
     isJoined: record.isJoined,
     countryCodes: record.countryCodes ?? [],
@@ -367,7 +366,8 @@ export function toSupplierCampaignSummaryDto(record) {
     sourceAccountLabel: record.sourceAccountLabel,
     campaignName: record.campaignName,
     merchantNameRaw: record.merchantNameRaw,
-    campaignStatus: record.campaignStatus,
+    campaignStatus: mapCampaignStatus(record.campaignStatus),
+    sourceCampaignStatus: record.campaignStatus ?? null,
     participationStatus: record.participationStatus,
     isJoined: record.isJoined,
     lastSyncedAt: toIso(record.lastSyncedAt),

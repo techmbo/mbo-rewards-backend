@@ -18,7 +18,8 @@ describe("imported record filter mapping", () => {
     assert.deepEqual(campaignStatusToDb("Expired"), ["RETIRED"]);
     assert.deepEqual(campaignStatusToDb("PAUSED"), ["PAUSED"]);
     assert.deepEqual(campaignStatusToDb("PENDING"), ["PENDING"]);
-    assert.deepEqual(campaignStatusToDb("INACTIVE"), []);
+    // Canonical INACTIVE is stored as PENDING (not live yet).
+    assert.deepEqual(campaignStatusToDb("INACTIVE"), ["PENDING"]);
     assert.deepEqual(campaignStatusToDb("bogus"), []);
   });
 
@@ -80,7 +81,7 @@ describe("imported record filter mapping", () => {
     const rels = relationshipFacetOptions(["JOINED", "PENDING", "NOT_JOINED"]);
     assert.deepEqual(
       rels.map((o) => o.value),
-      ["JOINED", "PENDING", "NOT_JOINED"],
+      ["JOINED", "NOT_APPLIED", "PENDING"],
     );
 
     const types = campaignTypeFacetOptions(["CPS - Taiwan", "CPA"], ["CPS"]);
