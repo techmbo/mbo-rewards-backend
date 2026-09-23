@@ -36,6 +36,137 @@ import {
 } from "./v15PerformanceGrain.js";
 import { ANTI_FABRICATION_METRICS } from "../networkPortal/performanceRecord.contract.js";
 
+/**
+ * Network-grain performance response boundary (GET /ops/admin/performance?grain=network).
+ *
+ * toNetworkPerformanceDto is shared and permission-blind, so this endpoint shapes its own rows:
+ * only the keys below are sent, and anything the DTO gains later stays out until listed here.
+ *
+ * Money follows the default grain's rule (canViewFinancial: finance_ops:read or commission:read):
+ * commission, receivable and commission-derived ratios are nulled without it. Order values, counts
+ * and AOV stay performance data, exactly as they do on the default grain.
+ *
+ * Never sent on this endpoint, whatever the permission: the network's own tracking URL, network /
+ * MBO click ids, sub ids, the raw payload id, and sourceOnlyFields (every unmapped key of the
+ * supplier row, passed through unfiltered). Click-level references belong to Orders / Conversions.
+ */
+export const NETWORK_PERFORMANCE_FINANCIAL_FIELDS = Object.freeze([
+  "grossCommission",
+  "pendingCommission",
+  "confirmedCommission",
+  "cancelledCommission",
+  "rejectedCommission",
+  "payableCommission",
+  "paidCommission",
+  "netCommission",
+  "mboReceivable",
+  "mboActuallyReceived",
+  "epc",
+]);
+
+export const NETWORK_PERFORMANCE_FINANCIAL_KPIS = Object.freeze([
+  "grossCommission",
+  "confirmedCommission",
+  "netCommission",
+  "mboReceivable",
+]);
+
+export const NETWORK_PERFORMANCE_PUBLIC_FIELDS = Object.freeze([
+  "id",
+  "reportId",
+  "network",
+  "networkSource",
+  "networkAccount",
+  "reportDate",
+  "date",
+  "month",
+  "year",
+  "campaignSourceId",
+  "supplierCampaignId",
+  "brandName",
+  "campaignName",
+  "category",
+  "country",
+  "currency",
+  "campaignTypeCommercial",
+  "campaignChannelType",
+  "campaignType",
+  "couponId",
+  "couponCode",
+  "couponSource",
+  "couponScope",
+  "couponSourceScope",
+  "mboTrackingLink",
+  "trackingLinkId",
+  "impressions",
+  "networkClicks",
+  "linkClicks",
+  "mboLinkClicks",
+  "uniqueClicks",
+  "grossOrders",
+  "pendingOrders",
+  "confirmedOrders",
+  "cancelledOrders",
+  "rejectedOrders",
+  "cancelOrders",
+  "paidOrders",
+  "netOrders",
+  "grossOrderValue",
+  "pendingOrderValue",
+  "confirmedOrderValue",
+  "cancelledOrderValue",
+  "rejectedOrderValue",
+  "paidOrderValue",
+  "netOrderValue",
+  "discountPercent",
+  "customerType",
+  "devicePlatform",
+  "conversionRate",
+  "aov",
+  "attributionStatus",
+  "attribution",
+  "reconciliationStatus",
+  "reconciliation",
+  "rawStatus",
+  "mboStandardStatus",
+  "orderDate",
+  "orderConfirmDate",
+  "orderPaymentConfirmDate",
+  "sourceEndpoint",
+  "reportGranularity",
+  "lastSyncedAt",
+  "lastUpdatedAt",
+  "mboCanonicalObject",
+  "antiFabricationMetrics",
+  "note",
+]);
+
+export function toNetworkPerformanceResponseRow(dto, { includeFinancial = false } = {}) {
+  if (!dto || typeof dto !== "object") return dto;
+  const row = {};
+  for (const key of NETWORK_PERFORMANCE_PUBLIC_FIELDS) {
+    row[key] = dto[key] === undefined ? null : dto[key];
+  }
+  for (const key of NETWORK_PERFORMANCE_FINANCIAL_FIELDS) {
+    row[key] = includeFinancial && dto[key] !== undefined ? dto[key] : null;
+  }
+  row.financial = includeFinancial
+    ? {
+        state: "INCLUDED",
+        note: "Supplier / network figures as reported. Not client payable and not MBO margin.",
+      }
+    : { state: "REDACTED", reason: "insufficient_permission" };
+  return row;
+}
+
+export function toNetworkPerformanceResponseKpis(kpis, { includeFinancial = false } = {}) {
+  if (!kpis || typeof kpis !== "object") return kpis;
+  if (includeFinancial) return { ...kpis };
+  const redacted = { ...kpis };
+  for (const key of NETWORK_PERFORMANCE_FINANCIAL_KPIS) redacted[key] = null;
+  return redacted;
+}
+
 function toV13OrderCampaignType({ conversion = null, order = null, couponCode = null, hasLinkHint = false } = {}) {
   const classified = classifyConversionChannel({
     clickId: order?.clickId || conversion?.clickId || null,
@@ -633,7 +764,7 @@ export class AdminContractService {
         take,
       });
       return {
-        items: result.items,
+        items: (result.items || []).map((dto) => toNetworkPerformanceResponseRow(dto, { includeFinancial })),
         total: result.total,
         includeFinancial,
         contract: "v15-network-performance-fact",
@@ -641,7 +772,7 @@ export class AdminContractService {
         grainNote:
           "Grain: NetworkPerformanceFact (PerformanceRecord). Separate from OrderConversion. networkClicks and mboLinkClicks are independent. Missing impressions/device/EPC/customer type stay null when the network omits them.",
         migrationRequired: false,
-        kpis: result.kpis,
+        kpis: toNetworkPerformanceResponseKpis(result.kpis, { includeFinancial }),
         grain: "network",
       };
     }
