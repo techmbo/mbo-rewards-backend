@@ -88,6 +88,46 @@ async function settleGroup(promise) {
   }
 }
 
+/**
+ * Same test the imported-records controller applies before returning any value: scheme://,
+ * protocol-relative //, www. and the MBO /r/<slug>/<token> redirect path. URL-shaped values are
+ * never returned by the endpoint, so a URL-shaped search term must not match anything either.
+ */
+function isUrlShapedSearch(value) {
+  const text = String(value).trim();
+  if (!text) return false;
+  return (
+    /[a-z][a-z0-9+.-]*:\/\//i.test(text) ||
+    /^\/\//.test(text) ||
+    /^www\./i.test(text) ||
+    /(^|\/)r\/[^/\s]+\/[^/\s]+/i.test(text)
+  );
+}
+
+/**
+ * Search clause for a supplier-controlled text column: `contains q`, but only when the stored
+ * value is not URL-shaped. A URL stored in a name or code column is nulled in the response, so it
+ * must not be matchable by any substring either. Prisma has no regex filter, so the stored-value
+ * test is a conservative superset of isUrlShapedSearch (any "://", a leading "//", "www." or
+ * "r/", or "/r/" anywhere): it can only exclude more values from search, never fewer.
+ */
+function safeTextContains(field, q) {
+  return {
+    AND: [
+      { [field]: { contains: q, mode: "insensitive" } },
+      {
+        NOT: [
+          { [field]: { contains: "://" } },
+          { [field]: { startsWith: "//" } },
+          { [field]: { startsWith: "www.", mode: "insensitive" } },
+          { [field]: { startsWith: "r/", mode: "insensitive" } },
+          { [field]: { contains: "/r/", mode: "insensitive" } },
+        ],
+      },
+    ],
+  };
+}
+
 function buildWhere(filters = {}) {
   const where = {};
   const and = [];
@@ -115,35 +155,37 @@ function buildWhere(filters = {}) {
 
   if (filters.search) {
     const q = String(filters.search).trim();
-    if (q) {
+    if (q && isUrlShapedSearch(q)) {
+      // A URL-shaped term could only match a value the response hides (e.g. a URL stored as a
+      // coupon code). Match nothing, in the query itself, so rows and total are both empty.
+      and.push({ id: { in: [] } });
+    } else if (q) {
+      // Search only fields the endpoint itself returns. Hidden values (supplier tracking URL, raw
+      // payload ids, a campaign's coupon codes) are never matched, so a search cannot confirm
+      // that a record holds a given hidden value — neither through its rows nor its total.
+      // Supplier-controlled text only matches when its stored value is not URL-shaped; internal
+      // uuid ids (Entity, SupplierCampaign, CampaignSource) match by exact value only.
       and.push({
         OR: [
-          { externalId: { contains: q, mode: "insensitive" } },
-          { entityName: { contains: q, mode: "insensitive" } },
-          { campaignName: { contains: q, mode: "insensitive" } },
-          { advertiserName: { contains: q, mode: "insensitive" } },
-          { networkSource: { contains: q, mode: "insensitive" } },
+          safeTextContains("externalId", q),
+          safeTextContains("entityName", q),
+          safeTextContains("campaignName", q),
+          safeTextContains("advertiserName", q),
+          safeTextContains("networkSource", q),
           { id: { equals: q } },
           {
             supplierCampaigns: {
               some: {
                 OR: [
-                  { supplierCampaignId: { contains: q, mode: "insensitive" } },
-                  { campaignName: { contains: q, mode: "insensitive" } },
-                  { merchantNameRaw: { contains: q, mode: "insensitive" } },
-                  { categoryName: { contains: q, mode: "insensitive" } },
-                  { trackingUrl: { contains: q, mode: "insensitive" } },
-                  { sourceAccountLabel: { contains: q, mode: "insensitive" } },
-                  { rawPayloadId: { equals: q } },
+                  safeTextContains("supplierCampaignId", q),
+                  safeTextContains("campaignName", q),
+                  safeTextContains("merchantNameRaw", q),
+                  safeTextContains("categoryName", q),
+                  safeTextContains("sourceAccountLabel", q),
                   { id: { equals: q } },
                   {
                     campaignSources: {
                       some: { id: { equals: q } },
-                    },
-                  },
-                  {
-                    coupons: {
-                      some: { couponCode: { contains: q, mode: "insensitive" } },
                     },
                   },
                 ],
@@ -151,13 +193,8 @@ function buildWhere(filters = {}) {
             },
           },
           {
-            rawPayloads: {
-              some: { id: { equals: q } },
-            },
-          },
-          {
             supplierCoupons: {
-              some: { couponCode: { contains: q, mode: "insensitive" } },
+              some: safeTextContains("couponCode", q),
             },
           },
         ],
