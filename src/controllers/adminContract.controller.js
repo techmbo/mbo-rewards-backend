@@ -267,7 +267,7 @@ export async function adminListClientConfirmedOrdersHandler(req, res, next) {
 /** v20 Admin — Reporting Overview (all-network summary). */
 export async function adminReportingOverviewHandler(req, res, next) {
   try {
-    const result = await adminClientReporting.getReportingOverview(req.query ?? {});
+    const result = await adminClientReporting.getReportingOverview(req.query ?? {}, req.permissions || []);
     res.json(ok(result));
   } catch (error) {
     next(error);

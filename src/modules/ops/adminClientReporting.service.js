@@ -4,6 +4,7 @@
  */
 import { prisma } from "../../database/prisma.js";
 import { getPagination } from "../../core/pagination.js";
+import { PERMISSIONS } from "../../auth/permissions.js";
 import {
   summarizeConversionsForBucket,
   sumDistinctOrderValues,
@@ -21,6 +22,34 @@ function money(value) {
   if (value == null || value === "") return null;
   const n = Number(value);
   return Number.isFinite(n) ? Number(n.toFixed(4)) : null;
+}
+
+/**
+ * Reporting Overview money boundary. Same rule as AdminContractService.canViewFinancial (the
+ * performance endpoint): finance_ops:read or commission:read. Without it every amount below is
+ * sent as null; counts, networks and brands stay visible.
+ *
+ * mboCommissionMade is the sum of the facts' mboReceivable (supplier commission owed to MBO,
+ * defaulting to confirmedCommission), not MBO margin. Its name is left as-is here.
+ */
+export const REPORTING_OVERVIEW_FINANCIAL_FIELDS = Object.freeze([
+  "grossOrderValue",
+  "networkCommission",
+  "confirmedCommission",
+  "mboCommissionMade",
+]);
+
+export function canViewReportingFinancial(permissions = []) {
+  const set = new Set(permissions || []);
+  return set.has(PERMISSIONS.FINANCE_OPS_READ) || set.has(PERMISSIONS.COMMISSION_READ);
+}
+
+function redactReportingFinancial(record) {
+  const out = { ...record };
+  for (const key of REPORTING_OVERVIEW_FINANCIAL_FIELDS) {
+    if (key in out) out[key] = null;
+  }
+  return out;
 }
 
 function countryName(iso) {
@@ -812,7 +841,8 @@ export class AdminClientReportingService {
   /**
    * Reporting Overview — all-network generated + confirmed summary (v20 HTML screen 1).
    */
-  async getReportingOverview(query = {}) {
+  async getReportingOverview(query = {}, permissions = []) {
+    const includeFinancial = canViewReportingFinancial(permissions);
     const from = query.from || null;
     const to = query.to || null;
     const network = query.network || null;
@@ -873,7 +903,7 @@ export class AdminClientReportingService {
       mboCommissionMade: money(networks.reduce((s, n) => s + n.mboCommissionMade, 0)),
     };
 
-    return {
+    const response = {
       kpis,
       topNetworks: networks.slice(0, 8).map((n) => ({
         ...n,
@@ -893,6 +923,22 @@ export class AdminClientReportingService {
       contract: "v20-reporting-overview",
       grainNote:
         "Aggregated from NetworkPerformanceFact. Boostiny confirmation remains aggregate-settlement based.",
+    };
+
+    if (includeFinancial) {
+      return {
+        ...response,
+        includeFinancial: true,
+        financial: { state: "INCLUDED" },
+      };
+    }
+    return {
+      ...response,
+      kpis: redactReportingFinancial(response.kpis),
+      topNetworks: response.topNetworks.map(redactReportingFinancial),
+      networkSummary: response.networkSummary.map(redactReportingFinancial),
+      includeFinancial: false,
+      financial: { state: "REDACTED", reason: "insufficient_permission" },
     };
   }
 }
