@@ -167,19 +167,37 @@ export function requireAdminRole(req, res, next) {
   next();
 }
 
+/**
+ * The query parameter each guarded route filters its rows on. Most read `type`; GET /fields
+ * reads `entity_type`. The type is authorized on the parameter the handler actually uses, so a
+ * request cannot pass the check on one name while the handler reads another.
+ */
+const ENTITY_TYPE_QUERY_PARAM_BY_ROUTE = Object.freeze({ "/fields": "entity_type" });
+
+/**
+ * Type-level access for the staged-record routes (GET /entities, /entities/summary, /fields).
+ * The entity type is required: without it the handlers return every type, so a missing type is
+ * rejected instead of skipping the permission check.
+ */
 export function requireEntityTypeAccess(req, res, next) {
   if (!req.user) {
     sendAuthError(res, 401, "Authentication required.");
     return;
   }
 
-  const entityType = req.query.type ? String(req.query.type) : undefined;
+  const routePath = req.route?.path;
+  const param = Object.hasOwn(ENTITY_TYPE_QUERY_PARAM_BY_ROUTE, String(routePath))
+    ? ENTITY_TYPE_QUERY_PARAM_BY_ROUTE[routePath]
+    : "type";
+  const entityType = req.query[param] ? String(req.query[param]) : undefined;
   if (!entityType) {
-    next();
+    sendAuthError(res, 400, `Query parameter '${param}' is required.`);
     return;
   }
 
-  const requiredPermission = ENTITY_TYPE_PERMISSIONS[entityType];
+  const requiredPermission = Object.hasOwn(ENTITY_TYPE_PERMISSIONS, entityType)
+    ? ENTITY_TYPE_PERMISSIONS[entityType]
+    : null;
   if (!requiredPermission) {
     sendAuthError(res, 400, `Unsupported entity type: ${entityType}`);
     return;
