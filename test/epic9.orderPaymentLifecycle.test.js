@@ -659,7 +659,9 @@ describe("Epic 9 — admin permission gating", () => {
     assert.equal(dto.campaignName, "Coupon Campaign");
     assert.equal(dto.campaignType, "Coupon + Link");
     assert.equal(dto.couponCode, "mp393");
-    assert.equal(dto.couponCodeOrLink, "mp393 / https://clk.example/t");
+    // Supplier coupon URLs are not returned by the admin order row; the code alone is.
+    assert.equal(dto.couponCodeOrLink, "mp393");
+    assert.equal(dto.couponLink, null);
     assert.equal(dto.confirmedDate, "2026-04-09T00:00:00.000Z");
     assert.equal(dto.orderStatus, "CONFIRMED");
     assert.equal(dto.supplierActualCommission, 0.21);

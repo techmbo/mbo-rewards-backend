@@ -31,6 +31,7 @@ import {
   projectBrandIdentity,
   brandIdentityToAdminLinks,
 } from "../merchant/brandIdentity.js";
+import { isCouponUrlValue } from "../coupons/codeType.js";
 
 export const V15_CLIENT_RULE_TYPES = Object.freeze([
   "PERCENT_OF_ACTUAL_SUPPLIER_COMMISSION",
@@ -500,6 +501,16 @@ function normalizeWorkbookChannelType(label) {
   return null;
 }
 
+/**
+ * Admin order row (GET /ops/admin/orders).
+ *
+ * Raw attribution evidence never leaves this function: supplier / MBO tracking URLs (the MBO URL
+ * carries the /r/ redirect token), network and MBO click ids, sub ids and the raw payload id are
+ * not returned. Coupon fields carry the voucher code only: `couponLink` is always null and
+ * `couponCodeOrLink` is the code, never a supplier coupon URL or tracking URL. MBO receipt values
+ * (amount, bank / received date-time) sit behind the same financial gate as the commission split
+ * and are null without it.
+ */
 export function toAdminOrderDto(order, { includeFinancial = false } = {}) {
   const nc = order.networkContext || {};
   const validation = order.validationStatus ?? "UNKNOWN";
@@ -520,12 +531,12 @@ export function toAdminOrderDto(order, { includeFinancial = false } = {}) {
     else if (validation === "VALIDATION_PENDING") mboStatus = "PENDING";
   }
   const orderDate = order.orderDate ? new Date(order.orderDate) : null;
-  const couponCode = nc.couponCode ?? null;
-  const couponLink = nc.couponLink ?? nc.mboTrackingLink ?? nc.networkTrackingLink ?? null;
-  const couponCodeOrLink =
-    couponCode && couponLink
-      ? `${couponCode} / ${couponLink}`
-      : couponCode || couponLink || null;
+  // A URL stored as a "code" is still a supplier URL; only a plain voucher code is returned.
+  const rawCouponCode = nc.couponCode ?? null;
+  const couponCode =
+    rawCouponCode == null || isCouponUrlValue(rawCouponCode) || /:\/\//.test(String(rawCouponCode))
+      ? null
+      : rawCouponCode;
   const base = {
     orderId: order.id,
     clientId: order.clientId ?? null,
@@ -579,29 +590,18 @@ export function toAdminOrderDto(order, { includeFinancial = false } = {}) {
     supplierCampaignId: nc.supplierCampaignId ?? null,
     couponCode,
     couponType: nc.couponType ?? null,
-    couponLink: nc.couponLink ?? null,
-    couponCodeOrLink,
-    networkTrackingLink: nc.networkTrackingLink ?? null,
-    mboTrackingLink: nc.mboTrackingLink ?? null,
+    couponLink: null,
+    couponCodeOrLink: couponCode,
     trackingLinkId: nc.trackingLinkId ?? null,
-    networkClickId: nc.networkClickId ?? null,
-    mboClickId: nc.mboClickId ?? null,
-    subId1: nc.subId1 ?? null,
-    subId2: nc.subId2 ?? null,
-    subId3: nc.subId3 ?? null,
     rawStatus: nc.rawStatus ?? nc.networkRawStatus ?? null,
     networkRawStatus: nc.networkRawStatus ?? nc.rawStatus ?? null,
     mboOrderStatus: nc.mboOrderStatus ?? null,
     mboStatus,
     // Order lifecycle only: PENDING / CONFIRMED / REJECTED / CANCELLED / REVERSED / UNKNOWN.
     orderStatus: mapMboOrderStatus({ mboOrderStatus: canonicalOrderStatus, validationStatus: validation }),
-    rawPayloadId: nc.rawPayloadId ?? order.rawPayloadId ?? null,
     billingMonth: orderDate && !Number.isNaN(orderDate.getTime()) ? orderDate.getUTCMonth() + 1 : null,
     billingYear: orderDate && !Number.isNaN(orderDate.getTime()) ? orderDate.getUTCFullYear() : null,
     paymentReference: nc.paymentReference ?? null,
-    bankReceivedAt: iso(nc.bankReceivedAt ?? null),
-    mboReceivedDateTime: nc.mboReceivedDateTime ?? null,
-    mboReceivedAmount: nc.mboReceivedAmount ?? null,
     networkPaymentEvidence: nc.networkPaymentEvidence ?? null,
     clientPayableEligible: nc.clientPayableEligible ?? false,
     reconciliationStatus: nc.reconciliationStatus ?? null,
@@ -621,6 +621,9 @@ export function toAdminOrderDto(order, { includeFinancial = false } = {}) {
     return {
       ...base,
       mboReceived: null,
+      bankReceivedAt: null,
+      mboReceivedDateTime: null,
+      mboReceivedAmount: null,
       financial: { state: "REDACTED", reason: "insufficient_permission" },
     };
   }
@@ -634,6 +637,9 @@ export function toAdminOrderDto(order, { includeFinancial = false } = {}) {
   return {
     ...base,
     mboReceived: received,
+    bankReceivedAt: iso(nc.bankReceivedAt ?? null),
+    mboReceivedDateTime: nc.mboReceivedDateTime ?? null,
+    mboReceivedAmount: nc.mboReceivedAmount ?? null,
     // v13 aliases
     supplierActualCommission: payable,
     clientCommission: money(ft.clientPayable),
