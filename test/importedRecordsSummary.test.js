@@ -15,7 +15,7 @@ process.env.LOG_LEVEL = "silent";
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
-const { ImportedRecordsService } = await import("../src/modules/ops/importedRecords.service.js");
+const { ImportedRecordsService, invalidateImportedRecordsListCache } = await import("../src/modules/ops/importedRecords.service.js");
 
 // ── where evaluator ──────────────────────────────────────────────────────────
 const OPERATORS = new Set(["equals", "contains", "startsWith", "endsWith", "in", "not", "mode", "gte", "lte", "gt", "lt", "has", "hasSome", "hasEvery", "isEmpty"]);
@@ -144,13 +144,18 @@ const FIXTURE = [
 ];
 
 // ── fake Prisma ──────────────────────────────────────────────────────────────
-function makeDb(rows) {
+function makeDb(rows, { facetModels = false } = {}) {
   const calls = [];
+  const wheres = []; // { op, where } in call order — lets tests assert the exact predicate sent
+  const record = (op, where) => {
+    calls.push(op);
+    wheres.push({ op, where });
+  };
   const matched = (where) => rows.filter((e) => matchWhere(e, where));
   const entity = {
-    count: async ({ where } = {}) => (calls.push("entity.count"), matched(where).length),
+    count: async ({ where } = {}) => (record("entity.count", where), matched(where).length),
     groupBy: async ({ by, where } = {}) => {
-      calls.push("entity.groupBy");
+      record("entity.groupBy", where);
       const groups = new Map();
       for (const e of matched(where)) {
         const key = JSON.stringify(by.map((k) => e[k]));
@@ -161,14 +166,14 @@ function makeDb(rows) {
       return [...groups.values()];
     },
     findMany: async ({ where, skip = 0, take } = {}) => {
-      calls.push("entity.findMany");
+      record("entity.findMany", where);
       const all = matched(where).sort((a, b) => b.updatedAt - a.updatedAt);
       return take != null ? all.slice(skip, skip + take) : all.slice(skip);
     },
   };
   const mapperError = {
     count: async ({ where } = {}) => {
-      calls.push("mapperError.count");
+      record("mapperError.count", where);
       const { entity: entityWhere, ...rest } = where || {};
       let n = 0;
       for (const e of entityWhere ? matched(entityWhere) : rows) n += (e.mapperErrors || []).filter((m) => matchWhere(m, rest)).length;
@@ -176,6 +181,14 @@ function makeDb(rows) {
     },
   };
   const models = { entity, mapperError };
+  if (facetModels) {
+    // facets() only: capture the predicate, return no rows — the summary must never reach these.
+    models.supplierCampaign = {
+      groupBy: async ({ where } = {}) => (record("supplierCampaign.groupBy", where), []),
+      findMany: async ({ where } = {}) => (record("supplierCampaign.findMany", where), []),
+    };
+    models.campaignSource = { groupBy: async ({ where } = {}) => (record("campaignSource.groupBy", where), []) };
+  }
   const db = new Proxy(models, {
     get(target, prop) {
       if (prop in target) return target[prop];
@@ -183,13 +196,14 @@ function makeDb(rows) {
       return undefined;
     },
   });
-  return { db, calls };
+  return { db, calls, wheres };
 }
 
 let db;
 let calls;
 let service;
 beforeEach(() => {
+  invalidateImportedRecordsListCache(); // the list/count cache is module-level and keyed by filters only
   ({ db, calls } = makeDb(FIXTURE));
   service = new ImportedRecordsService({ prisma: db, promotionJob: {}, normalization: {} });
 });
@@ -466,5 +480,178 @@ describe("summary: empty data, safety, query budget", () => {
       assert.equal(calls.filter((c) => c === "entity.groupBy").length, 2);
       assert.equal(calls.filter((c) => c === "entity.findMany").length, 0);
     }
+  });
+});
+
+// ── Trackier / vCommission network family ───────────────────────────────────
+// Current Trackier rows are written as "trackier"; legacy rows exist as "vcommission". The facet,
+// displayNetwork and byNetwork already treat them as one network — the filter must too.
+const V_CAMPAIGN_REVIEW = ent("v1", "campaign", "vcommission", { advertiserName: "Brand V" }); // needs review (not promoted)
+const V_CAMPAIGN_ERROR = ent("v2", "campaign", "vcommission", { advertiserName: "Brand V", mapperErrors: [{ ...OPEN_ERROR, id: "me-v2" }] });
+const V_COUPON_MAPPED = ent("vk1", "coupon", "vcommission", { supplierCoupons: [{ id: "cp-vk1", couponCode: "VC10", couponStatus: "ACTIVE", supplierCampaign: sc("vk1", { supplier: "TRACKIER" }) }] });
+const TRACKIER_FAMILY = ["trackier", "vcommission"];
+const withRows = (rows, opts) => {
+  invalidateImportedRecordsListCache(); // fixtures differ per test; never serve another fixture's cached total
+  const made = makeDb(rows, opts);
+  return { ...made, service: new ImportedRecordsService({ prisma: made.db, promotionJob: {}, normalization: {} }) };
+};
+const listTotal = (svc, filters) => svc.list({ ...filters, page: 1, pageSize: 100 }).then((r) => r.total);
+const listSources = (svc, filters) => svc.list({ ...filters, page: 1, pageSize: 100 }).then((r) => r.rows.map((x) => x.networkSource).sort());
+const lastWhere = (wheres, op) => [...wheres].reverse().find((w) => w.op === op)?.where;
+/** The predicate of the plain base count (list total / summary importedRecords), never the needs-review AND query. */
+const baseCountWhere = (wheres) => wheres.find((w) => w.op === "entity.count" && !("AND" in (w.where || {})))?.where;
+const captured = async (wheres, fn) => {
+  wheres.length = 0;
+  await fn();
+  return baseCountWhere(wheres);
+};
+
+describe("network filter: trackier / vcommission family", () => {
+  it("1 trackier-only fixture: network=trackier matches the trackier row in list and summary", async () => {
+    const { service: svc } = withRows(FIXTURE);
+    assert.equal(await listTotal(svc, { recordType: "campaign", networkSource: "trackier" }), 1);
+    assert.deepEqual(await listSources(svc, { recordType: "campaign", networkSource: "trackier" }), ["trackier"]);
+    const s = await svc.summary({ recordType: "campaign", networkSource: "trackier" });
+    assert.equal(s.importedRecords, 1);
+    assert.deepEqual(s.byNetwork, [{ network: "Trackier", networkSource: "trackier", importedRecords: 1 }]);
+  });
+
+  it("2 vcommission-only fixture: network=trackier and network=vcommission both match the legacy row", async () => {
+    const { service: svc } = withRows([...FIXTURE.filter((e) => e.networkSource !== "trackier"), V_CAMPAIGN_REVIEW]);
+    for (const networkSource of TRACKIER_FAMILY) {
+      assert.equal(await listTotal(svc, { recordType: "campaign", networkSource }), 1, networkSource);
+      assert.deepEqual(await listSources(svc, { recordType: "campaign", networkSource }), ["vcommission"], networkSource);
+      const s = await svc.summary({ recordType: "campaign", networkSource });
+      assert.equal(s.importedRecords, 1, networkSource);
+      assert.deepEqual(s.byNetwork, [{ network: "Trackier", networkSource: "trackier", importedRecords: 1 }], networkSource);
+    }
+  });
+
+  it("3 mixed family: trackier + vcommission campaign rows → total 2 under either value, one Trackier byNetwork row", async () => {
+    const { service: svc } = withRows([...FIXTURE, V_CAMPAIGN_REVIEW]);
+    for (const networkSource of TRACKIER_FAMILY) {
+      assert.equal(await listTotal(svc, { recordType: "campaign", networkSource }), 2, networkSource);
+      assert.deepEqual(await listSources(svc, { recordType: "campaign", networkSource }), ["trackier", "vcommission"], networkSource);
+      const s = await svc.summary({ recordType: "campaign", networkSource });
+      assert.equal(s.importedRecords, 2, networkSource);
+      assert.deepEqual(s.byNetwork, [{ network: "Trackier", networkSource: "trackier", importedRecords: 2 }], networkSource);
+    }
+  });
+
+  it("3b buildWhere sends the same { in: [trackier, vcommission] } predicate for both values", async () => {
+    const { service: svc, wheres } = withRows(FIXTURE);
+    for (const networkSource of TRACKIER_FAMILY) {
+      const where = await captured(wheres, () => svc.summary({ recordType: "campaign", networkSource }));
+      assert.deepEqual(where.networkSource, { in: ["trackier", "vcommission"] }, networkSource);
+      // and the mapper-error count carries the identical Entity predicate
+      assert.deepEqual(lastWhere(wheres, "mapperError.count").entity.networkSource, { in: ["trackier", "vcommission"] }, networkSource);
+    }
+  });
+
+  it("4 coupon parity: a coupon stored as vcommission is counted by list and summary under network=trackier", async () => {
+    const { service: svc } = withRows([...FIXTURE, V_COUPON_MAPPED]);
+    const total = await listTotal(svc, { recordType: "coupon", networkSource: "trackier" });
+    const s = await svc.summary({ recordType: "coupon", networkSource: "trackier" });
+    assert.equal(total, 1);
+    assert.equal(s.importedRecords, total);
+    assert.deepEqual(s.byNetwork, [{ network: "Trackier", networkSource: "trackier", importedRecords: 1 }]);
+    assert.equal(s.needsReview, 0); // vk1 is mapped
+  });
+
+  it("5 mappingErrors: an OPEN error on a vcommission campaign is counted under network=trackier", async () => {
+    const { service: svc } = withRows([...FIXTURE, V_CAMPAIGN_REVIEW, V_CAMPAIGN_ERROR, V_COUPON_MAPPED]);
+    const s = await svc.summary({ recordType: "campaign", networkSource: "trackier" });
+    assert.equal(s.importedRecords, 3); // c4 + v1 + v2
+    assert.equal(s.mappingErrors, 1); // v2
+    assert.equal((await svc.summary({ recordType: "coupon", networkSource: "trackier" })).mappingErrors, 0);
+    assert.equal((await svc.summary({ recordType: "campaign", networkSource: "vcommission" })).mappingErrors, 1);
+  });
+
+  it("6 needsReview: a vcommission campaign needing review is counted under network=trackier", async () => {
+    const { service: svc } = withRows([...FIXTURE, V_CAMPAIGN_REVIEW, V_CAMPAIGN_ERROR, V_COUPON_MAPPED]);
+    const s = await svc.summary({ recordType: "campaign", networkSource: "trackier" });
+    assert.equal(s.needsReview, 2); // c4 (no merchant) + v1 (not promoted); v2 has an open error
+    assert.equal(await listTotal(svc, { recordType: "campaign", networkSource: "trackier", mappingStatus: "NEEDS_REVIEW" }), 2);
+  });
+
+  it("7 recordTypeCounts under network=trackier spans raw trackier and vcommission rows per type", async () => {
+    const { service: svc } = withRows([...FIXTURE, V_CAMPAIGN_REVIEW, V_CAMPAIGN_ERROR, V_COUPON_MAPPED]);
+    for (const networkSource of TRACKIER_FAMILY) {
+      const s = await svc.summary({ recordType: "commission_rule", networkSource });
+      assert.deepEqual(s.recordTypeCounts, { campaign: 3, coupon: 1, commission_rule: 0, commission_group: 0 }, networkSource);
+      assert.equal(s.importedRecords, 0);
+      assert.deepEqual(s.byNetwork, []);
+    }
+  });
+
+  it("8 facets() scopes with the same family predicate and exposes one canonical Trackier option", async () => {
+    const { service: svc, wheres } = withRows([...FIXTURE, V_CAMPAIGN_REVIEW, V_CAMPAIGN_ERROR, V_COUPON_MAPPED], { facetModels: true });
+    const facets = await svc.facets({ networkSource: "trackier" });
+    const family = { in: ["trackier", "vcommission"] };
+    assert.deepEqual(lastWhere(wheres, "entity.groupBy"), { entityType: "campaign", networkSource: family });
+    assert.deepEqual(lastWhere(wheres, "supplierCampaign.groupBy"), { entity: { entityType: "campaign", networkSource: family } });
+    assert.deepEqual(lastWhere(wheres, "campaignSource.groupBy"), { supplierCampaign: { entity: { entityType: "campaign", networkSource: family } } });
+    assert.deepEqual(lastWhere(wheres, "supplierCampaign.findMany"), { entity: { entityType: "campaign", networkSource: family } });
+    assert.deepEqual(lastWhere(wheres, "entity.count").networkSource, family);
+    assert.deepEqual(facets.network, [{ value: "trackier", label: "Trackier" }]);
+    // unfiltered facet: one Trackier option, never a vcommission one
+    const all = await svc.facets({});
+    assert.deepEqual(all.network.filter((o) => /trackier|vcommission/i.test(o.value)), [{ value: "trackier", label: "Trackier" }]);
+    assert.ok(all.network.some((o) => o.value === "optimise" && o.label === "Optimise"));
+  });
+
+  it("9 unrelated network unchanged: network=boostiny is still an exact match with the same totals", async () => {
+    const base = withRows(FIXTURE);
+    const fam = withRows([...FIXTURE, V_CAMPAIGN_REVIEW, V_CAMPAIGN_ERROR, V_COUPON_MAPPED]);
+    for (const recordType of ["campaign", "coupon"]) {
+      assert.equal(await listTotal(fam.service, { recordType, networkSource: "boostiny" }), await listTotal(base.service, { recordType, networkSource: "boostiny" }));
+    }
+    assert.equal(await listTotal(fam.service, { recordType: "campaign", networkSource: "boostiny" }), 1);
+    assert.equal(await listTotal(fam.service, { recordType: "coupon", networkSource: "boostiny" }), 2);
+    assert.equal((await captured(fam.wheres, () => fam.service.summary({ recordType: "coupon", networkSource: "boostiny" }))).networkSource, "boostiny");
+    assert.equal(await listTotal(fam.service, { recordType: "commission_rule", networkSource: "rakuten" }), 2);
+    assert.equal((await captured(fam.wheres, () => fam.service.summary({ recordType: "commission_rule", networkSource: "rakuten" }))).networkSource, "rakuten");
+  });
+
+  it("10 optimise regression: network=optimise is the family, network=optimise_<region> stays exact", async () => {
+    const { service: svc, wheres } = withRows([...FIXTURE, V_CAMPAIGN_REVIEW]);
+    let total;
+    let where = await captured(wheres, async () => { total = await listTotal(svc, { recordType: "campaign", networkSource: "optimise" }); });
+    assert.equal(total, 3); // c1, c2, c3
+    assert.deepEqual(where.networkSource, { startsWith: "optimise" });
+    where = await captured(wheres, async () => { total = await listTotal(svc, { recordType: "campaign", networkSource: "optimise_sea" }); });
+    assert.equal(total, 2); // c1, c2
+    assert.equal(where.networkSource, "optimise_sea");
+    where = await captured(wheres, async () => { total = await listTotal(svc, { recordType: "campaign", networkSource: "optimise_mena" }); });
+    assert.equal(total, 1); // c3
+    assert.equal(where.networkSource, "optimise_mena");
+    where = await captured(wheres, async () => { total = await listTotal(svc, { recordType: "commission_group", networkSource: "optimise_uk" }); });
+    assert.equal(total, 0);
+    assert.equal(where.networkSource, "optimise_uk");
+    const s = await svc.summary({ recordType: "campaign", networkSource: "optimise_sea" });
+    assert.equal(s.importedRecords, 2);
+    assert.deepEqual(s.byNetwork, [{ network: "Optimise", networkSource: "optimise", importedRecords: 2 }]);
+  });
+
+  it("11 canonical display: unfiltered byNetwork collapses trackier + vcommission into one Trackier row", async () => {
+    const { service: svc } = withRows([...FIXTURE, V_CAMPAIGN_REVIEW, V_CAMPAIGN_ERROR, V_COUPON_MAPPED]);
+    const s = await svc.summary({ recordType: "campaign" });
+    assert.equal(s.importedRecords, 7);
+    assert.deepEqual(net(s), { optimise: 3, trackier: 3, boostiny: 1 });
+    assert.equal(s.byNetwork.filter((r) => r.network === "Trackier").length, 1);
+    assert.ok(!JSON.stringify(s).includes("vcommission"), "raw vcommission key leaked into the summary");
+    const c = await svc.summary({ recordType: "coupon" });
+    assert.deepEqual(net(c), { optimise: 2, boostiny: 2, trackier: 1 });
+    assert.ok(!JSON.stringify(c).includes("vcommission"));
+  });
+
+  it("12 input normalisation: case / whitespace variants map to the same predicate; empty means no network filter", async () => {
+    const { service: svc, wheres } = withRows(FIXTURE);
+    for (const raw of ["Trackier", " VCOMMISSION ", "trackier "]) {
+      const where = await captured(wheres, () => svc.summary({ recordType: "campaign", networkSource: raw }));
+      assert.deepEqual(where.networkSource, { in: ["trackier", "vcommission"] }, JSON.stringify(raw));
+    }
+    const none = await captured(wheres, () => svc.summary({ recordType: "campaign", networkSource: "  " }));
+    assert.equal("networkSource" in none, false);
   });
 });

@@ -15,6 +15,7 @@ import {
   normalizeRecordTypeForApi,
   toColumnCatalogDto,
 } from "./allNetworkData.contract.js";
+import { entitySourcesForSupplier } from "./networkOps.contract.js";
 import {
   deriveCampaignChannelType,
   deriveIsAssignable,
@@ -111,6 +112,26 @@ function needsReviewWhere() {
   };
 }
 
+/**
+ * Entity.networkSource predicate for the `network` filter, shared by buildWhere() (list + summary)
+ * and facets() so the three never disagree.
+ *
+ * - optimise            → every optimise_* region (family filter, unchanged)
+ * - optimise_sea / _mena / _uk → that region only (unchanged)
+ * - trackier | vcommission → both stored values: current Trackier rows are written as "trackier",
+ *   legacy rows as "vcommission"; the facet, displayNetwork and byNetwork already treat them as
+ *   one network, so the filter must too. The list comes from ENTITY_NETWORK_SOURCES.
+ * - anything else       → exact lowercase match (unchanged)
+ */
+function networkSourceWhere(networkSource) {
+  const ns = String(networkSource ?? "").trim().toLowerCase();
+  if (!ns) return null;
+  if (ns === "optimise") return { startsWith: "optimise" };
+  const trackierSources = entitySourcesForSupplier("TRACKIER");
+  if (trackierSources.includes(ns)) return { in: [...trackierSources] };
+  return ns;
+}
+
 function parsePage(query) {
   const page = Math.max(1, Number(query.page) || 1);
   const pageSize = Math.min(100, Math.max(1, Number(query.pageSize) || 25));
@@ -170,14 +191,8 @@ function buildWhere(filters = {}) {
   const where = {};
   const and = [];
 
-  if (filters.networkSource) {
-    const ns = String(filters.networkSource).toLowerCase();
-    if (ns === "optimise") {
-      where.networkSource = { startsWith: "optimise" };
-    } else {
-      where.networkSource = ns;
-    }
-  }
+  const networkSource = networkSourceWhere(filters.networkSource);
+  if (networkSource) where.networkSource = networkSource;
 
   if (filters.recordType) {
     where.entityType = normalizeRecordTypeForApi(filters.recordType);
@@ -1964,10 +1979,8 @@ export class ImportedRecordsService {
    */
   async facets(filters = {}) {
     const networkWhere = {};
-    if (filters.networkSource) {
-      const ns = String(filters.networkSource).toLowerCase();
-      networkWhere.networkSource = ns === "optimise" ? { startsWith: "optimise" } : ns;
-    }
+    const facetNetworkSource = networkSourceWhere(filters.networkSource);
+    if (facetNetworkSource) networkWhere.networkSource = facetNetworkSource;
     const campaignWhere = { entityType: "campaign", ...networkWhere };
     const supplierWhere = Object.keys(networkWhere).length
       ? { entity: campaignWhere }
