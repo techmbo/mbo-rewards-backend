@@ -320,6 +320,7 @@ import {
   requireEntityTypeAccess,
   requirePermission,
   requireAdminRole,
+  requirePortalUser,
 } from "../middleware/auth.js";
 
 const router = Router();
@@ -1044,7 +1045,7 @@ router.get("/v1/client/payouts", authenticatePartner, requireDeliveryChannel("ap
 router.get("/v1/client/statements", authenticatePartner, requireDeliveryChannel("api"), requireApiEndpoint("reporting"), clientListStatementsHandler);
 router.get("/v1/client/statements/:id", authenticatePartner, requireDeliveryChannel("api"), requireApiEndpoint("reporting"), clientGetStatementHandler);
 router.get("/v1/client/withdrawal-requests", authenticatePartner, requireDeliveryChannel("api"), requireApiEndpoint("reporting"), clientListWithdrawalsHandler);
-router.post("/v1/client/withdrawal-requests", authenticatePartner, requireDeliveryChannel("api"), requireApiEndpoint("reporting"), clientCreateWithdrawalHandler);
+router.post("/v1/client/withdrawal-requests", authenticatePartner, requirePortalUser, requireDeliveryChannel("api"), requireApiEndpoint("reporting"), clientCreateWithdrawalHandler);
 router.get("/v1/client/products", authenticatePartner, requireDeliveryChannel("api"), requireApiEndpoint("product"), clientListProductsHandler);
 
 // Compatibility aliases — SAME handlers/services as /v1/client/* (do not fork logic).
@@ -1069,6 +1070,9 @@ router.get("/partner/v1/confirmed-orders", authenticatePartner, requireDeliveryC
 router.get("/partner/v1/payment-status", authenticatePartner, requireDeliveryChannel("api"), requireApiEndpoint("reporting"), clientListPaymentsHandler);
 
 // Client portal dashboard (JWT CLIENT role or API key — tenant from credential only).
+// Money / account actions and sensitive account reads additionally require the interactive
+// portal session (`requirePortalUser`, before the delivery-channel check so every API key,
+// production or sandbox, gets the same portal-login 403).
 router.get("/portal/v1/me", authenticatePartner, requireDeliveryChannel("portal"), portalMeHandler);
 router.get("/portal/v1/overview", authenticatePartner, requireDeliveryChannel("portal"), portalOverviewHandler);
 router.get("/portal/v1/performance", authenticatePartner, requireDeliveryChannel("portal"), portalPerformanceHandler);
@@ -1078,21 +1082,21 @@ router.get("/portal/v1/orders", authenticatePartner, requireDeliveryChannel("por
 router.get("/portal/v1/payment-status", authenticatePartner, requireDeliveryChannel("portal"), clientListPaymentsHandler);
 router.get("/portal/v1/products", authenticatePartner, requireDeliveryChannel("portal"), clientListProductsHandler);
 router.get("/portal/v1/payments", authenticatePartner, requireDeliveryChannel("portal"), portalPaymentsHandler);
-router.put("/portal/v1/bank", authenticatePartner, requireDeliveryChannel("portal"), portalSaveBankHandler);
-router.post("/portal/v1/withdrawals", authenticatePartner, requireDeliveryChannel("portal"), portalWithdrawHandler);
+router.put("/portal/v1/bank", authenticatePartner, requirePortalUser, requireDeliveryChannel("portal"), portalSaveBankHandler);
+router.post("/portal/v1/withdrawals", authenticatePartner, requirePortalUser, requireDeliveryChannel("portal"), portalWithdrawHandler);
 router.get("/portal/v1/payable-statements", authenticatePartner, requireDeliveryChannel("portal"), portalListPayableStatementsHandler);
 router.get("/portal/v1/payable-statements/:id", authenticatePartner, requireDeliveryChannel("portal"), portalGetPayableStatementHandler);
 router.get("/portal/v1/withdrawal-requests", authenticatePartner, requireDeliveryChannel("portal"), portalListWithdrawalRequestsHandler);
 router.get("/portal/v1/withdrawal-requests/:id", authenticatePartner, requireDeliveryChannel("portal"), portalGetWithdrawalRequestHandler);
 router.get("/portal/v1/notifications", authenticatePartner, requireDeliveryChannel("portal"), portalNotificationsHandler);
 router.get("/portal/v1/dashboard-summary", authenticatePartner, requireDeliveryChannel("portal"), portalDashboardSummaryHandler);
-router.get("/portal/v1/settings", authenticatePartner, requireDeliveryChannel("portal"), portalSettingsGetHandler);
-router.patch("/portal/v1/settings", authenticatePartner, requireDeliveryChannel("portal"), portalSettingsPatchHandler);
-router.get("/portal/v1/team", authenticatePartner, requireDeliveryChannel("portal"), portalTeamHandler);
-router.post("/portal/v1/support", authenticatePartner, requireDeliveryChannel("portal"), portalSupportHandler);
+router.get("/portal/v1/settings", authenticatePartner, requirePortalUser, requireDeliveryChannel("portal"), portalSettingsGetHandler);
+router.patch("/portal/v1/settings", authenticatePartner, requirePortalUser, requireDeliveryChannel("portal"), portalSettingsPatchHandler);
+router.get("/portal/v1/team", authenticatePartner, requirePortalUser, requireDeliveryChannel("portal"), portalTeamHandler);
+router.post("/portal/v1/support", authenticatePartner, requirePortalUser, requireDeliveryChannel("portal"), portalSupportHandler);
 router.get("/portal/v1/api-docs", authenticatePartner, requireDeliveryChannel("portal"), portalApiDocsHandler);
-router.get("/portal/v1/api-keys", authenticatePartner, requireDeliveryChannel("portal"), portalListApiKeysHandler);
-router.post("/portal/v1/api-keys/rotate", authenticatePartner, requireDeliveryChannel("portal"), portalRotateApiKeyHandler);
+router.get("/portal/v1/api-keys", authenticatePartner, requirePortalUser, requireDeliveryChannel("portal"), portalListApiKeysHandler);
+router.post("/portal/v1/api-keys/rotate", authenticatePartner, requirePortalUser, requireDeliveryChannel("portal"), portalRotateApiKeyHandler);
 
 router.get(
   "/client-brand-requests",

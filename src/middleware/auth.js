@@ -129,6 +129,37 @@ export async function authenticatePartner(req, res, next) {
   }
 }
 
+export const PORTAL_USER_REQUIRED_MESSAGE = "Use the client portal login for this action.";
+
+/**
+ * Interactive CLIENT portal session only — composed after `authenticatePartner`.
+ *
+ * `authenticatePartner` accepts two credentials for the same tenant: an `mbo_live_` /
+ * `mbo_test_` API key (machine data access, no `req.user`) and a CLIENT portal JWT. Money and
+ * account actions — bank details, withdrawals, settings, support, credential management, team
+ * and settings reads — are portal-user actions, so this gate rejects every API key regardless
+ * of its environment or the client's delivery method. It is an auth-channel rule, not a
+ * permission: API-key requests deliberately carry no `req.user` / `req.permissions`, so a
+ * permission check would only block them by accident with the wrong status and message.
+ *
+ * Passes only when the partner auth type is `portal_user`, `req.user` is a CLIENT and the tenant
+ * is resolved. Sets nothing; it only gates.
+ */
+export function requirePortalUser(req, res, next) {
+  const isPortalUser =
+    req.partnerAuth?.type === "portal_user" &&
+    req.user != null &&
+    req.user.role === "CLIENT" &&
+    req.partnerClientId != null;
+
+  if (!isPortalUser) {
+    sendAuthError(res, 403, PORTAL_USER_REQUIRED_MESSAGE);
+    return;
+  }
+
+  next();
+}
+
 export function requirePermission(...requiredPermissions) {
   return (req, res, next) => {
     if (!req.user) {
