@@ -36,6 +36,7 @@ const S = {
   conversionId: "CONVERSION_SENTINEL",
   rawPayloadId: "RAWPAYLOAD_SENTINEL",
   mapperText: "MAPPER_ERROR_TEXT_SENTINEL",
+  mapperRetryText: "RETRYING_MAPPER_TEXT_SENTINEL",
   commission: 987654.321,
   grossOrderValue: 876543.21,
   grossCommission: 765432.1,
@@ -47,6 +48,7 @@ const S = {
 };
 const TEXT_SENTINELS = [
   S.srcField,
+  S.mapperRetryText,
   "track.sentinel.example",
   "TOK_SENTINEL",
   "TOK_REDIRECT_SENTINEL",
@@ -190,6 +192,15 @@ const ENTITIES = {
     campaignName: "customscheme://secret",
     externalId: "//example.com/path",
     advertiserName: "/r/test/token123",
+  }),
+  // A coupon whose promotion retry was interrupted: the only mapper error is RETRYING. It must read
+  // as an active error (ERROR / FAILED / hasMapperError) everywhere, and its text must never leave.
+  "ent-coupon-retrying": entity("ent-coupon-retrying", "coupon", {
+    entityName: "Retrying voucher entity",
+    campaignName: "Retrying voucher campaign",
+    mapperErrors: [
+      { id: "me-retry", status: "RETRYING", message: S.mapperRetryText, errorCode: "PROMOTION_FAILED", attempts: 2, createdAt: new Date("2026-09-03T00:00:00Z") },
+    ],
   }),
   "ent-performance": entity("ent-performance", "performance"),
   "ent-conversion": entity("ent-conversion", "conversion"),
@@ -680,7 +691,7 @@ describe("imported-records: summary / columns / facets", () => {
     assert.equal(admin.cacheControl, "no-store");
     // Cross-type first-release inventory (real fixture counts); performance / conversion / payment
     // rows exist in the fixture but are never counted.
-    assert.deepEqual(admin.body.data.recordTypeCounts, { campaign: 1, coupon: 3, commission_rule: 1, commission_group: 1 });
+    assert.deepEqual(admin.body.data.recordTypeCounts, { campaign: 1, coupon: 4, commission_rule: 1, commission_group: 1 });
     assert.ok(!("performance" in admin.body.data.recordTypeCounts) && !("payment" in admin.body.data.recordTypeCounts));
     // Selected-type aggregates: only the campaign's own open mapper error, only campaign rows per network.
     assert.equal(admin.body.data.importedRecords, 1);
@@ -689,8 +700,8 @@ describe("imported-records: summary / columns / facets", () => {
     assert.deepEqual(admin.body.data.byNetwork, [{ network: "Optimise", networkSource: "optimise", importedRecords: 1 }]);
     for (const k of ["normalizedCampaigns", "promotedSupplierCampaigns", "linkedCampaigns", "unlinkedCampaigns"]) assert.equal(admin.body.data[k], null, k);
     const coupon = await call("/ops/imported-records/summary?recordType=coupon", "ADMIN");
-    assert.equal(coupon.body.data.importedRecords, 3);
-    assert.equal(coupon.body.data.mappingErrors, 3);
+    assert.equal(coupon.body.data.importedRecords, 4);
+    assert.equal(coupon.body.data.mappingErrors, 4); // three OPEN + one RETRYING: both are active
     assert.equal(coupon.body.data.importedCampaigns, null);
     const tech = await call("/ops/imported-records/summary?recordType=campaign", "TECH");
     assert.deepEqual(Object.keys(tech.body.data.recordTypeCounts), ["campaign"]);
@@ -791,5 +802,58 @@ describe("imported-records: date filter validation (400 before Prisma, after aut
     const blank = await call("/ops/imported-records/summary?recordType=campaign&fromDate=%20%20", "ADMIN");
     assert.equal(blank.status, 200);
     assert.equal(blank.body.data.importedRecords, 1);
+  });
+});
+
+describe("imported-records: RETRYING mapper error is active through the public boundary", () => {
+  const ID = "ent-coupon-retrying";
+  const rowOf = (r) => r.body.data.find((row) => row.id === ID);
+
+  it("1 unfiltered coupon list: hasMapperError true, ERROR / FAILED, and the RETRYING text never leaks", async () => {
+    const r = await call("/ops/imported-records?recordType=coupon", "ADMIN");
+    assert.equal(r.status, 200);
+    const row = rowOf(r);
+    assert.ok(row, "retrying row present");
+    assert.equal(row.hasMapperError, true);
+    assert.equal(row.mappingStatus, "ERROR");
+    assert.equal(row.sourceStatus, "FAILED");
+    assert.ok(!r.text.includes("RETRYING"), "raw mapper status must not appear in the list");
+    assertNoLeak(r.text, "retrying list");
+  });
+
+  it("2-4 mappingStatus=ERROR and sourceStatus=FAILED return it; NEEDS_REVIEW and IMPORTED do not", async () => {
+    for (const q of ["mappingStatus=ERROR", "preset=mapping_errors", "sourceStatus=FAILED"]) {
+      const r = await call(`/ops/imported-records?recordType=coupon&${q}`, "ADMIN");
+      assert.ok(rowOf(r), q);
+      assertNoLeak(r.text, q);
+    }
+    for (const q of ["mappingStatus=NEEDS_REVIEW", "preset=needs_review", "sourceStatus=IMPORTED", "sourceStatus=PROCESSED"]) {
+      const r = await call(`/ops/imported-records?recordType=coupon&${q}`, "ADMIN");
+      assert.equal(rowOf(r), undefined, q);
+    }
+  });
+
+  it("5 summary counts it and agrees with the list under the ERROR filter; a campaigns-only caller still never sees coupon errors", async () => {
+    const s = await call("/ops/imported-records/summary?recordType=coupon&mappingStatus=ERROR", "ADMIN");
+    const l = await call("/ops/imported-records?recordType=coupon&mappingStatus=ERROR", "ADMIN");
+    assert.equal(s.status, 200);
+    assert.equal(s.body.data.importedRecords, l.body.pagination.total);
+    assert.equal(s.body.data.mappingErrors, 4);
+    assertNoLeak(s.text, "retrying summary");
+    assert.ok(!s.text.includes("RETRYING"));
+    const tech = await call("/ops/imported-records/summary?recordType=campaign", "TECH");
+    assert.equal(tech.body.data.mappingErrors, 1);
+    assert.equal((await call(`/ops/imported-records/${ID}`, "TECH")).status, 403);
+  });
+
+  it("6 detail through the public projection: hasMapperError true, no mapper-error text, status or detail object (existing boundary contract)", async () => {
+    const r = await call(`/ops/imported-records/${ID}`, "ADMIN");
+    assert.equal(r.status, 200);
+    assert.equal(r.body.data.hasMapperError, true);
+    assert.equal(r.body.data.mappingStatus, "ERROR");
+    assert.equal(r.body.data.sourceStatus, "FAILED");
+    assert.ok(!r.text.includes("RETRYING"), "raw status is a service-level detail; the public detail does not expose it");
+    assert.ok(!("mapping" in r.body.data));
+    assertNoLeak(r.text, "retrying detail");
   });
 });

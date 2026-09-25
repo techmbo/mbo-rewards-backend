@@ -83,14 +83,27 @@ import {
 const SUMMARY_RECORD_TYPES = Object.freeze(["campaign", "coupon", "commission_rule", "commission_group"]);
 
 /**
- * The NEEDS_REVIEW predicate: no open mapper error and not yet mapped (campaign without a
+ * Mapper-error statuses that still block a staged record. RETRYING is written by the promotion
+ * retry before the attempt runs and can outlive an interrupted retry, so the read model treats it
+ * exactly like OPEN; RESOLVED and DISCARDED are inactive. One source for every predicate in this
+ * file (list include, row/detail pick, status filters, needs-review, summary count). The stored
+ * status itself is never rewritten: detail still reports the raw value.
+ */
+const ACTIVE_MAPPER_ERROR_STATUSES = Object.freeze(["OPEN", "RETRYING"]);
+
+function activeMapperErrorStatusWhere() {
+  return { in: [...ACTIVE_MAPPER_ERROR_STATUSES] };
+}
+
+/**
+ * The NEEDS_REVIEW predicate: no active mapper error and not yet mapped (campaign without a
  * merchant-linked active CampaignSource, coupon without a SupplierCoupon, or a performance row).
  * Shared by the mappingStatus / preset filter in buildWhere and by summary(), which AND-s it onto
  * the caller's own filters instead of replacing them. Pure: returns a fresh object each call.
  */
 function needsReviewWhere() {
   return {
-    mapperErrors: { none: { status: "OPEN" } },
+    mapperErrors: { none: { status: activeMapperErrorStatusWhere() } },
     OR: [
       {
         entityType: "campaign",
@@ -309,9 +322,12 @@ function buildWhere(filters = {}) {
 
   // Status filters require join-aware predicates
   if (filters.mappingStatus === MAPPING_STATUS.ERROR || filters.preset === "mapping_errors") {
-    and.push({ mapperErrors: { some: { status: "OPEN" } } });
+    and.push({ mapperErrors: { some: { status: activeMapperErrorStatusWhere() } } });
   } else if (filters.mappingStatus === MAPPING_STATUS.MAPPED || filters.preset === "normalized") {
+    // MAPPED = successfully mapped AND no active mapper error: the row renders ERROR when an
+    // OPEN / RETRYING error exists, so the filter must not return it as mapped.
     and.push({
+      mapperErrors: { none: { status: activeMapperErrorStatusWhere() } },
       OR: [
         {
           entityType: "campaign",
@@ -339,10 +355,10 @@ function buildWhere(filters = {}) {
   }
 
   if (filters.sourceStatus === SOURCE_STATUS.FAILED) {
-    and.push({ mapperErrors: { some: { status: "OPEN" } } });
+    and.push({ mapperErrors: { some: { status: activeMapperErrorStatusWhere() } } });
   } else if (filters.sourceStatus === SOURCE_STATUS.PROCESSED) {
     and.push({
-      mapperErrors: { none: { status: "OPEN" } },
+      mapperErrors: { none: { status: activeMapperErrorStatusWhere() } },
       OR: [
         { entityType: "campaign", supplierCampaigns: { some: {} } },
         { entityType: "coupon", supplierCoupons: { some: {} } },
@@ -350,7 +366,7 @@ function buildWhere(filters = {}) {
     });
   } else if (filters.sourceStatus === SOURCE_STATUS.IMPORTED) {
     and.push({
-      mapperErrors: { none: { status: "OPEN" } },
+      mapperErrors: { none: { status: activeMapperErrorStatusWhere() } },
       OR: [
         { entityType: "campaign", supplierCampaigns: { none: {} } },
         { entityType: "coupon", supplierCoupons: { none: {} } },
@@ -1353,7 +1369,7 @@ function formatAssetsLabel(assets, capabilities = null) {
 
 function pickOpenMapperError(mapperErrors = []) {
   return (
-    mapperErrors.find((err) => err.status === "OPEN" || err.status === "RETRYING") ?? null
+    mapperErrors.find((err) => ACTIVE_MAPPER_ERROR_STATUSES.includes(err.status)) ?? null
   );
 }
 
@@ -1791,7 +1807,7 @@ const ENTITY_LIST_INCLUDE = {
     },
   },
   mapperErrors: {
-    where: { status: { in: ["OPEN", "RETRYING"] } },
+    where: { status: activeMapperErrorStatusWhere() },
     orderBy: { createdAt: "desc" },
     take: 3,
   },
@@ -2165,9 +2181,10 @@ export class ImportedRecordsService {
 
     const [importedRecords, openErrors, types, byNetworkRows, needsReview] = await Promise.all([
       this.db.entity.count({ where: baseWhere }),
-      // Only errors whose staged record matches the same predicate: selected type, network,
-      // dates and every other list filter. Commission types have no mapper-error writer → 0.
-      this.db.mapperError.count({ where: { status: "OPEN", entity: baseWhere } }),
+      // Active (OPEN or RETRYING) error ROWS whose staged record matches the same predicate:
+      // selected type, network, dates and every other list filter. A row count, not an entity
+      // count. Commission types have no mapper-error writer → 0.
+      this.db.mapperError.count({ where: { status: activeMapperErrorStatusWhere(), entity: baseWhere } }),
       this.db.entity.groupBy({ by: ["entityType"], where: inventoryWhere, _count: true }),
       this.db.entity.groupBy({ by: ["networkSource"], where: baseWhere, _count: true }),
       hasNeedsReview

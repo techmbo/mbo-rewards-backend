@@ -165,6 +165,10 @@ function makeDb(rows, { facetModels = false } = {}) {
       }
       return [...groups.values()];
     },
+    findUnique: async ({ where } = {}) => {
+      record("entity.findUnique", where);
+      return rows.find((e) => e.id === where?.id) ?? null;
+    },
     findMany: async ({ where, skip = 0, take } = {}) => {
       record("entity.findMany", where);
       const all = matched(where).sort((a, b) => b.updatedAt - a.updatedAt);
@@ -498,8 +502,10 @@ const withRows = (rows, opts) => {
 const listTotal = (svc, filters) => svc.list({ ...filters, page: 1, pageSize: 100 }).then((r) => r.total);
 const listSources = (svc, filters) => svc.list({ ...filters, page: 1, pageSize: 100 }).then((r) => r.rows.map((x) => x.networkSource).sort());
 const lastWhere = (wheres, op) => [...wheres].reverse().find((w) => w.op === op)?.where;
-/** The predicate of the plain base count (list total / summary importedRecords), never the needs-review AND query. */
-const baseCountWhere = (wheres) => wheres.find((w) => w.op === "entity.count" && !("AND" in (w.where || {})))?.where;
+/** The predicate of the plain base count: summary() issues entity.count(baseWhere) first, before the
+ *  needs-review AND(baseWhere, …) count, and list() issues exactly one count — so the first recorded
+ *  entity.count after clearing is always the base predicate (which may itself carry AND clauses). */
+const baseCountWhere = (wheres) => wheres.find((w) => w.op === "entity.count")?.where;
 const captured = async (wheres, fn) => {
   wheres.length = 0;
   await fn();
@@ -789,5 +795,199 @@ describe("date filters: an invalid request never touches the list cache", () => 
     // and the invalid variant is still rejected afterwards — nothing was cached under it
     await assert.rejects(svc.list({ ...valid, fromDate: "bad" }), isDateFilterError("Invalid fromDate."));
     assert.deepEqual(calls, []);
+  });
+});
+
+// ── active mapper errors: OPEN and RETRYING both block a record; RESOLVED / DISCARDED do not ──
+const ACTIVE = { in: ["OPEN", "RETRYING"] };
+const merr = (id, status, extra = {}) => ({ id, status, message: `MSG_${id}`, errorCode: "PROMOTION_FAILED", attempts: 1, createdAt: D("2026-09-12T00:00:00Z"), ...extra });
+const MAPPER_FIXTURE = [
+  ent("ma", "campaign", "awin", { mapperErrors: [merr("me-a", "OPEN")] }), // A: OPEN, unpromoted
+  ent("mb", "campaign", "awin", { mapperErrors: [merr("me-b", "RETRYING", { attempts: 3 })] }), // B: RETRYING, unpromoted
+  ent("mc", "campaign", "awin", { supplierCampaigns: [sc("mc", { supplier: "AWIN" })], mapperErrors: [merr("me-c", "RESOLVED", { resolvedAt: D("2026-09-13T00:00:00Z") })] }), // C: RESOLVED only, mapped
+  ent("md", "campaign", "awin", { mapperErrors: [merr("me-d", "DISCARDED")] }), // D: DISCARDED only, unpromoted
+  ent("me", "campaign", "cj", { mapperErrors: [merr("me-e1", "OPEN"), merr("me-e2", "RETRYING")] }), // E: OPEN + RETRYING on one entity
+  ent("mf", "campaign", "awin", { supplierCampaigns: [sc("mf", { supplier: "AWIN" })], mapperErrors: [merr("me-f", "RETRYING")] }), // F: RETRYING + mapped
+  ent("mg", "coupon", "awin", { mapperErrors: [merr("me-g", "RETRYING")] }), // G: coupon RETRYING, unpromoted
+  ent("mh", "coupon", "awin", { supplierCoupons: [{ id: "cp-mh", couponCode: "H10", couponStatus: "ACTIVE", supplierCampaign: sc("mh", { supplier: "AWIN" }) }], mapperErrors: [merr("me-h", "RESOLVED")] }), // H: coupon RESOLVED + mapped
+];
+const listIds = (svc, filters) => svc.list({ ...filters, page: 1, pageSize: 100 }).then((r) => r.rows.map((x) => x.id).sort());
+const rowById = (svc, filters, id) => svc.list({ ...filters, page: 1, pageSize: 100 }).then((r) => r.rows.find((x) => x.id === id));
+const hasActive = (where) => JSON.stringify(where).includes(JSON.stringify({ status: ACTIVE }));
+
+describe("active mapper errors: RETRYING is read exactly like OPEN", () => {
+  it("1 unfiltered rows: RETRYING renders ERROR / FAILED with an active error id; RESOLVED / DISCARDED do not", async () => {
+    const { service: svc } = withRows(MAPPER_FIXTURE);
+    const b = await rowById(svc, { recordType: "campaign" }, "mb");
+    assert.equal(b.mappingStatus, "ERROR");
+    assert.equal(b.sourceStatus, "FAILED");
+    assert.equal(b.openMapperErrorId, "me-b");
+    assert.equal(Boolean(b.openMapperErrorId), true); // the controller's hasMapperError
+    const f = await rowById(svc, { recordType: "campaign" }, "mf");
+    assert.equal(f.mappingStatus, "ERROR");
+    assert.equal(f.sourceStatus, "FAILED");
+    const g = await rowById(svc, { recordType: "coupon" }, "mg");
+    assert.equal(g.mappingStatus, "ERROR");
+    assert.equal(g.sourceStatus, "FAILED");
+    assert.equal(g.openMapperErrorId, "me-g");
+    const c = await rowById(svc, { recordType: "campaign" }, "mc");
+    assert.equal(c.mappingStatus, "MAPPED");
+    assert.equal(c.sourceStatus, "PROCESSED");
+    assert.equal(c.openMapperErrorId, null);
+    const d = await rowById(svc, { recordType: "campaign" }, "md");
+    assert.equal(d.mappingStatus, "NEEDS_REVIEW");
+    assert.equal(d.sourceStatus, "IMPORTED");
+    assert.equal(d.openMapperErrorId, null);
+    const h = await rowById(svc, { recordType: "coupon" }, "mh");
+    assert.equal(h.mappingStatus, "MAPPED");
+    assert.equal(h.openMapperErrorId, null);
+  });
+
+  it("2-4 mappingStatus=ERROR, preset=mapping_errors and sourceStatus=FAILED include OPEN and RETRYING rows only", async () => {
+    const { service: svc, wheres } = withRows(MAPPER_FIXTURE);
+    for (const filters of [{ mappingStatus: "ERROR" }, { preset: "mapping_errors" }, { sourceStatus: "FAILED" }]) {
+      assert.deepEqual(await listIds(svc, { recordType: "campaign", ...filters }), ["ma", "mb", "me", "mf"], JSON.stringify(filters));
+      assert.deepEqual(await listIds(svc, { recordType: "coupon", ...filters }), ["mg"], JSON.stringify(filters));
+      const where = await captured(wheres, () => svc.summary({ recordType: "campaign", ...filters }));
+      assert.ok(hasActive(where), `${JSON.stringify(filters)}: predicate must be ${JSON.stringify(ACTIVE)} → ${JSON.stringify(where)}`);
+      assert.ok(!JSON.stringify(where).includes('"status":"OPEN"'), `${JSON.stringify(filters)}: OPEN-only predicate regressed`);
+    }
+  });
+
+  it("5-6 sourceStatus=PROCESSED excludes mapped-but-RETRYING F; sourceStatus=IMPORTED excludes unpromoted RETRYING B", async () => {
+    const { service: svc, wheres } = withRows(MAPPER_FIXTURE);
+    assert.deepEqual(await listIds(svc, { recordType: "campaign", sourceStatus: "PROCESSED" }), ["mc"]);
+    assert.deepEqual(await listIds(svc, { recordType: "coupon", sourceStatus: "PROCESSED" }), ["mh"]);
+    assert.deepEqual(await listIds(svc, { recordType: "campaign", sourceStatus: "IMPORTED" }), ["md"]);
+    assert.deepEqual(await listIds(svc, { recordType: "coupon", sourceStatus: "IMPORTED" }), []);
+    for (const sourceStatus of ["PROCESSED", "IMPORTED"]) {
+      const where = await captured(wheres, () => svc.summary({ recordType: "campaign", sourceStatus }));
+      assert.ok(JSON.stringify(where).includes(JSON.stringify({ none: { status: ACTIVE } })), `${sourceStatus}: none-active predicate → ${JSON.stringify(where)}`);
+    }
+  });
+
+  it("7-9 NEEDS_REVIEW, preset=needs_review and preset=imported_not_normalized exclude every entity with an active error", async () => {
+    const { service: svc, wheres } = withRows(MAPPER_FIXTURE);
+    for (const filters of [{ mappingStatus: "NEEDS_REVIEW" }, { preset: "needs_review" }, { preset: "imported_not_normalized" }]) {
+      assert.deepEqual(await listIds(svc, { recordType: "campaign", ...filters }), ["md"], JSON.stringify(filters));
+      assert.deepEqual(await listIds(svc, { recordType: "coupon", ...filters }), [], JSON.stringify(filters));
+      const where = await captured(wheres, () => svc.summary({ recordType: "campaign", ...filters }));
+      assert.ok(JSON.stringify(where).includes(JSON.stringify({ none: { status: ACTIVE } })), `${JSON.stringify(filters)} → ${JSON.stringify(where)}`);
+    }
+  });
+
+  it("10-12 summary: mappingErrors counts active rows, needsReview excludes active entities, ERROR parity with the list", async () => {
+    const { service: svc, wheres } = withRows(MAPPER_FIXTURE);
+    wheres.length = 0;
+    const campaign = await svc.summary({ recordType: "campaign" });
+    assert.equal(campaign.importedRecords, 6);
+    assert.equal(campaign.mappingErrors, 5); // A, B, E×2, F — RESOLVED (C) and DISCARDED (D) never count
+    assert.equal(campaign.needsReview, 1); // D only
+    assert.deepEqual(lastWhere(wheres, "mapperError.count").status, ACTIVE);
+    const needsReviewWhere = wheres.find((w) => w.op === "entity.count" && "AND" in (w.where || {})).where;
+    assert.ok(JSON.stringify(needsReviewWhere).includes(JSON.stringify({ none: { status: ACTIVE } })));
+    const coupon = await svc.summary({ recordType: "coupon" });
+    assert.equal(coupon.importedRecords, 2);
+    assert.equal(coupon.mappingErrors, 1); // G
+    assert.equal(coupon.needsReview, 0); // G active, H mapped
+    for (const recordType of ["campaign", "coupon"]) {
+      const s = await svc.summary({ recordType, mappingStatus: "ERROR" });
+      assert.equal(s.importedRecords, await listTotal(svc, { recordType, mappingStatus: "ERROR" }), recordType);
+      const f = await svc.summary({ recordType, sourceStatus: "FAILED" });
+      assert.equal(f.importedRecords, await listTotal(svc, { recordType, sourceStatus: "FAILED" }), recordType);
+    }
+  });
+
+  it("MAPPED / preset=normalized require no active error: mapped+RETRYING (F) and mapped+OPEN are excluded, mapped+RESOLVED (C, H) included", async () => {
+    const MAPPED_OPEN = ent("mo", "campaign", "awin", { supplierCampaigns: [sc("mo", { supplier: "AWIN" })], mapperErrors: [merr("me-o", "OPEN")] });
+    const COUPON_RETRYING_MAPPED = ent("mk", "coupon", "awin", { supplierCoupons: [{ id: "cp-mk", couponCode: "K10", couponStatus: "ACTIVE", supplierCampaign: sc("mk", { supplier: "AWIN" }) }], mapperErrors: [merr("me-k", "RETRYING")] });
+    const { service: svc, wheres } = withRows([...MAPPER_FIXTURE, MAPPED_OPEN, COUPON_RETRYING_MAPPED]);
+    // rows still render ERROR (active error takes precedence over the successful mapping)
+    for (const id of ["mf", "mo"]) assert.equal((await rowById(svc, { recordType: "campaign" }, id)).mappingStatus, "ERROR", id);
+    assert.equal((await rowById(svc, { recordType: "coupon" }, "mk")).mappingStatus, "ERROR");
+    assert.equal((await rowById(svc, { recordType: "campaign" }, "mc")).mappingStatus, "MAPPED");
+    for (const filters of [{ mappingStatus: "MAPPED" }, { preset: "normalized" }]) {
+      assert.deepEqual(await listIds(svc, { recordType: "campaign", ...filters }), ["mc"], JSON.stringify(filters)); // not mf, not mo
+      assert.deepEqual(await listIds(svc, { recordType: "coupon", ...filters }), ["mh"], JSON.stringify(filters)); // not mk
+      const where = await captured(wheres, () => svc.summary({ recordType: "campaign", ...filters }));
+      const text = JSON.stringify(where);
+      assert.ok(text.includes(JSON.stringify({ mapperErrors: { none: { status: ACTIVE } } }).slice(1, -1)), `${JSON.stringify(filters)}: none-active guard missing → ${text}`);
+      assert.ok(text.includes('"merchantId":{"not":null}') && text.includes('"campaignSources":{"some":{"isActive":true}}') && text.includes('"supplierCoupons":{"some":{}}'), `${JSON.stringify(filters)}: mapping relation predicate changed → ${text}`);
+      for (const recordType of ["campaign", "coupon"]) {
+        assert.equal((await svc.summary({ recordType, ...filters })).importedRecords, await listTotal(svc, { recordType, ...filters }), `${recordType} ${JSON.stringify(filters)} parity`);
+      }
+    }
+    // a mapped record whose only errors are RESOLVED / DISCARDED is MAPPED
+    const MAPPED_DISCARDED = ent("mq", "campaign", "awin", { supplierCampaigns: [sc("mq", { supplier: "AWIN" })], mapperErrors: [merr("me-q", "DISCARDED")] });
+    const { service: svc2 } = withRows([...MAPPER_FIXTURE, MAPPED_DISCARDED]);
+    assert.deepEqual(await listIds(svc2, { recordType: "campaign", mappingStatus: "MAPPED" }), ["mc", "mq"]);
+    assert.deepEqual(await listIds(svc2, { recordType: "campaign", preset: "normalized" }), ["mc", "mq"]);
+    assert.equal((await svc2.summary({ recordType: "campaign", mappingStatus: "MAPPED" })).importedRecords, 2);
+  });
+
+  it("row-count semantics: one entity with OPEN + RETRYING → importedRecords 1, mappingErrors 2", async () => {
+    const { service: svc } = withRows(MAPPER_FIXTURE);
+    const s = await svc.summary({ recordType: "campaign", networkSource: "cj" }); // E only
+    assert.equal(s.importedRecords, 1);
+    assert.equal(s.mappingErrors, 2);
+    assert.equal(s.needsReview, 0);
+    assert.deepEqual(await listIds(svc, { recordType: "campaign", networkSource: "cj", mappingStatus: "ERROR" }), ["me"]);
+  });
+
+  it("13 OPEN behaviour unchanged: A is treated exactly like B under every predicate", async () => {
+    const { service: svc } = withRows(MAPPER_FIXTURE);
+    for (const filters of [{ mappingStatus: "ERROR" }, { preset: "mapping_errors" }, { sourceStatus: "FAILED" }]) {
+      const ids = await listIds(svc, { recordType: "campaign", networkSource: "awin", ...filters });
+      assert.ok(ids.includes("ma") && ids.includes("mb"), JSON.stringify(filters));
+    }
+    for (const filters of [{ mappingStatus: "NEEDS_REVIEW" }, { sourceStatus: "IMPORTED" }, { sourceStatus: "PROCESSED" }]) {
+      const ids = await listIds(svc, { recordType: "campaign", networkSource: "awin", ...filters });
+      assert.ok(!ids.includes("ma") && !ids.includes("mb"), JSON.stringify(filters));
+    }
+    const a = await rowById(svc, { recordType: "campaign" }, "ma");
+    assert.equal(a.mappingStatus, "ERROR");
+    assert.equal(a.openMapperErrorId, "me-a");
+  });
+
+  it("14 RESOLVED / DISCARDED are inactive everywhere", async () => {
+    const { service: svc } = withRows(MAPPER_FIXTURE.filter((e) => ["mc", "md", "mh"].includes(e.id)));
+    const s = await svc.summary({ recordType: "campaign" });
+    assert.equal(s.importedRecords, 2);
+    assert.equal(s.mappingErrors, 0);
+    assert.equal(s.needsReview, 1); // D
+    assert.equal((await svc.summary({ recordType: "coupon" })).mappingErrors, 0);
+    for (const filters of [{ mappingStatus: "ERROR" }, { preset: "mapping_errors" }, { sourceStatus: "FAILED" }]) {
+      assert.deepEqual(await listIds(svc, { recordType: "campaign", ...filters }), [], JSON.stringify(filters));
+      assert.deepEqual(await listIds(svc, { recordType: "coupon", ...filters }), [], JSON.stringify(filters));
+    }
+    assert.deepEqual(await listIds(svc, { recordType: "campaign", sourceStatus: "PROCESSED" }), ["mc"]);
+    assert.deepEqual(await listIds(svc, { recordType: "campaign", sourceStatus: "IMPORTED" }), ["md"]);
+    assert.deepEqual(await listIds(svc, { recordType: "campaign", mappingStatus: "NEEDS_REVIEW" }), ["md"]);
+    assert.deepEqual(await listIds(svc, { recordType: "coupon", sourceStatus: "PROCESSED" }), ["mh"]);
+  });
+
+  it("detail keeps the raw stored status: mapping.mapperError.status === \"RETRYING\" with a Retry action", async () => {
+    const { service: svc } = withRows(MAPPER_FIXTURE);
+    const detail = await svc.getById("mb");
+    assert.equal(detail.mappingStatus, "ERROR");
+    assert.equal(detail.sourceStatus, "FAILED");
+    assert.equal(detail.mapping.mapperError.status, "RETRYING");
+    assert.equal(detail.mapping.mapperError.id, "me-b");
+    assert.equal(detail.mapping.mapperError.attempts, 3);
+    assert.ok(detail.actions.some((a) => a.key === "retry" && a.mapperErrorId === "me-b"));
+    const resolved = await svc.getById("mc");
+    assert.equal(resolved.mapping.mapperError, null);
+    assert.ok(!resolved.actions.some((a) => a.key === "retry"));
+  });
+
+  it("list include and summary count both use the shared active predicate; query budget unchanged", async () => {
+    const { service: svc, calls, wheres } = withRows(MAPPER_FIXTURE);
+    calls.length = 0;
+    await svc.summary({ recordType: "campaign" });
+    assert.equal(calls.length, 5);
+    await svc.summary({ recordType: "commission_rule" });
+    assert.equal(calls.length, 9);
+    const count = wheres.filter((w) => w.op === "mapperError.count");
+    assert.ok(count.length === 2 && count.every((w) => JSON.stringify(w.where.status) === JSON.stringify(ACTIVE)));
   });
 });
