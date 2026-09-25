@@ -1,6 +1,10 @@
 import { ok, fail } from "../core/apiResponse.js";
 import { prisma } from "../database/prisma.js";
 import { ProductFeedService, ClientProductService } from "../modules/product/productFeed.service.js";
+import {
+  parseClientProductAssignBody,
+  parseProductIngestBody,
+} from "../modules/product/productWrite.schemas.js";
 import { toAdminProductFeedDto } from "../modules/ops/adminContract.dto.js";
 
 const feeds = new ProductFeedService();
@@ -39,14 +43,16 @@ export async function listProductFeedsHandler(req, res, next) {
   }
 }
 
+/**
+ * The body is validated before any service call: supplier must have a products mapping, rows[]
+ * is 1..500 objects (never sliced), optional feed fields are bounded strings and feedFormat is
+ * the ProductFeed enum. Only the validated, explicitly named fields reach the service.
+ */
 export async function ingestProductFeedHandler(req, res, next) {
   try {
-    const body = req.body || {};
-    if (!body.supplier || !Array.isArray(body.rows)) {
-      throw fail("supplier and rows[] are required.", 400);
-    }
+    const body = parseProductIngestBody(req.body);
     const result = await feeds.ingestFeedBatch({
-      supplier: String(body.supplier).toUpperCase(),
+      supplier: body.supplier,
       sourceAccountLabel: body.sourceAccountLabel || "default",
       campaignSourceId: body.campaignSourceId || null,
       feedExternalId: body.feedExternalId || "default",
@@ -66,15 +72,20 @@ export async function ingestProductFeedHandler(req, res, next) {
   }
 }
 
+/**
+ * The body is validated before any service call: clientId and productId are required, status
+ * is the ClientProductAssignmentStatus enum (default ACTIVE), and only these four fields reach
+ * the service. Service guard failures (product, publishability, campaign assignment ownership)
+ * keep the existing 409 contract.
+ */
 export async function assignClientProductHandler(req, res, next) {
   try {
-    const { clientId, productId, clientCampaignAssignmentId, status } = req.body || {};
-    if (!clientId || !productId) throw fail("clientId and productId are required.", 400);
+    const body = parseClientProductAssignBody(req.body);
     const result = await clientProducts.assignProductToClient({
-      clientId,
-      productId,
-      clientCampaignAssignmentId: clientCampaignAssignmentId || null,
-      status: status || "ACTIVE",
+      clientId: body.clientId,
+      productId: body.productId,
+      clientCampaignAssignmentId: body.clientCampaignAssignmentId ?? null,
+      status: body.status,
     });
     if (!result.ok) throw fail(result.reason || "assign_failed", 409);
     res.status(201).json(ok(result));

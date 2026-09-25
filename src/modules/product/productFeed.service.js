@@ -500,6 +500,24 @@ export class ClientProductService {
       return { ok: false, reason: "product_not_publishable", feedStatus: product.feedStatus };
     }
 
+    // Campaign assignment ownership: a ClientCampaignAssignment supplied with the request must
+    // exist and belong to the same client. The FK alone only proves the id exists, so without
+    // this check a product could be linked to another tenant's campaign assignment, and the
+    // ProductTrackingLink created below would carry that cross-tenant reference. Checked before
+    // any ClientProductAssignment or ProductTrackingLink write, on the create and update paths.
+    if (clientCampaignAssignmentId != null) {
+      const campaignAssignment = await db.clientCampaignAssignment.findUnique({
+        where: { id: clientCampaignAssignmentId },
+        select: { id: true, clientId: true },
+      });
+      if (!campaignAssignment) {
+        return { ok: false, reason: "campaign_assignment_not_found" };
+      }
+      if (campaignAssignment.clientId !== clientId) {
+        return { ok: false, reason: "campaign_assignment_client_mismatch" };
+      }
+    }
+
     let assignment = await db.clientProductAssignment.findUnique({
       where: { clientId_productId: { clientId, productId } },
     });
