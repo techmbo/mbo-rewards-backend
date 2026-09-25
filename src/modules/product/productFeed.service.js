@@ -542,6 +542,22 @@ export class ClientProductService {
       });
     }
 
+    // Tracking-link state follows the final assignment row, not the raw request: an omitted
+    // campaign id keeps the assignment's existing one, and the link must agree with whatever the
+    // row now says.
+    const effectiveCampaignAssignmentId = assignment.clientCampaignAssignmentId ?? null;
+
+    if (assignment.status !== "ACTIVE") {
+      // PAUSED / EXPIRED: an unpublished assignment must not keep a live redirect. Revoke every
+      // ACTIVE link for this client + product (same semantics as unassignProduct) and mint
+      // nothing; a later reactivation gets a fresh token, so distributed revoked URLs stay dead.
+      await db.productTrackingLink.updateMany({
+        where: { clientId, productId, status: "ACTIVE" },
+        data: { status: "REVOKED" },
+      });
+      return { ok: true, assignment, trackingLink: null };
+    }
+
     let link = await db.productTrackingLink.findFirst({
       where: { clientId, productId, status: "ACTIVE" },
     });
@@ -553,11 +569,26 @@ export class ClientProductService {
           clientId,
           productId,
           clientProductAssignmentId: assignment.id,
-          clientCampaignAssignmentId,
+          clientCampaignAssignmentId: effectiveCampaignAssignmentId,
           token,
           supplierProductTrackingUrl: trackingTarget,
           mboProductTrackingUrl,
           status: "ACTIVE",
+        },
+      });
+    } else if (
+      link.clientProductAssignmentId !== assignment.id ||
+      (link.clientCampaignAssignmentId ?? null) !== effectiveCampaignAssignmentId
+    ) {
+      // Same-client campaign reassignment (or a link left pointing at a stale assignment row):
+      // repair the relational metadata in place. The token and MBO URL are the client-facing
+      // identity of the link and stay unchanged, so already-distributed URLs keep working and
+      // the redirect attributes clicks to the campaign assignment the row now names.
+      link = await db.productTrackingLink.update({
+        where: { id: link.id },
+        data: {
+          clientProductAssignmentId: assignment.id,
+          clientCampaignAssignmentId: effectiveCampaignAssignmentId,
         },
       });
     }

@@ -118,7 +118,7 @@ function assertValidation400(status, json) {
 // ─── service-level Prisma double ────────────────────────────────────────────────────────────
 
 function makeServiceDb({ products = {}, campaignAssignments = {}, existingAssignments = {} } = {}) {
-  const writes = { assignmentCreate: 0, assignmentUpdate: 0, linkCreate: 0 };
+  const writes = { assignmentCreate: 0, assignmentUpdate: 0, linkCreate: 0, linkUpdate: 0, linkRevoke: 0 };
   const assignments = new Map(Object.entries(existingAssignments));
   const links = new Map();
   const db = {
@@ -158,6 +158,23 @@ function makeServiceDb({ products = {}, campaignAssignments = {}, existingAssign
         const row = { id: `ptl-${links.size + 1}`, ...data };
         links.set(row.id, row);
         return row;
+      },
+      async update({ where, data }) {
+        writes.linkUpdate += 1;
+        const row = { ...links.get(where.id), ...data };
+        links.set(where.id, row);
+        return row;
+      },
+      async updateMany({ where, data }) {
+        let count = 0;
+        for (const [id, l] of links) {
+          if (l.clientId === where.clientId && l.productId === where.productId && l.status === where.status) {
+            links.set(id, { ...l, ...data });
+            count += 1;
+          }
+        }
+        writes.linkRevoke += count;
+        return { count };
       },
     },
   };
@@ -506,14 +523,14 @@ describe("product write integrity — ClientProductService.assignProductToClient
     assert.equal(result.ok, true);
     assert.equal(result.assignment.clientCampaignAssignmentId, "asg-a");
     assert.equal(result.trackingLink.clientCampaignAssignmentId, "asg-a");
-    assert.deepEqual(db.writes, { assignmentCreate: 1, assignmentUpdate: 0, linkCreate: 1 });
+    assert.deepEqual(db.writes, { assignmentCreate: 1, assignmentUpdate: 0, linkCreate: 1, linkUpdate: 0, linkRevoke: 0 });
   });
 
   it("22. campaign assignment does not exist -> no assignment or link writes", async () => {
     const db = makeServiceDb({ products: { "prod-1": PUBLISHABLE }, campaignAssignments: { "asg-a": CAMPAIGN_A } });
     const result = await makeService(db).assignProductToClient({ clientId: "client-a", productId: "prod-1", clientCampaignAssignmentId: "asg-missing" });
     assert.equal(result.ok, false);
-    assert.deepEqual(db.writes, { assignmentCreate: 0, assignmentUpdate: 0, linkCreate: 0 });
+    assert.deepEqual(db.writes, { assignmentCreate: 0, assignmentUpdate: 0, linkCreate: 0, linkUpdate: 0, linkRevoke: 0 });
     assert.equal(db.assignments.size, 0);
     assert.equal(db.links.size, 0);
   });
@@ -522,7 +539,7 @@ describe("product write integrity — ClientProductService.assignProductToClient
     const db = makeServiceDb({ products: { "prod-1": PUBLISHABLE }, campaignAssignments: { "asg-a": CAMPAIGN_A, "asg-b": CAMPAIGN_B } });
     const result = await makeService(db).assignProductToClient({ clientId: "client-a", productId: "prod-1", clientCampaignAssignmentId: "asg-b" });
     assert.equal(result.ok, false);
-    assert.deepEqual(db.writes, { assignmentCreate: 0, assignmentUpdate: 0, linkCreate: 0 });
+    assert.deepEqual(db.writes, { assignmentCreate: 0, assignmentUpdate: 0, linkCreate: 0, linkUpdate: 0, linkRevoke: 0 });
     assert.equal(db.assignments.size, 0);
     assert.equal(db.links.size, 0);
   });
@@ -548,7 +565,7 @@ describe("product write integrity — ClientProductService.assignProductToClient
     });
     const result = await makeService(db).assignProductToClient({ clientId: "client-a", productId: "prod-1", clientCampaignAssignmentId: "asg-b", status: "PAUSED" });
     assert.deepEqual(result, { ok: false, reason: "campaign_assignment_client_mismatch" });
-    assert.deepEqual(db.writes, { assignmentCreate: 0, assignmentUpdate: 0, linkCreate: 0 });
+    assert.deepEqual(db.writes, { assignmentCreate: 0, assignmentUpdate: 0, linkCreate: 0, linkUpdate: 0, linkRevoke: 0 });
     assert.equal(db.assignments.get("cpa-1").clientCampaignAssignmentId, "asg-a");
     assert.equal(db.assignments.get("cpa-1").status, "ACTIVE");
   });
@@ -558,7 +575,9 @@ describe("product write integrity — ClientProductService.assignProductToClient
     const db = makeServiceDb({ products: { "prod-1": PUBLISHABLE }, campaignAssignments: { "asg-a": CAMPAIGN_A }, existingAssignments: { "cpa-1": existing } });
     const result = await makeService(db).assignProductToClient({ clientId: "client-a", productId: "prod-1", clientCampaignAssignmentId: "asg-a", status: "PAUSED" });
     assert.equal(result.ok, true);
-    assert.deepEqual(db.writes, { assignmentCreate: 0, assignmentUpdate: 1, linkCreate: 1 });
+    // PAUSED publishes nothing: no link is minted, any ACTIVE link is revoked, trackingLink is null.
+    assert.deepEqual(db.writes, { assignmentCreate: 0, assignmentUpdate: 1, linkCreate: 0, linkUpdate: 0, linkRevoke: 0 });
+    assert.equal(result.trackingLink, null);
     assert.equal(db.assignments.get("cpa-1").status, "PAUSED");
   });
 
@@ -572,7 +591,7 @@ describe("product write integrity — ClientProductService.assignProductToClient
     const notPublishable = await svc.assignProductToClient({ clientId: "client-a", productId: "prod-nr", clientCampaignAssignmentId: "asg-b" });
     assert.equal(notPublishable.reason, "product_not_publishable");
     assert.deepEqual(lookups, []);
-    assert.deepEqual(db.writes, { assignmentCreate: 0, assignmentUpdate: 0, linkCreate: 0 });
+    assert.deepEqual(db.writes, { assignmentCreate: 0, assignmentUpdate: 0, linkCreate: 0, linkUpdate: 0, linkRevoke: 0 });
   });
 
   it("regression: no clientCampaignAssignmentId -> behaves exactly as before (no campaign lookup, assignment + link written)", async () => {
@@ -585,7 +604,7 @@ describe("product write integrity — ClientProductService.assignProductToClient
     assert.equal(result.assignment.status, "ACTIVE");
     assert.ok(result.trackingLink.mboProductTrackingUrl.includes("/t/product/"));
     assert.deepEqual(lookups, []);
-    assert.deepEqual(db.writes, { assignmentCreate: 1, assignmentUpdate: 0, linkCreate: 1 });
+    assert.deepEqual(db.writes, { assignmentCreate: 1, assignmentUpdate: 0, linkCreate: 1, linkUpdate: 0, linkRevoke: 0 });
     const explicitNull = makeServiceDb({ products: { "prod-1": PUBLISHABLE } });
     explicitNull.clientCampaignAssignment.findUnique = async (args) => { lookups.push(args); return null; };
     const nullResult = await makeService(explicitNull).assignProductToClient({ clientId: "client-a", productId: "prod-1", clientCampaignAssignmentId: null });
