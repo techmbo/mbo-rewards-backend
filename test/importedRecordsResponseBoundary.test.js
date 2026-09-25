@@ -215,6 +215,11 @@ function matchValue(value, cond) {
   if ("endsWith" in cond && !(typeof v === "string" && v.endsWith(norm(cond.endsWith)))) return false;
   if ("in" in cond && !cond.in.map(norm).includes(v)) return false;
   if ("not" in cond && matchValue(value, cond.not)) return false;
+  const ts = (x) => (x instanceof Date ? x.getTime() : typeof x === "string" && /^\d{4}-\d{2}-\d{2}/.test(x) ? Date.parse(x) : x);
+  if ("gte" in cond && !(ts(value) >= ts(cond.gte))) return false;
+  if ("lte" in cond && !(ts(value) <= ts(cond.lte))) return false;
+  if ("gt" in cond && !(ts(value) > ts(cond.gt))) return false;
+  if ("lt" in cond && !(ts(value) < ts(cond.lt))) return false;
   return true;
 }
 function matchWhere(obj, where = {}) {
@@ -250,21 +255,34 @@ const fakeDb = {
     },
     count: async (args) => Object.values(ENTITIES).filter((e) => matchWhere(e, args?.where)).length,
     findUnique: async ({ where }) => ENTITIES[where.id] ?? null,
-    groupBy: async ({ by }) =>
-      by.includes("networkSource")
-        ? [{ networkSource: "optimise", entityType: "campaign", _count: 1 }]
-        : [
-            { entityType: "campaign", _count: 10 },
-            { entityType: "coupon", _count: 20 },
-            { entityType: "commission_rule", _count: 5 },
-            { entityType: "payment", _count: 777 },
-            { entityType: "conversion", _count: 888 },
-            { entityType: "performance", _count: 999 },
-          ],
+    // Evaluates `where` and groups for real, so the summary's counts reflect the fixture.
+    groupBy: async ({ by, where }) => {
+      dbCalls.push({ op: "entity.groupBy", where });
+      const groups = new Map();
+      for (const e of Object.values(ENTITIES).filter((row) => matchWhere(row, where))) {
+        const key = JSON.stringify(by.map((k) => e[k]));
+        const g = groups.get(key) ?? Object.fromEntries([...by.map((k) => [k, e[k]]), ["_count", 0]]);
+        g._count += 1;
+        groups.set(key, g);
+      }
+      return [...groups.values()];
+    },
   },
-  mapperError: { count: async () => 1 },
-  supplierCampaign: { count: async () => 4, findMany: async () => [], groupBy: async () => [] },
-  campaignSource: { count: async () => 3, groupBy: async () => [] },
+  mapperError: {
+    // Counts the fixture entities' mapper errors, honouring the `entity` relation filter.
+    count: async ({ where } = {}) => {
+      const { entity: entityWhere, ...rest } = where || {};
+      const rows = Object.values(ENTITIES).filter((e) => !entityWhere || matchWhere(e, entityWhere));
+      return rows.reduce((n, e) => n + (e.mapperErrors || []).filter((m) => matchWhere(m, rest)).length, 0);
+    },
+  },
+  // Hidden-type sentinels: staged objects the summary must never count, not even to drop later.
+  get supplierCampaign() {
+    throw new Error("summary must not touch prisma.supplierCampaign");
+  },
+  get campaignSource() {
+    throw new Error("summary must not touch prisma.campaignSource");
+  },
 };
 
 // Route the controller's module-level service through the fake DB, keeping the real methods (and
@@ -660,11 +678,25 @@ describe("imported-records: summary / columns / facets", () => {
     const admin = await call("/ops/imported-records/summary?recordType=campaign", "ADMIN");
     assert.equal(admin.status, 200);
     assert.equal(admin.cacheControl, "no-store");
-    assert.deepEqual(Object.keys(admin.body.data.recordTypeCounts).sort(), ["campaign", "commission_group", "commission_rule", "coupon"]);
-    for (const n of ["777", "888", "999"]) assert.ok(!admin.text.includes(n), `count ${n} of a hidden type leaked`);
+    // Cross-type first-release inventory (real fixture counts); performance / conversion / payment
+    // rows exist in the fixture but are never counted.
+    assert.deepEqual(admin.body.data.recordTypeCounts, { campaign: 1, coupon: 3, commission_rule: 1, commission_group: 1 });
+    assert.ok(!("performance" in admin.body.data.recordTypeCounts) && !("payment" in admin.body.data.recordTypeCounts));
+    // Selected-type aggregates: only the campaign's own open mapper error, only campaign rows per network.
+    assert.equal(admin.body.data.importedRecords, 1);
+    assert.equal(admin.body.data.mappingErrors, 1);
+    assert.equal(admin.body.data.importedCampaigns, 1);
+    assert.deepEqual(admin.body.data.byNetwork, [{ network: "Optimise", networkSource: "optimise", importedRecords: 1 }]);
+    for (const k of ["normalizedCampaigns", "promotedSupplierCampaigns", "linkedCampaigns", "unlinkedCampaigns"]) assert.equal(admin.body.data[k], null, k);
+    const coupon = await call("/ops/imported-records/summary?recordType=coupon", "ADMIN");
+    assert.equal(coupon.body.data.importedRecords, 3);
+    assert.equal(coupon.body.data.mappingErrors, 3);
+    assert.equal(coupon.body.data.importedCampaigns, null);
     const tech = await call("/ops/imported-records/summary?recordType=campaign", "TECH");
     assert.deepEqual(Object.keys(tech.body.data.recordTypeCounts), ["campaign"]);
     assert.deepEqual(tech.body.data.supportedRecordTypes, ["campaign"]);
+    // A campaigns-only caller never receives the coupon rows' mapper errors in the count.
+    assert.equal(tech.body.data.mappingErrors, 1);
   });
 
   it("columns only advertise fields the endpoint can return", async () => {

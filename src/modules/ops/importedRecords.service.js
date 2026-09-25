@@ -71,7 +71,45 @@ import {
   resolveDisplayedCampaignStatus,
   isNotAppliedCampaignStatus,
   notAppliedEntityWhere,
+  networkFilterValue,
 } from "./importedRecords.filters.js";
+
+/**
+ * Record types the summary aggregates over (Network Operations → All Network Data, first release).
+ * Performance / conversion / payment / product staged objects have their own gated pages and are
+ * never counted here — not even to be dropped later.
+ */
+const SUMMARY_RECORD_TYPES = Object.freeze(["campaign", "coupon", "commission_rule", "commission_group"]);
+
+/**
+ * The NEEDS_REVIEW predicate: no open mapper error and not yet mapped (campaign without a
+ * merchant-linked active CampaignSource, coupon without a SupplierCoupon, or a performance row).
+ * Shared by the mappingStatus / preset filter in buildWhere and by summary(), which AND-s it onto
+ * the caller's own filters instead of replacing them. Pure: returns a fresh object each call.
+ */
+function needsReviewWhere() {
+  return {
+    mapperErrors: { none: { status: "OPEN" } },
+    OR: [
+      {
+        entityType: "campaign",
+        NOT: {
+          supplierCampaigns: {
+            some: {
+              merchantId: { not: null },
+              campaignSources: { some: { isActive: true } },
+            },
+          },
+        },
+      },
+      {
+        entityType: "coupon",
+        supplierCoupons: { none: {} },
+      },
+      { entityType: "performance" },
+    ],
+  };
+}
 
 function parsePage(query) {
   const page = Math.max(1, Number(query.page) || 1);
@@ -262,27 +300,7 @@ function buildWhere(filters = {}) {
     filters.preset === "needs_review" ||
     filters.preset === "imported_not_normalized"
   ) {
-    and.push({
-      mapperErrors: { none: { status: "OPEN" } },
-      OR: [
-        {
-          entityType: "campaign",
-          NOT: {
-            supplierCampaigns: {
-              some: {
-                merchantId: { not: null },
-                campaignSources: { some: { isActive: true } },
-              },
-            },
-          },
-        },
-        {
-          entityType: "coupon",
-          supplierCoupons: { none: {} },
-        },
-        { entityType: "performance" },
-      ],
-    });
+    and.push(needsReviewWhere());
   } else if (filters.mappingStatus === MAPPING_STATUS.NOT_AVAILABLE) {
     and.push({ entityType: "performance" });
   }
@@ -2086,126 +2104,84 @@ export class ImportedRecordsService {
     }
   }
 
+  /**
+   * Aggregates for the SELECTED source record type under the caller's list filters.
+   *
+   * - importedRecords, mappingErrors, needsReview and byNetwork all derive from the same
+   *   buildWhere(filters) predicate the list uses, so they agree with the list total.
+   * - recordTypeCounts is the cross-type first-release inventory, scoped only by network and
+   *   import date (never by the selected type or row-level filters).
+   * - The legacy campaign keys stay in the shape for the controller but no longer carry global,
+   *   canonical-layer counts: importedCampaigns mirrors importedRecords for campaign, the rest are
+   *   null (the controller projects non-numbers as null).
+   *
+   * Five queries for campaign / coupon, four for the commission types (no needs-review semantic
+   * exists for them yet, so needsReview is null rather than a false 0).
+   */
   async summary(filters = {}) {
-    const baseWhere = buildWhere({
-      networkSource: filters.networkSource,
-      recordType: filters.recordType,
-      fromDate: filters.fromDate,
-      toDate: filters.toDate,
-    });
+    const requestedType = filters.recordType || filters.entityType;
+    const recordType = requestedType ? normalizeRecordTypeForApi(requestedType) : null;
+    const baseWhere = buildWhere(filters);
+    const inventoryWhere = {
+      ...buildWhere({
+        networkSource: filters.networkSource,
+        fromDate: filters.fromDate,
+        toDate: filters.toDate,
+      }),
+      entityType: { in: [...SUMMARY_RECORD_TYPES] },
+    };
+    const hasNeedsReview = recordType === "campaign" || recordType === "coupon";
 
-    const [
-      importedRecords,
-      openErrors,
-      promotedCampaigns,
-      linkedCampaigns,
-      campaignImported,
-      types,
-      byNetwork,
-    ] = await Promise.all([
+    const [importedRecords, openErrors, types, byNetworkRows, needsReview] = await Promise.all([
       this.db.entity.count({ where: baseWhere }),
-      this.db.mapperError.count({
-        where: {
-          status: "OPEN",
-          ...(filters.networkSource
-            ? {
-                entity: buildWhere({ networkSource: filters.networkSource }),
-              }
-            : {}),
-        },
-      }),
-      this.db.supplierCampaign.count(),
-      this.db.campaignSource.count({ where: { isActive: true } }),
-      this.db.entity.count({
-        where: { ...baseWhere, entityType: "campaign" },
-      }),
-      this.db.entity.groupBy({
-        by: ["entityType"],
-        where: baseWhere,
-        _count: true,
-      }),
-      this.db.entity.groupBy({
-        by: ["networkSource", "entityType"],
-        where: { entityType: "campaign" },
-        _count: true,
-      }),
+      // Only errors whose staged record matches the same predicate: selected type, network,
+      // dates and every other list filter. Commission types have no mapper-error writer → 0.
+      this.db.mapperError.count({ where: { status: "OPEN", entity: baseWhere } }),
+      this.db.entity.groupBy({ by: ["entityType"], where: inventoryWhere, _count: true }),
+      this.db.entity.groupBy({ by: ["networkSource"], where: baseWhere, _count: true }),
+      hasNeedsReview
+        ? this.db.entity.count({ where: { AND: [baseWhere, needsReviewWhere()] } })
+        : Promise.resolve(null),
     ]);
 
-    const needsReview = await this.db.entity.count({
-      where: buildWhere({
-        ...filters,
-        preset: "needs_review",
-      }),
-    });
+    const groupCount = (row) =>
+      typeof row?._count === "number" ? row._count : Number(row?._count?._all ?? 0) || 0;
 
-    const networkMetrics = {};
-    for (const row of byNetwork) {
-      const label = displayNetwork(row.networkSource) || row.networkSource;
-      if (!networkMetrics[label]) {
-        networkMetrics[label] = {
-          network: label,
-          networkSource: row.networkSource,
-          importedCampaigns: 0,
-          linkedCampaigns: null,
-        };
-      }
-      networkMetrics[label].importedCampaigns += row._count;
+    // One row per canonical network: raw variants (optimise_sea / optimise_mena / optimise_uk,
+    // trackier / vcommission) collapse onto the same filter value the list accepts.
+    const networks = new Map();
+    for (const row of byNetworkRows) {
+      const raw = row?.networkSource == null ? "" : String(row.networkSource);
+      const key = networkFilterValue(raw) || raw;
+      const entry = networks.get(key) ?? {
+        network: displayNetwork(raw) || key,
+        networkSource: key,
+        importedRecords: 0,
+      };
+      entry.importedRecords += groupCount(row);
+      networks.set(key, entry);
     }
+    const byNetwork = [...networks.values()].sort(
+      (a, b) => b.importedRecords - a.importedRecords || a.network.localeCompare(b.network),
+    );
 
-    // Linked counts per supplier from CampaignSource → SupplierCampaign
-    const linkedBySupplier = await this.db.campaignSource.groupBy({
-      by: ["supplierCampaignId"],
-      where: { isActive: true },
-    });
-    const supplierIds = linkedBySupplier.map((r) => r.supplierCampaignId);
-    if (supplierIds.length) {
-      const linkedCampaignsRows = await this.db.supplierCampaign.findMany({
-        where: { id: { in: supplierIds } },
-        select: { id: true, supplier: true, supplierRegion: true },
-      });
-      const linkedCounts = {};
-      for (const sc of linkedCampaignsRows) {
-        const label =
-          sc.supplier === "OPTIMISE"
-            ? "Optimise"
-            : sc.supplier === "TRACKIER"
-              ? "Trackier"
-              : sc.supplier === "BOOSTINY"
-                ? "Boostiny"
-                : sc.supplier;
-        linkedCounts[label] = (linkedCounts[label] || 0) + 1;
-      }
-      for (const [label, metric] of Object.entries(networkMetrics)) {
-        metric.linkedCampaigns = linkedCounts[label] ?? 0;
-        metric.needsReview =
-          metric.importedCampaigns != null && metric.linkedCampaigns != null
-            ? Math.max(0, metric.importedCampaigns - metric.linkedCampaigns)
-            : null;
-      }
-    } else {
-      for (const metric of Object.values(networkMetrics)) {
-        metric.linkedCampaigns = 0;
-        metric.needsReview = metric.importedCampaigns;
-      }
+    const recordTypeCounts = Object.fromEntries(SUMMARY_RECORD_TYPES.map((type) => [type, 0]));
+    for (const row of types) {
+      if (Object.hasOwn(recordTypeCounts, row.entityType)) recordTypeCounts[row.entityType] += groupCount(row);
     }
 
     return {
       importedRecords,
-      normalizedCampaigns: linkedCampaigns,
-      promotedSupplierCampaigns: promotedCampaigns,
+      normalizedCampaigns: null,
+      promotedSupplierCampaigns: null,
       needsReview,
       mappingErrors: openErrors,
-      importedCampaigns: campaignImported,
-      linkedCampaigns,
-      unlinkedCampaigns:
-        campaignImported != null && linkedCampaigns != null
-          ? Math.max(0, campaignImported - linkedCampaigns)
-          : null,
-      recordTypeCounts: Object.fromEntries(
-        types.map((t) => [t.entityType, t._count]),
-      ),
-      byNetwork: Object.values(networkMetrics),
-      supportedRecordTypes: SUPPORTED_RECORD_TYPES,
+      importedCampaigns: recordType === "campaign" ? importedRecords : null,
+      linkedCampaigns: null,
+      unlinkedCampaigns: null,
+      recordTypeCounts,
+      byNetwork,
+      supportedRecordTypes: [...SUMMARY_RECORD_TYPES],
     };
   }
 
