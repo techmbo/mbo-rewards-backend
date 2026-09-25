@@ -1818,35 +1818,6 @@ const ENTITY_INCLUDE = {
   rawPayloads: { take: 1, orderBy: { fetchedAt: "desc" } },
 };
 
-const COUNT_CACHE_TTL_MS = 5 * 60 * 1000;
-const LIST_CACHE_TTL_MS = 5 * 60 * 1000;
-const countCache = new Map();
-const listCache = new Map();
-
-function countCacheKey(where) {
-  return JSON.stringify(where);
-}
-
-function listCacheKey(filters, page, pageSize) {
-  return JSON.stringify({ filters, page, pageSize });
-}
-
-export function invalidateImportedRecordsListCache() {
-  listCache.clear();
-  countCache.clear();
-}
-
-async function cachedEntityCount(db, where) {
-  const key = countCacheKey(where);
-  const hit = countCache.get(key);
-  if (hit && Date.now() - hit.at < COUNT_CACHE_TTL_MS) {
-    return hit.total;
-  }
-  const total = await db.entity.count({ where });
-  countCache.set(key, { total, at: Date.now() });
-  return total;
-}
-
 export class ImportedRecordsService {
   constructor(deps = {}) {
     this.db = deps.prisma ?? prisma;
@@ -1854,14 +1825,14 @@ export class ImportedRecordsService {
     this.normalization = deps.normalization ?? new CampaignNormalizationService();
   }
 
+  /**
+   * Every call reads the current database. There is deliberately no process-local cache here:
+   * a module-level Map lives inside ONE serverless instance, so an entry populated on one warm
+   * instance outlived every write made on another (sync, promotion, mapper-error retry,
+   * normalization) for its whole TTL, and no invalidation call from a writer could reach it.
+   */
   async list(filters = {}) {
     const { page, pageSize, skip } = parsePage(filters);
-    const cacheKey = listCacheKey(filters, page, pageSize);
-    const cached = listCache.get(cacheKey);
-    if (cached && Date.now() - cached.at < LIST_CACHE_TTL_MS) {
-      return cached.data;
-    }
-
     const where = buildWhere(filters);
     const groupByBrand =
       String(filters.groupBy || "").toLowerCase() === "brand" &&
@@ -1902,7 +1873,6 @@ export class ImportedRecordsService {
           hasMore: false,
           supportedRecordTypes: SUPPORTED_RECORD_TYPES,
         };
-        listCache.set(cacheKey, { data: empty, at: Date.now() });
         return empty;
       }
 
@@ -1940,7 +1910,6 @@ export class ImportedRecordsService {
         hasMore: skip + pageGroups.length < total,
         supportedRecordTypes: SUPPORTED_RECORD_TYPES,
       };
-      listCache.set(cacheKey, { data: result, at: Date.now() });
       return result;
     }
 
@@ -1949,7 +1918,7 @@ export class ImportedRecordsService {
     const querySkip = exactBoolFilter ? 0 : skip;
 
     const [totalRaw, rowsRaw] = await Promise.all([
-      cachedEntityCount(this.db, where),
+      this.db.entity.count({ where }),
       this.db.entity.findMany({
         where,
         include: ENTITY_LIST_INCLUDE,
@@ -1982,7 +1951,6 @@ export class ImportedRecordsService {
           ? "isAssignable filter uses CSV rule: ACTIVE + JOINED/APPROVED + channel + commission."
           : "mboReady filter uses deriveMboReady (not inventable).",
       };
-      listCache.set(cacheKey, { data: result, at: Date.now() });
       return result;
     }
 
@@ -1994,7 +1962,6 @@ export class ImportedRecordsService {
       hasMore: skip + mapped.length < totalRaw,
       supportedRecordTypes: SUPPORTED_RECORD_TYPES,
     };
-    listCache.set(cacheKey, { data: result, at: Date.now() });
     return result;
   }
 
@@ -2237,7 +2204,6 @@ export class ImportedRecordsService {
     if (!entityIds?.length && !networkSource) {
       throw fail("entityIds or networkSource is required for reprocess.", 400);
     }
-    invalidateImportedRecordsListCache();
     return this.promotionJob.run({
       entityIds,
       networkSource,

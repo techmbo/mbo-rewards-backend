@@ -15,7 +15,7 @@ process.env.LOG_LEVEL = "silent";
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
-const { ImportedRecordsService, invalidateImportedRecordsListCache } = await import("../src/modules/ops/importedRecords.service.js");
+const { ImportedRecordsService } = await import("../src/modules/ops/importedRecords.service.js");
 
 // ── where evaluator ──────────────────────────────────────────────────────────
 const OPERATORS = new Set(["equals", "contains", "startsWith", "endsWith", "in", "not", "mode", "gte", "lte", "gt", "lt", "has", "hasSome", "hasEvery", "isEmpty"]);
@@ -207,7 +207,6 @@ let db;
 let calls;
 let service;
 beforeEach(() => {
-  invalidateImportedRecordsListCache(); // the list/count cache is module-level and keyed by filters only
   ({ db, calls } = makeDb(FIXTURE));
   service = new ImportedRecordsService({ prisma: db, promotionJob: {}, normalization: {} });
 });
@@ -495,7 +494,6 @@ const V_CAMPAIGN_ERROR = ent("v2", "campaign", "vcommission", { advertiserName: 
 const V_COUPON_MAPPED = ent("vk1", "coupon", "vcommission", { supplierCoupons: [{ id: "cp-vk1", couponCode: "VC10", couponStatus: "ACTIVE", supplierCampaign: sc("vk1", { supplier: "TRACKIER" }) }] });
 const TRACKIER_FAMILY = ["trackier", "vcommission"];
 const withRows = (rows, opts) => {
-  invalidateImportedRecordsListCache(); // fixtures differ per test; never serve another fixture's cached total
   const made = makeDb(rows, opts);
   return { ...made, service: new ImportedRecordsService({ prisma: made.db, promotionJob: {}, normalization: {} }) };
 };
@@ -777,8 +775,8 @@ describe("date filters: invalid inputs → 400 before any Prisma operation", () 
   });
 });
 
-describe("date filters: an invalid request never touches the list cache", () => {
-  it("invalid list → 400; the following valid list runs its own count + findMany and returns the right total; the repeat is served from cache", async () => {
+describe("date filters: an invalid request never touches the database", () => {
+  it("invalid list → 400 with no DB call; the following valid list runs count + findMany; the identical repeat queries again (no process-local cache)", async () => {
     const { service: svc, calls } = withRows(FIXTURE);
     const valid = { recordType: "campaign", networkSource: "optimise", page: 1, pageSize: 25 };
     calls.length = 0;
@@ -791,8 +789,9 @@ describe("date filters: an invalid request never touches the list cache", () => 
     calls.length = 0;
     const second = await svc.list(valid);
     assert.equal(second.total, 3);
-    assert.deepEqual(calls, [], "identical valid request is a cache hit (cache works normally after the rejected call)");
-    // and the invalid variant is still rejected afterwards — nothing was cached under it
+    assert.deepEqual([...calls].sort(), ["entity.count", "entity.findMany"], "identical valid request reads the database again");
+    calls.length = 0;
+    // and the invalid variant is still rejected afterwards, still without reaching the database
     await assert.rejects(svc.list({ ...valid, fromDate: "bad" }), isDateFilterError("Invalid fromDate."));
     assert.deepEqual(calls, []);
   });

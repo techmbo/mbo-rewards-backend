@@ -3,7 +3,7 @@
  *
  * Drives the real controller handlers through real Express routing, behind the same route guard
  * as production (requirePermission(campaigns:read)). The service runs its real list / detail /
- * summary code — toListRow, toDetailDto, the shared list cache — over a fake Prisma whose rows
+ * summary code — toListRow, toDetailDto — over a fake Prisma whose rows
  * carry sentinel values in every raw / URL / id / money / error position.
  */
 process.env.BACKEND_URL = process.env.BACKEND_URL || "https://backend.test";
@@ -296,8 +296,7 @@ const fakeDb = {
   },
 };
 
-// Route the controller's module-level service through the fake DB, keeping the real methods (and
-// the real module-level list cache).
+// Route the controller's module-level service through the fake DB, keeping the real methods.
 const realService = new ImportedRecordsService({ prisma: fakeDb, promotionJob: {}, normalization: {} });
 const proto = ImportedRecordsService.prototype;
 const original = { list: proto.list, getById: proto.getById, summary: proto.summary };
@@ -546,20 +545,33 @@ describe("imported-records: detail response boundary", () => {
   });
 });
 
-describe("imported-records: shared cache", () => {
-  it("a privileged caller first, a restricted caller second: same cached rows, nothing extra leaks", async () => {
+describe("imported-records: role boundary across consecutive callers", () => {
+  it("a privileged caller first, a restricted caller second: identical projected rows, nothing extra leaks", async () => {
     const path = "/ops/imported-records?recordType=campaign&q=EXT-1";
-    const callsBefore = dbCalls.length;
     const admin = await call(path, "ADMIN");
-    const afterFirst = dbCalls.length;
     const tech = await call(path, "TECH");
-    assert.equal(dbCalls.length, afterFirst, "second call is served from the shared cache");
-    assert.ok(afterFirst > callsBefore);
+    assert.equal(admin.status, 200);
+    assert.equal(tech.status, 200);
     assert.equal(admin.text, tech.text, "identical projected output for both callers");
-    assertNoLeak(tech.text, "cached");
-    // And the cached object itself was not mutated by projection.
+    assertNoLeak(admin.text, "privileged");
+    assertNoLeak(tech.text, "restricted");
+    // Projection never mutates what the service returns: the service rows still carry the raw
+    // tracking sentinel, the HTTP body never does.
     const rawAgain = JSON.stringify(await original.list.call(realService, { ...controllerFilters(path), recordType: "campaign" }));
-    assert.ok(rawAgain.includes("track.sentinel.example"), "cache still holds the unprojected service rows");
+    assert.ok(rawAgain.includes("track.sentinel.example"), "service rows are unprojected");
+  });
+});
+
+describe("imported-records: freshness", () => {
+  it("repeated identical list requests query the database again (no process-local cache)", async () => {
+    const path = "/ops/imported-records?recordType=campaign&q=EXT-1";
+    const before = dbCalls.filter((c) => c.op === "entity.findMany").length;
+    await call(path, "ADMIN");
+    const afterFirst = dbCalls.filter((c) => c.op === "entity.findMany").length;
+    await call(path, "ADMIN");
+    const afterSecond = dbCalls.filter((c) => c.op === "entity.findMany").length;
+    assert.equal(afterFirst, before + 1, "first request reads the database");
+    assert.equal(afterSecond, afterFirst + 1, "second identical request reads the database again");
   });
 });
 
