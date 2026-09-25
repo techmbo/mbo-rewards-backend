@@ -16,6 +16,8 @@ describe("PromotionJob retry", () => {
           throw new Error("findMany should not be called when ids are provided");
         },
         updateStatus: async () => ({}),
+        claimForRetry: async () => true,
+        finishRetry: async () => true,
       },
       entityRepo: {
         findById: async (id) => ({

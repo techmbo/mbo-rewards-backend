@@ -876,6 +876,12 @@ model MapperError {
   attempts      Int               @default(0)
   createdAt     DateTime          @default(now())
   resolvedAt    DateTime?
+  /// Lease clock for RETRYING. Set by a conditional retry claim and cleared by the retry job's
+  /// conditional final write. Only RETRYING rows read it: a RETRYING row whose lease is older than
+  /// the retry lease (or null, for rows left by code that predates the column) is stale and may be
+  /// reclaimed by the next automatic retry. Other status writers may leave a stale value behind on
+  /// a non-RETRYING row; that value is inert.
+  retryStartedAt DateTime?
 
   @@index([status, createdAt])
   @@index([entityId])

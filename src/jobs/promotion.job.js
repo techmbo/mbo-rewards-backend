@@ -18,6 +18,8 @@ import {
   OFFER_NETWORK_SOURCE,
   PROMOTION_PAGE_SIZE,
 } from "./promotionUnit.js";
+import { DEFAULT_LEASE_MS } from "./syncAccountLock.service.js";
+import { logger } from "../platform/logging/logger.js";
 
 function emptySummary() {
   return {
@@ -30,7 +32,31 @@ function emptySummary() {
     merchantMatched: 0,
     merchantNeedsReview: 0,
     catalogLinked: 0,
+    // Retry only. `recovered`: a thrown retry whose row this job moved RETRYING -> OPEN.
+    // `reclaimedStale`: a RETRYING row whose lease had expired and was claimed again.
+    recovered: 0,
+    reclaimedStale: 0,
   };
+}
+
+/**
+ * How long a MapperError may sit in RETRYING before an automatic retry may reclaim it.
+ *
+ * A retry runs synchronously inside one serverless invocation, and the repository assumes a hard
+ * ceiling of ~300 s for that invocation. The lease must outlive the longest invocation that could
+ * legitimately still be working the row, so 5 minutes is too tight: an invocation that approaches
+ * the cap would have its row stolen while it is still running. The durable sync worker already
+ * settled this at 10 minutes (`DEFAULT_LEASE_MS`, "longer than a serverless invocation can live"),
+ * and the same constant is reused here so there is exactly one lease length to reason about.
+ */
+export const MAPPER_ERROR_RETRY_LEASE_MS = DEFAULT_LEASE_MS;
+
+/** The statuses an explicit retry (operator-selected ids) may claim. Nothing else re-enters. */
+const EXPLICIT_RETRY_CLAIMABLE = new Set(["OPEN", "RETRYING"]);
+
+/** A safe error code for logs: never the message, never the stack. */
+function errorCodeOf(error) {
+  return error?.code ?? error?.name ?? "Error";
 }
 
 function accumulate(summary, result) {
@@ -128,6 +154,7 @@ export class PromotionJob {
     // The PER-OFFER Rakuten commission writer. The hook above is the legacy whole-sweep call and
     // stays exactly as it was for run(); a bounded offer page promotes one offer at a time.
     this.rakutenOfferPromotion = deps.rakutenOfferPromotion ?? new RakutenCommissionPersistenceService();
+    this.now = deps.now ?? (() => new Date());
   }
 
   /**
@@ -286,41 +313,141 @@ export class PromotionJob {
     return { result: "skipped" };
   }
 
+  /**
+   * Retry mapper errors, one conditional claim per row.
+   *
+   * Explicit ids: OPEN and RETRYING are claimable (RETRYING regardless of lease age, because the
+   * operator selected it). RESOLVED and DISCARDED are skipped untouched: re-promoting a resolved
+   * entity belongs to /promotion/run, not to mapper-error retry. Unknown ids are ignored as before.
+   *
+   * No ids: OPEN rows plus RETRYING rows whose lease expired (or was never set), never a fresh
+   * RETRYING row that another invocation may still be working.
+   *
+   * Every status write after the claim is conditional on the row still being RETRYING, so a final
+   * write never overwrites what the promotion service or a concurrent writer already decided. A
+   * throw inside one target is recovered (RETRYING -> OPEN when still RETRYING) and the batch
+   * continues. A hard termination cannot be caught; the lease is what makes that row reclaimable.
+   */
   async retryFailed({ mapperErrorIds, limit = PROMOTION_BATCH_SIZE } = {}) {
     const startedAt = Date.now();
     const summary = emptySummary();
+    const explicit = Boolean(mapperErrorIds?.length);
+    const staleBefore = new Date(this.now().getTime() - MAPPER_ERROR_RETRY_LEASE_MS);
 
-    const targets = mapperErrorIds?.length
+    const targets = explicit
       ? await this.mapperErrorRepo.findByIds(mapperErrorIds)
-      : (
-          await this.mapperErrorRepo.findMany({ status: "OPEN" }, { skip: 0, take: limit })
-        ).rows;
+      : await this.mapperErrorRepo.findRetryTargets({ staleBefore, take: limit });
 
     for (const mapperError of targets) {
-      await this.mapperErrorRepo.updateStatus(mapperError.id, "RETRYING");
-
-      const entity = await this.entityRepo.findById(mapperError.entityId);
-      if (!entity) {
-        await this.mapperErrorRepo.updateStatus(mapperError.id, "DISCARDED", {
-          message: "Source Entity no longer exists",
-        });
-        summary.failed += 1;
-        summary.processed += 1;
+      // eslint-disable-next-line no-await-in-loop
+      const claim = await this.claimRetryTarget(mapperError, { explicit, staleBefore });
+      if (!claim.claimed) {
+        summary.skipped += 1;
         continue;
       }
-
-      const result = await this.promoteEntity(entity);
-      accumulate(summary, result);
-
-      if (result.result !== "failed") {
-        await this.mapperErrorRepo.updateStatus(mapperError.id, "RESOLVED");
-      } else {
-        await this.mapperErrorRepo.updateStatus(mapperError.id, "OPEN");
+      if (claim.reclaimedStale) {
+        summary.reclaimedStale += 1;
+        logger.warn(
+          { mapperErrorId: mapperError.id, entityId: mapperError.entityId },
+          "stale RETRYING mapper error reclaimed for retry",
+        );
       }
+
+      // eslint-disable-next-line no-await-in-loop
+      await this.runClaimedRetry(mapperError, summary);
     }
 
     summary.durationMs = Date.now() - startedAt;
     return summary;
+  }
+
+  /**
+   * The compare-and-set that decides whether this invocation owns the row. Exactly one of two
+   * racing callers gets `claimed: true`; the other counts a skip and never promotes.
+   */
+  async claimRetryTarget(mapperError, { explicit, staleBefore }) {
+    const status = mapperError.status;
+    // RESOLVED and DISCARDED never re-enter the retry path, explicit or not.
+    if (!EXPLICIT_RETRY_CLAIMABLE.has(status)) return { claimed: false, reclaimedStale: false };
+
+    const now = this.now();
+    if (status === "OPEN") {
+      const claimed = await this.mapperErrorRepo.claimForRetry(mapperError.id, { from: "OPEN", now });
+      return { claimed, reclaimedStale: false };
+    }
+
+    // RETRYING. An operator-selected id is an intentional override and may be claimed at any
+    // lease age; the automatic path may only take a row whose lease has expired or was never set.
+    if (explicit) {
+      const claimed = await this.mapperErrorRepo.claimForRetry(mapperError.id, { from: "RETRYING", now });
+      return { claimed, reclaimedStale: false };
+    }
+    const claimed = await this.mapperErrorRepo.claimForRetry(mapperError.id, {
+      from: "RETRYING",
+      now,
+      staleBefore,
+    });
+    return { claimed, reclaimedStale: claimed };
+  }
+
+  /**
+   * One claimed row, from lookup to final status. Counting is done exactly once per target:
+   * `counted` flips the moment this target has been added to the summary, so a throw from the
+   * final status write (after accumulate) does not count it a second time, while a throw before
+   * accumulate counts it once as failed.
+   */
+  async runClaimedRetry(mapperError, summary) {
+    let counted = false;
+    try {
+      const entity = await this.entityRepo.findById(mapperError.entityId);
+
+      if (!entity) {
+        summary.failed += 1;
+        summary.processed += 1;
+        counted = true;
+        await this.mapperErrorRepo.finishRetry(mapperError.id, "DISCARDED", {
+          message: "Source Entity no longer exists",
+        });
+        return;
+      }
+
+      const result = await this.promoteEntity(entity);
+      accumulate(summary, result);
+      counted = true;
+
+      // A false return is normal here: on success the promotion service already resolved the
+      // active mapper error, and on failure recordMapperFailure already reopened it.
+      await this.mapperErrorRepo.finishRetry(
+        mapperError.id,
+        result.result !== "failed" ? "RESOLVED" : "OPEN",
+      );
+    } catch (error) {
+      if (!counted) {
+        summary.failed += 1;
+        summary.processed += 1;
+      }
+
+      // Best effort, and honest about it: if the database is unavailable this write fails too,
+      // the row stays RETRYING with its lease set, and the next automatic retry reclaims it once
+      // the lease expires. A row the service already RESOLVED is not touched (count 0).
+      let recovered = false;
+      try {
+        recovered = await this.mapperErrorRepo.finishRetry(mapperError.id, "OPEN");
+      } catch {
+        recovered = false;
+      }
+      if (recovered) {
+        summary.recovered += 1;
+        logger.warn(
+          {
+            mapperErrorId: mapperError.id,
+            entityId: mapperError.entityId,
+            errorCode: errorCodeOf(error),
+          },
+          "mapper error retry threw; row reopened",
+        );
+      }
+    }
   }
 }
 
