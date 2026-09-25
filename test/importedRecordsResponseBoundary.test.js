@@ -731,3 +731,65 @@ describe("imported-records: summary / columns / facets", () => {
     }
   });
 });
+
+describe("imported-records: date filter validation (400 before Prisma, after auth)", () => {
+  const PRISMA_TEXT = ["prisma", "Prisma", "invocation", "Invalid Date", "createdAt", "where:"];
+  const assertDateRejection = (r, message, label) => {
+    assert.equal(r.status, 400, label);
+    assert.deepEqual(r.body, { ok: false, message }, label);
+    assert.equal(r.cacheControl, "no-store", label);
+    for (const s of PRISMA_TEXT) assert.ok(!r.text.includes(s), `${label}: '${s}' in response`);
+  };
+
+  it("1-2 list: bad fromDate / bad toDate → 400 with the field-specific message", async () => {
+    assertDateRejection(await call("/ops/imported-records?recordType=campaign&fromDate=bad", "ADMIN"), "Invalid fromDate.", "list fromDate");
+    assertDateRejection(await call("/ops/imported-records?recordType=campaign&toDate=bad", "ADMIN"), "Invalid toDate.", "list toDate");
+    assertDateRejection(await call("/ops/imported-records?recordType=coupon&fromDate=2026-99-99", "ADMIN"), "Invalid fromDate.", "list impossible date");
+  });
+
+  it("3-4 summary: bad fromDate / bad toDate → 400 with the field-specific message", async () => {
+    assertDateRejection(await call("/ops/imported-records/summary?recordType=campaign&fromDate=bad", "ADMIN"), "Invalid fromDate.", "summary fromDate");
+    assertDateRejection(await call("/ops/imported-records/summary?recordType=campaign&toDate=bad", "ADMIN"), "Invalid toDate.", "summary toDate");
+    assertDateRejection(await call("/ops/imported-records/summary?recordType=commission_rule&toDate=2026-09-25%2B05:30", "ADMIN"), "Invalid toDate.", "summary offset-only");
+  });
+
+  it("5 a repeated date parameter (array) is rejected the same way", async () => {
+    assertDateRejection(await call("/ops/imported-records?recordType=campaign&fromDate=2026-09-01&fromDate=2026-09-02", "ADMIN"), "Invalid fromDate.", "list array");
+  });
+
+  it("6 authorization order: an unpermitted type keeps its 403 even with a bad date; a permitted type then gets the date 400", async () => {
+    assert.equal((await call("/ops/imported-records?recordType=coupon&fromDate=bad", "TECH")).status, 403);
+    assert.equal((await call("/ops/imported-records/summary?recordType=coupon&fromDate=bad", "TECH")).status, 403);
+    assert.equal((await call("/ops/imported-records?recordType=commission_rule&toDate=bad", "ANALYST")).status, 403);
+    assertDateRejection(await call("/ops/imported-records?recordType=campaign&fromDate=bad", "TECH"), "Invalid fromDate.", "TECH campaign");
+  });
+
+  it("7 missing recordType + bad date → the existing recordType 400", async () => {
+    for (const path of ["/ops/imported-records?fromDate=bad", "/ops/imported-records/summary?toDate=bad"]) {
+      const r = await call(path, "ADMIN");
+      assert.equal(r.status, 400, path);
+      assert.equal(r.body.message, "Query parameter 'recordType' is required.", path);
+    }
+  });
+
+  it("8 unauthenticated + bad date → 401 (route gate runs first)", async () => {
+    assert.equal((await call("/ops/imported-records?recordType=campaign&fromDate=bad")).status, 401);
+    assert.equal((await call("/ops/imported-records/summary?recordType=campaign&fromDate=bad")).status, 401);
+  });
+
+  it("9 valid dates still succeed with no-store, and a valid request after a rejected one is unaffected", async () => {
+    await call("/ops/imported-records?recordType=campaign&fromDate=bad", "ADMIN");
+    const list = await call("/ops/imported-records?recordType=campaign&fromDate=2026-08-01&toDate=2026-09-30T23:59:59.999Z", "ADMIN");
+    assert.equal(list.status, 200);
+    assert.equal(list.cacheControl, "no-store");
+    assert.equal(list.body.pagination.total, 1);
+    assertNoLeak(list.text, "dated list");
+    const summary = await call("/ops/imported-records/summary?recordType=campaign&fromDate=%202026-08-01%20&toDate=2026-09-30T23:59:59.999Z", "ADMIN");
+    assert.equal(summary.status, 200);
+    assert.equal(summary.cacheControl, "no-store");
+    assert.equal(summary.body.data.importedRecords, 1);
+    const blank = await call("/ops/imported-records/summary?recordType=campaign&fromDate=%20%20", "ADMIN");
+    assert.equal(blank.status, 200);
+    assert.equal(blank.body.data.importedRecords, 1);
+  });
+});

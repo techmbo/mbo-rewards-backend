@@ -132,6 +132,22 @@ function networkSourceWhere(networkSource) {
   return ns;
 }
 
+/**
+ * A `fromDate` / `toDate` list filter: YYYY-MM-DD or any ISO-8601 datetime string JavaScript parses.
+ * Absent or blank → null (no filter). Anything else Date cannot parse, or a non-string (a repeated
+ * query parameter arrives as an array), is rejected with a 400 here — before any Prisma call, so an
+ * Invalid Date never reaches a predicate and never surfaces as a 500 with Prisma text.
+ */
+function parseDateFilter(value, fieldName) {
+  if (value == null) return null;
+  if (typeof value !== "string") throw fail(`Invalid ${fieldName}.`, 400);
+  const text = value.trim();
+  if (!text) return null;
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) throw fail(`Invalid ${fieldName}.`, 400);
+  return date;
+}
+
 function parsePage(query) {
   const page = Math.max(1, Number(query.page) || 1);
   const pageSize = Math.min(100, Math.max(1, Number(query.pageSize) || 25));
@@ -200,10 +216,12 @@ function buildWhere(filters = {}) {
     where.entityType = normalizeRecordTypeForApi(filters.entityType);
   }
 
-  if (filters.fromDate || filters.toDate) {
+  const fromDate = parseDateFilter(filters.fromDate, "fromDate");
+  const toDate = parseDateFilter(filters.toDate, "toDate");
+  if (fromDate || toDate) {
     where.createdAt = {};
-    if (filters.fromDate) where.createdAt.gte = new Date(filters.fromDate);
-    if (filters.toDate) where.createdAt.lte = new Date(filters.toDate);
+    if (fromDate) where.createdAt.gte = fromDate;
+    if (toDate) where.createdAt.lte = toDate;
   }
 
   if (filters.search) {

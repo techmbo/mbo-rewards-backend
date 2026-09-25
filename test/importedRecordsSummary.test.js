@@ -655,3 +655,139 @@ describe("network filter: trackier / vcommission family", () => {
     assert.equal("networkSource" in none, false);
   });
 });
+
+// ── date filters: validation happens in buildWhere, before any Prisma call ───────────────────
+const INVALID_DATE_CASES = [
+  { filters: { fromDate: "not-a-date" }, message: "Invalid fromDate." },
+  { filters: { toDate: "not-a-date" }, message: "Invalid toDate." },
+  { filters: { fromDate: "2026-99-99" }, message: "Invalid fromDate." },
+  { filters: { fromDate: "2026-09-25+05:30" }, message: "Invalid fromDate." },
+  { filters: { fromDate: ["2026-09-01", "2026-09-02"] }, message: "Invalid fromDate." }, // repeated query param
+  { filters: { toDate: ["2026-09-01", "2026-09-02"] }, message: "Invalid toDate." },
+  { filters: { fromDate: "2026-09-01", toDate: "nope" }, message: "Invalid toDate." },
+];
+const isDateFilterError = (message) => (e) => e instanceof Error && e.statusCode === 400 && e.message === message;
+
+describe("date filters: valid inputs keep today's predicates", () => {
+  it("1 no dates → no createdAt predicate", async () => {
+    const { service: svc, wheres } = withRows(FIXTURE);
+    const where = await captured(wheres, () => svc.summary({ recordType: "campaign" }));
+    assert.equal("createdAt" in where, false);
+  });
+
+  it("2 fromDate only → createdAt.gte is a Date, no lte", async () => {
+    const { service: svc, wheres } = withRows(FIXTURE);
+    const where = await captured(wheres, () => svc.summary({ recordType: "campaign", fromDate: "2026-09-01T00:00:00.000Z" }));
+    assert.ok(where.createdAt.gte instanceof Date);
+    assert.equal(where.createdAt.gte.toISOString(), "2026-09-01T00:00:00.000Z");
+    assert.equal("lte" in where.createdAt, false);
+  });
+
+  it("3 toDate only → createdAt.lte is a Date, no gte", async () => {
+    const { service: svc, wheres } = withRows(FIXTURE);
+    const where = await captured(wheres, () => svc.summary({ recordType: "coupon", toDate: "2026-08-31T23:59:59.999Z" }));
+    assert.ok(where.createdAt.lte instanceof Date);
+    assert.equal(where.createdAt.lte.toISOString(), "2026-08-31T23:59:59.999Z");
+    assert.equal("gte" in where.createdAt, false);
+  });
+
+  it("4 ISO timestamp pair → exact gte / lte Dates (list and summary)", async () => {
+    const { service: svc, wheres } = withRows(FIXTURE);
+    const filters = { recordType: "campaign", fromDate: "2026-09-01T00:00:00.000Z", toDate: "2026-09-30T23:59:59.999Z" };
+    const w1 = await captured(wheres, () => svc.summary(filters));
+    assert.deepEqual([w1.createdAt.gte.toISOString(), w1.createdAt.lte.toISOString()], ["2026-09-01T00:00:00.000Z", "2026-09-30T23:59:59.999Z"]);
+    const w2 = await captured(wheres, () => svc.list({ ...filters, page: 1, pageSize: 100 }));
+    assert.deepEqual([w2.createdAt.gte.toISOString(), w2.createdAt.lte.toISOString()], ["2026-09-01T00:00:00.000Z", "2026-09-30T23:59:59.999Z"]);
+    assert.notEqual(typeof w2.createdAt.gte, "string");
+  });
+
+  it("5 date-only fromDate → midnight UTC (current behaviour, unchanged)", async () => {
+    const { service: svc, wheres } = withRows(FIXTURE);
+    const where = await captured(wheres, () => svc.summary({ recordType: "campaign", fromDate: "2026-09-25" }));
+    assert.equal(where.createdAt.gte.toISOString(), "2026-09-25T00:00:00.000Z");
+    const to = await captured(wheres, () => svc.summary({ recordType: "campaign", toDate: "2026-09-25" }));
+    assert.equal(to.createdAt.lte.toISOString(), "2026-09-25T00:00:00.000Z"); // date-only toDate stays first-instant (out of scope here)
+  });
+
+  it("6 surrounding whitespace trims and stays valid", async () => {
+    const { service: svc, wheres } = withRows(FIXTURE);
+    const where = await captured(wheres, () => svc.summary({ recordType: "campaign", fromDate: " 2026-09-25 ", toDate: "\t2026-09-30T23:59:59.999Z " }));
+    assert.equal(where.createdAt.gte.toISOString(), "2026-09-25T00:00:00.000Z");
+    assert.equal(where.createdAt.lte.toISOString(), "2026-09-30T23:59:59.999Z");
+  });
+
+  it("7 whitespace-only and empty → treated as absent", async () => {
+    const { service: svc, wheres } = withRows(FIXTURE);
+    for (const blank of ["   ", "", "\t"]) {
+      const where = await captured(wheres, () => svc.summary({ recordType: "campaign", fromDate: blank, toDate: blank }));
+      assert.equal("createdAt" in where, false, JSON.stringify(blank));
+    }
+    const s = await svc.summary({ recordType: "campaign", fromDate: "   " });
+    assert.equal(s.importedRecords, 5);
+  });
+
+  it("8 reversed valid range → no throw, empty result", async () => {
+    const { service: svc } = withRows(FIXTURE);
+    const filters = { recordType: "campaign", fromDate: "2026-09-30T00:00:00.000Z", toDate: "2026-09-01T00:00:00.000Z" };
+    const s = await svc.summary(filters);
+    assert.equal(s.importedRecords, 0);
+    assert.deepEqual(s.byNetwork, []);
+    assert.equal(s.needsReview, 0);
+    assert.equal(await listTotal(svc, filters), 0);
+  });
+});
+
+describe("date filters: invalid inputs → 400 before any Prisma operation", () => {
+  for (const { filters, message } of INVALID_DATE_CASES) {
+    for (const recordType of ["campaign", "coupon", "commission_rule"]) {
+      it(`${JSON.stringify(filters)} / ${recordType}: list() and summary() reject with 400 '${message}' and issue no DB call`, async () => {
+        const { service: svc, calls } = withRows(FIXTURE);
+        calls.length = 0;
+        await assert.rejects(svc.summary({ recordType, ...filters }), isDateFilterError(message));
+        assert.deepEqual(calls, [], `summary issued ${calls.join(",")}`);
+        await assert.rejects(svc.list({ recordType, ...filters, page: 1, pageSize: 25 }), isDateFilterError(message));
+        assert.deepEqual(calls, [], `list issued ${calls.join(",")}`);
+      });
+    }
+  }
+
+  it("the error is a plain 400 — no Prisma text, no raw value", async () => {
+    const { service: svc } = withRows(FIXTURE);
+    await assert.rejects(svc.summary({ recordType: "campaign", fromDate: "not-a-date" }), (e) => {
+      assert.equal(e.statusCode, 400);
+      assert.equal(e.message, "Invalid fromDate.");
+      assert.ok(!/prisma|invocation|Invalid Date|not-a-date|createdAt/i.test(e.message));
+      return true;
+    });
+  });
+
+  it("facets() does not consume date filters: a bad date is ignored there (no validation, no createdAt)", async () => {
+    const { service: svc, wheres } = withRows(FIXTURE, { facetModels: true });
+    wheres.length = 0;
+    const facets = await svc.facets({ networkSource: "boostiny", fromDate: "not-a-date", toDate: "also-bad" });
+    assert.ok(Array.isArray(facets.network));
+    assert.ok(wheres.length > 0);
+    for (const { where } of wheres) assert.equal(JSON.stringify(where).includes("createdAt"), false);
+  });
+});
+
+describe("date filters: an invalid request never touches the list cache", () => {
+  it("invalid list → 400; the following valid list runs its own count + findMany and returns the right total; the repeat is served from cache", async () => {
+    const { service: svc, calls } = withRows(FIXTURE);
+    const valid = { recordType: "campaign", networkSource: "optimise", page: 1, pageSize: 25 };
+    calls.length = 0;
+    await assert.rejects(svc.list({ ...valid, fromDate: "bad" }), isDateFilterError("Invalid fromDate."));
+    assert.deepEqual(calls, []);
+    const first = await svc.list(valid);
+    assert.equal(first.total, 3);
+    assert.equal(first.rows.length, 3);
+    assert.deepEqual([...calls].sort(), ["entity.count", "entity.findMany"], "valid request performed its normal DB operations");
+    calls.length = 0;
+    const second = await svc.list(valid);
+    assert.equal(second.total, 3);
+    assert.deepEqual(calls, [], "identical valid request is a cache hit (cache works normally after the rejected call)");
+    // and the invalid variant is still rejected afterwards — nothing was cached under it
+    await assert.rejects(svc.list({ ...valid, fromDate: "bad" }), isDateFilterError("Invalid fromDate."));
+    assert.deepEqual(calls, []);
+  });
+});
