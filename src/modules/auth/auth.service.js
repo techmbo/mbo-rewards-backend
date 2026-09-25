@@ -2,7 +2,7 @@ import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { prisma } from "../../database/prisma.js";
 import { getPermissionsForRole } from "../../auth/permissions.js";
-import { consumeEmailVerification, verifyEmailVerificationToken } from "./otp.service.js";
+import { verifyEmailVerificationToken } from "./otp.service.js";
 
 const SALT_ROUNDS = 12;
 const TOKEN_EXPIRY = "7d";
@@ -61,6 +61,50 @@ export async function findUserByEmail(email) {
   return prisma.user.findUnique({ where: { email: email.toLowerCase() } });
 }
 
+/**
+ * The one response public signup gives once the platform has any user at all. Deliberately the
+ * same for every email address, so the closed door cannot be used to learn which addresses hold
+ * an account.
+ */
+export const PUBLIC_REGISTRATION_CLOSED_MESSAGE =
+  "Public registration is closed. Ask an administrator for an invitation.";
+
+/**
+ * Postgres advisory lock name for the bootstrap decision. `pg_advisory_xact_lock` is held until
+ * the surrounding transaction ends, so the "is the table still empty?" check and the first-admin
+ * INSERT are one indivisible step across every instance sharing the database.
+ */
+const BOOTSTRAP_REGISTRATION_LOCK = "auth.bootstrap_registration";
+
+function publicRegistrationClosedError() {
+  const error = new Error(PUBLIC_REGISTRATION_CLOSED_MESSAGE);
+  error.statusCode = 403;
+  return error;
+}
+
+/**
+ * Public signup exists for exactly one purpose: creating the FIRST administrator of an empty
+ * platform. It is open while no User row exists and closed forever after. Staff and client
+ * accounts are created through the admin and invitation flows, never through this door.
+ */
+export async function isPublicRegistrationOpen(db = prisma) {
+  const userCount = await db.user.count();
+  return userCount === 0;
+}
+
+/**
+ * Bootstrap the first administrator from a verified public signup.
+ *
+ * Refuses with 403 whenever any user already exists, and that refusal is enforced HERE, not only
+ * in the OTP-send handler: a caller holding a valid verification token still cannot create an
+ * account after bootstrap. The role is always ADMIN; there is no second role this path can grant.
+ *
+ * The decision and the insert run in one transaction under an advisory lock, so two concurrent
+ * first signups cannot both observe an empty table: the loser waits for the winner's commit, then
+ * re-reads a non-empty table and gets the same 403 as any later caller. The verification OTP rows
+ * are consumed inside that transaction, so a refused registration consumes nothing and a
+ * successful one cannot be replayed.
+ */
 export async function registerUser({ email, password, name, verificationToken }) {
   const normalizedEmail = email.trim().toLowerCase();
   const tokenPayload = verifyEmailVerificationToken(verificationToken);
@@ -70,29 +114,44 @@ export async function registerUser({ email, password, name, verificationToken })
     throw error;
   }
 
-  const existing = await findUserByEmail(normalizedEmail);
-  if (existing) {
-    const error = new Error("An account with this email already exists.");
-    error.statusCode = 409;
-    throw error;
+  // Cheap early refusal before the password is hashed; the authoritative check is inside the
+  // transaction below.
+  if (!(await isPublicRegistrationOpen())) {
+    throw publicRegistrationClosedError();
   }
 
-  const userCount = await prisma.user.count();
-  const role = userCount === 0 ? "ADMIN" : "SUPPORT";
   const passwordHash = await hashPassword(password);
 
-  const user = await prisma.user.create({
-    data: {
-      email: normalizedEmail,
-      passwordHash,
-      name: name?.trim() || null,
-      role,
-    },
-  });
+  try {
+    return await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${BOOTSTRAP_REGISTRATION_LOCK}))`;
 
-  await consumeEmailVerification(normalizedEmail);
+      if (!(await isPublicRegistrationOpen(tx))) {
+        throw publicRegistrationClosedError();
+      }
 
-  return user;
+      const user = await tx.user.create({
+        data: {
+          email: normalizedEmail,
+          passwordHash,
+          name: name?.trim() || null,
+          role: "ADMIN",
+        },
+      });
+
+      // Consume the email verification in the same transaction as the account it authorised.
+      await tx.emailOtp.deleteMany({ where: { email: normalizedEmail } });
+
+      return user;
+    });
+  } catch (error) {
+    // Only the conflict this path can legitimately hit: a unique-email violation means another
+    // registration for the same address committed first, so the door is closed for this one too.
+    if (error?.code === "P2002") {
+      throw publicRegistrationClosedError();
+    }
+    throw error;
+  }
 }
 
 export async function loginUser({ email, password }) {

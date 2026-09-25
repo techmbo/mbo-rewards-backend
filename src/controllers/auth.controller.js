@@ -1,7 +1,9 @@
 import { z } from "zod";
 import {
+  isPublicRegistrationOpen,
   loginUser,
   logAccess,
+  PUBLIC_REGISTRATION_CLOSED_MESSAGE,
   registerUser,
   signAccessToken,
   toPublicUser,
@@ -45,6 +47,12 @@ function handleAuthError(res, next, error) {
 export async function sendOtpHandler(req, res, next) {
   try {
     const body = sendOtpSchema.parse(req.body);
+    // Once any user exists, public signup is closed for EVERY address: no email is sent, no OTP
+    // row is written, and the answer does not depend on whether the address has an account.
+    if (!(await isPublicRegistrationOpen())) {
+      res.status(403).json({ ok: false, message: PUBLIC_REGISTRATION_CLOSED_MESSAGE });
+      return;
+    }
     const existing = await findUserByEmail(body.email);
     if (existing) {
       res.status(409).json({ ok: false, message: "An account with this email already exists." });
@@ -81,14 +89,12 @@ export async function registerHandler(req, res, next) {
       ipAddress: req.ip,
     });
 
+    // Public registration only ever bootstraps the first administrator (registerUser enforces it).
     res.status(201).json({
       ok: true,
       accessToken,
       user: toPublicUser(user),
-      message:
-        user.role === "ADMIN"
-          ? "Welcome! You are the first user and have been assigned the Admin role."
-          : "Account created. You have Support access until an admin updates your role.",
+      message: "Welcome! You are the first user and have been assigned the Admin role.",
     });
   } catch (error) {
     handleAuthError(res, next, error);
