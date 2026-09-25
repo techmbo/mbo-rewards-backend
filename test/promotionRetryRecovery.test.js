@@ -17,7 +17,7 @@ const { MapperErrorRepository } = await import(
   "../src/modules/supplier/repositories/mapperError.repository.js"
 );
 const { DEFAULT_LEASE_MS } = await import("../src/jobs/syncAccountLock.service.js");
-const { PROMOTION_BATCH_SIZE } = await import("../src/modules/supplier/constants.js");
+const { PROMOTION_RETRY_BATCH_SIZE } = await import("../src/modules/supplier/constants.js");
 
 // ─── fixtures ────────────────────────────────────────────────────────────────────────────────
 
@@ -460,7 +460,7 @@ describe("retryFailed automatic stale reclaim", () => {
     assert.equal(args.take, 7);
   });
 
-  it("15. limit is preserved, and the default is the promotion batch size", async () => {
+  it("15. limit is preserved, and the default is the retry batch size", async () => {
     const rows = Array.from({ length: 5 }, (_, i) =>
       row(`r${i}`, { createdAt: new Date(2026, 8, i + 1) }),
     );
@@ -475,7 +475,7 @@ describe("retryFailed automatic stale reclaim", () => {
     repo.calls = [];
     await buildJob({ repo, entities }).retryFailed();
     const [, args] = repo.calls.find((c) => c[0] === "findRetryTargets");
-    assert.equal(args.take, PROMOTION_BATCH_SIZE);
+    assert.equal(args.take, PROMOTION_RETRY_BATCH_SIZE);
   });
 
   it("an OPEN row claimed by someone else between select and claim is skipped, not promoted", async () => {

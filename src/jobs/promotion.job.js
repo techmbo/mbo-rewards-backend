@@ -1,4 +1,9 @@
-import { PROMOTION_BATCH_SIZE, SUPPLIER_ENTITY_TYPES } from "../modules/supplier/constants.js";
+import {
+  PROMOTION_BATCH_SIZE,
+  PROMOTION_RETRY_BATCH_SIZE,
+  SUPPLIER_ENTITY_TYPES,
+} from "../modules/supplier/constants.js";
+import { fail } from "../core/apiResponse.js";
 import { EntityRepository, MapperErrorRepository } from "../modules/supplier/repositories/index.js";
 import { PromotionService } from "../modules/supplier/services/promotion.service.js";
 import { SupplierCampaignPromotionService } from "../modules/supplier/services/supplierCampaignPromotion.service.js";
@@ -57,6 +62,25 @@ const EXPLICIT_RETRY_CLAIMABLE = new Set(["OPEN", "RETRYING"]);
 /** A safe error code for logs: never the message, never the stack. */
 function errorCodeOf(error) {
   return error?.code ?? error?.name ?? "Error";
+}
+
+/**
+ * Refuse a retry request that exceeds PROMOTION_RETRY_BATCH_SIZE before anything is read or
+ * written. Mirrors promotionRetryBodySchema so a direct internal call cannot bypass the route's
+ * contract. A non-positive or non-integer limit is refused too: the schema never lets one through,
+ * and a direct caller passing one has made a mistake worth surfacing rather than a query with
+ * `take: 0` or `take: NaN`.
+ */
+function assertRetryRequestWithinBudget({ mapperErrorIds, limit }) {
+  if (Array.isArray(mapperErrorIds) && mapperErrorIds.length > PROMOTION_RETRY_BATCH_SIZE) {
+    throw fail(
+      `mapperErrorIds may name at most ${PROMOTION_RETRY_BATCH_SIZE} mapper errors per retry request.`,
+      400,
+    );
+  }
+  if (!Number.isInteger(limit) || limit < 1 || limit > PROMOTION_RETRY_BATCH_SIZE) {
+    throw fail(`limit must be an integer between 1 and ${PROMOTION_RETRY_BATCH_SIZE}.`, 400);
+  }
 }
 
 function accumulate(summary, result) {
@@ -327,8 +351,16 @@ export class PromotionJob {
    * write never overwrites what the promotion service or a concurrent writer already decided. A
    * throw inside one target is recovered (RETRYING -> OPEN when still RETRYING) and the batch
    * continues. A hard termination cannot be caught; the lease is what makes that row reclaimable.
+   *
+   * Request budget: at most PROMOTION_RETRY_BATCH_SIZE targets per call, on either path. The HTTP
+   * schema is the primary gate; this check is defense in depth for direct internal callers and
+   * runs before any repository access. An oversized explicit list is refused whole, never sliced:
+   * an operator who names ids gets all of them or a clear 400. `limit` never applies to explicit
+   * ids, and an empty id list takes the automatic path exactly as an omitted one does.
    */
-  async retryFailed({ mapperErrorIds, limit = PROMOTION_BATCH_SIZE } = {}) {
+  async retryFailed({ mapperErrorIds, limit = PROMOTION_RETRY_BATCH_SIZE } = {}) {
+    assertRetryRequestWithinBudget({ mapperErrorIds, limit });
+
     const startedAt = Date.now();
     const summary = emptySummary();
     const explicit = Boolean(mapperErrorIds?.length);

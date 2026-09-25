@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PROMOTION_RETRY_BATCH_SIZE } from "../constants.js";
 
 export const supplierKeySchema = z.enum(["BOOSTINY", "OPTIMISE", "TRACKIER", "PARTNERIZE", "IMPACT", "UNKNOWN"]);
 export const supplierRegionSchema = z.enum(["GLOBAL", "SEA", "MENA", "UK", "UNKNOWN"]);
@@ -91,8 +92,10 @@ export const promotionRunBodySchema = z.object({
 });
 
 export const promotionRetryBodySchema = z.object({
-  mapperErrorIds: z.array(z.string()).optional(),
-  limit: z.coerce.number().int().min(1).max(500).optional(),
+  // Explicit ids are processed in full or refused: never sliced, never deduplicated here. The
+  // cap counts submitted items, duplicates included, as request-size protection.
+  mapperErrorIds: z.array(resourceIdSchema).max(PROMOTION_RETRY_BATCH_SIZE).optional(),
+  limit: z.coerce.number().int().min(1).max(PROMOTION_RETRY_BATCH_SIZE).optional(),
 });
 
 export const mapperErrorListQuerySchema = paginationSchema.extend({
