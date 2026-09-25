@@ -1378,11 +1378,11 @@ router.get("/ops/finance/daily-report-cutover-readiness", authenticate, requireP
 router.get("/ops/finance/historical-coverage", authenticate, requirePermission(PERMISSIONS.FINANCE_OPS_READ), historicalFinanceCoverageHandler);
 
 router.get("/ops/products", authenticate, requirePermission(PERMISSIONS.PRODUCTS_READ), listProductsHandler);
-router.post("/ops/products/sync-feeds", authenticate, requirePermission(PERMISSIONS.PRODUCTS_READ), syncProductFeedsHandler);
+router.post("/ops/products/sync-feeds", authenticate, requirePermission(PERMISSIONS.PRODUCTS_MANAGE), auditAction("products.feed_sync", "ProductFeed"), syncProductFeedsHandler);
 router.get("/ops/products/:id", authenticate, requirePermission(PERMISSIONS.PRODUCTS_READ), getProductHandler);
 router.get("/ops/product-feeds", authenticate, requirePermission(PERMISSIONS.PRODUCTS_READ), listProductFeedsHandler);
-router.post("/ops/product-feeds/ingest", authenticate, requirePermission(PERMISSIONS.PRODUCTS_READ), ingestProductFeedHandler);
-router.post("/ops/client-products/assign", authenticate, requirePermission(PERMISSIONS.PRODUCTS_READ), assignClientProductHandler);
+router.post("/ops/product-feeds/ingest", authenticate, requirePermission(PERMISSIONS.PRODUCTS_MANAGE), auditAction("products.feed_ingest", "ProductFeed"), ingestProductFeedHandler);
+router.post("/ops/client-products/assign", authenticate, requirePermission(PERMISSIONS.PRODUCTS_MANAGE), auditAction("products.client_assign", (req) => `clients:${req.body?.clientId || "unknown"}`), assignClientProductHandler);
 
 /** Epic 7 — staff admin contracts (v15 03A / 04A / 07E oriented). CLIENT role denied via permissions. */
 router.get("/ops/admin/campaigns", authenticate, requirePermission(PERMISSIONS.CATALOG_READ), adminListCampaignsHandler);
