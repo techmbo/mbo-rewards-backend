@@ -23,7 +23,7 @@ function executableSql(sql) {
 }
 
 describe("product tracking link ACTIVE partial unique index — recording migration", () => {
-  it("exists as the migration directly after the mapper error retry migration", () => {
+  it("sits between the mapper error retry migration and the supplier coupon identity migration", () => {
     assert.ok(existsSync(MIGRATION_FILE), `${MIGRATION_FILE} is missing`);
     const dirs = readdirSync(MIGRATIONS_ROOT, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
@@ -32,7 +32,7 @@ describe("product tracking link ACTIVE partial unique index — recording migrat
     const index = dirs.indexOf(MIGRATION_DIR);
     assert.ok(index > 0, "migration directory not found among migrations");
     assert.equal(dirs[index - 1], "20260925120000_mapper_error_retry_started_at");
-    assert.equal(index, dirs.length - 1, "recording migration must be the latest migration");
+    assert.equal(dirs[index + 1], "20260927090000_supplier_coupons_entity_identity");
   });
 
   it("creates the partial unique index idempotently with the exact name, table, columns and predicate", () => {

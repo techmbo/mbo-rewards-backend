@@ -628,11 +628,28 @@ model SupplierCampaign {
   @@map("supplier_campaigns")
 }
 
+/// IDENTITY (database-enforced): one SupplierCoupon row per staged Entity, via entityId @unique
+/// (index supplier_coupons_entityId_key, recorded in migration
+/// 20260927090000_supplier_coupons_entity_identity). PostgreSQL UNIQUE treats NULLs as distinct,
+/// so rows whose Entity was deleted (onDelete: SetNull) stay unconstrained; this is a plain unique
+/// index with no partial predicate, and none must be added.
+///
+/// couponCode and couponLink are NOT identities. Distinct supplier offers legitimately share a
+/// parent campaign and a link (Awin code-less promotions carry the advertiser's generic tracking
+/// link) or a parent and a code. The wave1 partial unique indexes
+/// supplier_coupons_campaign_code_unique and supplier_coupons_campaign_link_unique encoded that
+/// false invariant, caused row theft in production (commit 394c253), are dropped by the migration
+/// above and must never be recreated. Per-campaign code uniqueness belongs to CouponCodeMaster.
+///
+/// (supplierCampaignId, supplierCouponId) uniqueness is deliberately DEFERRED and NOT enforced:
+/// supplierCouponId derivation differs by network and by staging path (raw.service.js
+/// resolveExternalId fallbacks, campaign-payload voucher fan-out), so one offer can carry two ids.
+/// Revisit only after derivation is unified. Do not add @@unique([supplierCampaignId, supplierCouponId]).
 model SupplierCoupon {
   id                   String           @id @default(uuid())
   supplierCampaignId   String
   supplierCampaign     SupplierCampaign @relation(fields: [supplierCampaignId], references: [id], onDelete: Cascade)
-  entityId             String?
+  entityId             String?          @unique
   entity               Entity?          @relation(fields: [entityId], references: [id], onDelete: SetNull)
   rawPayloadId         String?
   rawPayloadRecord     RawPayload?      @relation(fields: [rawPayloadId], references: [id], onDelete: SetNull)
