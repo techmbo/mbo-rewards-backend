@@ -512,11 +512,11 @@ describe("tracking-link state consistency — static proofs", () => {
 
   it("link state follows the final assignment row, PAUSED/EXPIRED revoke via updateMany and cannot create, ACTIVE creates or repairs in place", () => {
     assert.match(body, /const effectiveCampaignAssignmentId = assignment\.clientCampaignAssignmentId \?\? null;/);
-    const inactive = body.slice(body.indexOf('if (assignment.status !== "ACTIVE")'), body.indexOf("let link = await db.productTrackingLink.findFirst("));
+    const inactive = body.slice(body.indexOf('if (assignment.status !== "ACTIVE")'), body.indexOf("let link = await tx.productTrackingLink.findFirst("));
     assert.match(inactive, /productTrackingLink\.updateMany\(\{\s*where: \{ clientId, productId, status: "ACTIVE" \},\s*data: \{ status: "REVOKED" \},/);
     assert.match(inactive, /return \{ ok: true, assignment, trackingLink: null \};/);
     assert.doesNotMatch(inactive, /productTrackingLink\.create|generateProductTrackingToken|productTrackingLink\.findFirst/);
-    const active = body.slice(body.indexOf("let link = await db.productTrackingLink.findFirst("));
+    const active = body.slice(body.indexOf("let link = await tx.productTrackingLink.findFirst("));
     assert.match(active, /clientCampaignAssignmentId: effectiveCampaignAssignmentId,\s*token,/);
     assert.match(active, /productTrackingLink\.update\(\{\s*where: \{ id: link\.id \},\s*data: \{\s*clientProductAssignmentId: assignment\.id,\s*clientCampaignAssignmentId: effectiveCampaignAssignmentId,\s*\},\s*\}\)/);
     assert.doesNotMatch(active.slice(active.indexOf("} else if")), /token:|mboProductTrackingUrl:|status:/);

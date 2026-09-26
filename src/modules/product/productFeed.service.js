@@ -459,6 +459,36 @@ export class ProductFeedService {
   }
 }
 
+/**
+ * Product assignment writes are serialized per (clientId, productId) with a Postgres advisory
+ * transaction lock, the same mechanism `registerUser` uses. The lock is the first statement of
+ * every assignment write transaction, so two concurrent calls for the same pair run one after the
+ * other and the second one reads the first one's committed assignment and links. It is released
+ * automatically at commit or rollback. Unrelated pairs hash to different keys and do not wait on
+ * each other.
+ *
+ * The key string is bound as a query parameter of a constant SQL text; nothing is concatenated
+ * into SQL. Production Prisma clients (root and interactive-transaction) always expose
+ * `$executeRaw`; the typeof guard exists only so the thin in-memory doubles in older tests keep
+ * working, and `test/productAssignmentTransaction.test.js` proves the real client takes the
+ * locked path.
+ */
+const CLIENT_PRODUCT_ASSIGNMENT_LOCK_PREFIX = "client_product_assignment";
+
+/** Same bounds as ClientAssignmentService: the write section is a handful of short statements. */
+export const CLIENT_PRODUCT_ASSIGNMENT_TX_OPTIONS = Object.freeze({ maxWait: 15_000, timeout: 45_000 });
+
+export function clientProductAssignmentLockKey(clientId, productId) {
+  return `${CLIENT_PRODUCT_ASSIGNMENT_LOCK_PREFIX}:${clientId}:${productId}`;
+}
+
+async function acquireClientProductAssignmentLock(tx, clientId, productId) {
+  if (typeof tx?.$executeRaw !== "function") return false;
+  const key = clientProductAssignmentLockKey(clientId, productId);
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
+  return true;
+}
+
 export class ClientProductService {
   constructor(deps = {}) {
     this.db = deps.prisma ?? prisma;
@@ -500,100 +530,124 @@ export class ClientProductService {
       return { ok: false, reason: "product_not_publishable", feedStatus: product.feedStatus };
     }
 
-    // Campaign assignment ownership: a ClientCampaignAssignment supplied with the request must
-    // exist and belong to the same client. The FK alone only proves the id exists, so without
-    // this check a product could be linked to another tenant's campaign assignment, and the
-    // ProductTrackingLink created below would carry that cross-tenant reference. Checked before
-    // any ClientProductAssignment or ProductTrackingLink write, on the create and update paths.
-    if (clientCampaignAssignmentId != null) {
-      const campaignAssignment = await db.clientCampaignAssignment.findUnique({
-        where: { id: clientCampaignAssignmentId },
-        select: { id: true, clientId: true },
-      });
-      if (!campaignAssignment) {
-        return { ok: false, reason: "campaign_assignment_not_found" };
+    /**
+     * Atomic, serialized write section. Everything from here runs on one transaction client `tx`:
+     * the advisory lock first, then the campaign-assignment ownership guard, the assignment upsert,
+     * and the tracking-link work. Either all of it commits or none of it does, so a link failure
+     * can no longer leave an assignment whose status disagrees with its links.
+     */
+    const run = async (tx) => {
+      await acquireClientProductAssignmentLock(tx, clientId, productId);
+
+      // Campaign assignment ownership: a ClientCampaignAssignment supplied with the request must
+      // exist and belong to the same client. The FK alone only proves the id exists, so without
+      // this check a product could be linked to another tenant's campaign assignment, and the
+      // ProductTrackingLink created below would carry that cross-tenant reference. Checked under
+      // the lock and before any ClientProductAssignment or ProductTrackingLink read or write.
+      if (clientCampaignAssignmentId != null) {
+        const campaignAssignment = await tx.clientCampaignAssignment.findUnique({
+          where: { id: clientCampaignAssignmentId },
+          select: { id: true, clientId: true },
+        });
+        if (!campaignAssignment) {
+          return { ok: false, reason: "campaign_assignment_not_found" };
+        }
+        if (campaignAssignment.clientId !== clientId) {
+          return { ok: false, reason: "campaign_assignment_client_mismatch" };
+        }
       }
-      if (campaignAssignment.clientId !== clientId) {
-        return { ok: false, reason: "campaign_assignment_client_mismatch" };
+
+      let assignment = await tx.clientProductAssignment.findUnique({
+        where: { clientId_productId: { clientId, productId } },
+      });
+      if (assignment) {
+        assignment = await tx.clientProductAssignment.update({
+          where: { id: assignment.id },
+          data: {
+            status,
+            clientCampaignAssignmentId: clientCampaignAssignmentId ?? assignment.clientCampaignAssignmentId,
+            publishedAt: status === "ACTIVE" ? new Date() : assignment.publishedAt,
+          },
+        });
+      } else {
+        assignment = await tx.clientProductAssignment.create({
+          data: {
+            clientId,
+            productId,
+            clientCampaignAssignmentId,
+            status,
+            publishedAt: status === "ACTIVE" ? new Date() : null,
+          },
+        });
       }
-    }
 
-    let assignment = await db.clientProductAssignment.findUnique({
-      where: { clientId_productId: { clientId, productId } },
-    });
-    if (assignment) {
-      assignment = await db.clientProductAssignment.update({
-        where: { id: assignment.id },
-        data: {
-          status,
-          clientCampaignAssignmentId: clientCampaignAssignmentId ?? assignment.clientCampaignAssignmentId,
-          publishedAt: status === "ACTIVE" ? new Date() : assignment.publishedAt,
-        },
-      });
-    } else {
-      assignment = await db.clientProductAssignment.create({
-        data: {
-          clientId,
-          productId,
-          clientCampaignAssignmentId,
-          status,
-          publishedAt: status === "ACTIVE" ? new Date() : null,
-        },
-      });
-    }
+      // Tracking-link state follows the final assignment row, not the raw request: an omitted
+      // campaign id keeps the assignment's existing one, and the link must agree with whatever the
+      // row now says.
+      const effectiveCampaignAssignmentId = assignment.clientCampaignAssignmentId ?? null;
 
-    // Tracking-link state follows the final assignment row, not the raw request: an omitted
-    // campaign id keeps the assignment's existing one, and the link must agree with whatever the
-    // row now says.
-    const effectiveCampaignAssignmentId = assignment.clientCampaignAssignmentId ?? null;
+      if (assignment.status !== "ACTIVE") {
+        // PAUSED / EXPIRED: an unpublished assignment must not keep a live redirect. Revoke every
+        // ACTIVE link for this client + product (same semantics as unassignProduct) and mint
+        // nothing; a later reactivation gets a fresh token, so distributed revoked URLs stay dead.
+        await tx.productTrackingLink.updateMany({
+          where: { clientId, productId, status: "ACTIVE" },
+          data: { status: "REVOKED" },
+        });
+        return { ok: true, assignment, trackingLink: null };
+      }
 
-    if (assignment.status !== "ACTIVE") {
-      // PAUSED / EXPIRED: an unpublished assignment must not keep a live redirect. Revoke every
-      // ACTIVE link for this client + product (same semantics as unassignProduct) and mint
-      // nothing; a later reactivation gets a fresh token, so distributed revoked URLs stay dead.
-      await db.productTrackingLink.updateMany({
+      let link = await tx.productTrackingLink.findFirst({
         where: { clientId, productId, status: "ACTIVE" },
-        data: { status: "REVOKED" },
       });
-      return { ok: true, assignment, trackingLink: null };
-    }
+      if (!link) {
+        // Only the create branch needs the tracking base: reuse and in-place repair keep the link's
+        // existing MBO URL, and PAUSED / EXPIRED mint nothing. The lookup is a synchronous
+        // environment read with no I/O; a missing value throws here and the transaction rolls back.
+        const trackingBaseUrl = getTrackingBaseUrl();
+        const token = generateProductTrackingToken();
+        const mboProductTrackingUrl = `${trackingBaseUrl}/t/product/${token}`;
+        link = await tx.productTrackingLink.create({
+          data: {
+            clientId,
+            productId,
+            clientProductAssignmentId: assignment.id,
+            clientCampaignAssignmentId: effectiveCampaignAssignmentId,
+            token,
+            supplierProductTrackingUrl: trackingTarget,
+            mboProductTrackingUrl,
+            status: "ACTIVE",
+          },
+        });
+      } else if (
+        link.clientProductAssignmentId !== assignment.id ||
+        (link.clientCampaignAssignmentId ?? null) !== effectiveCampaignAssignmentId
+      ) {
+        // Same-client campaign reassignment (or a link left pointing at a stale assignment row):
+        // repair the relational metadata in place. The token and MBO URL are the client-facing
+        // identity of the link and stay unchanged, so already-distributed URLs keep working and
+        // the redirect attributes clicks to the campaign assignment the row now names.
+        link = await tx.productTrackingLink.update({
+          where: { id: link.id },
+          data: {
+            clientProductAssignmentId: assignment.id,
+            clientCampaignAssignmentId: effectiveCampaignAssignmentId,
+          },
+        });
+      }
 
-    let link = await db.productTrackingLink.findFirst({
-      where: { clientId, productId, status: "ACTIVE" },
-    });
-    if (!link) {
-      const token = generateProductTrackingToken();
-      const mboProductTrackingUrl = `${getTrackingBaseUrl()}/t/product/${token}`;
-      link = await db.productTrackingLink.create({
-        data: {
-          clientId,
-          productId,
-          clientProductAssignmentId: assignment.id,
-          clientCampaignAssignmentId: effectiveCampaignAssignmentId,
-          token,
-          supplierProductTrackingUrl: trackingTarget,
-          mboProductTrackingUrl,
-          status: "ACTIVE",
-        },
-      });
-    } else if (
-      link.clientProductAssignmentId !== assignment.id ||
-      (link.clientCampaignAssignmentId ?? null) !== effectiveCampaignAssignmentId
-    ) {
-      // Same-client campaign reassignment (or a link left pointing at a stale assignment row):
-      // repair the relational metadata in place. The token and MBO URL are the client-facing
-      // identity of the link and stay unchanged, so already-distributed URLs keep working and
-      // the redirect attributes clicks to the campaign assignment the row now names.
-      link = await db.productTrackingLink.update({
-        where: { id: link.id },
-        data: {
-          clientProductAssignmentId: assignment.id,
-          clientCampaignAssignmentId: effectiveCampaignAssignmentId,
-        },
-      });
-    }
+      return { ok: true, assignment, trackingLink: link };
+    };
 
-    return { ok: true, assignment, trackingLink: link };
+    // A caller that already holds a transaction supplies its client: no nested transaction, but
+    // the same advisory lock is still taken inside run(). Otherwise this service owns the
+    // transaction. The bare fallback exists only for thin in-memory doubles without
+    // `$transaction`; the real Prisma client always has it.
+    if (client) return run(client);
+    if (typeof this.db.$transaction === "function") {
+      return this.db.$transaction(run, CLIENT_PRODUCT_ASSIGNMENT_TX_OPTIONS);
+    }
+    return run(this.db);
   }
 
   async unassignProduct({ clientId, productId }, client = null) {

@@ -643,7 +643,7 @@ describe("product write integrity — static proofs", () => {
     const firstAssignmentRead = body.indexOf("clientProductAssignment.findUnique(");
     assert.ok(publishable < notFound && notFound < guard, "guard after publishability");
     assert.ok(guard < firstAssignmentRead && guard < firstWrite, "guard before any assignment read or write");
-    assert.match(body, /db\.clientCampaignAssignment\.findUnique\(\{\s*where: \{ id: clientCampaignAssignmentId \}/);
+    assert.match(body, /tx\.clientCampaignAssignment\.findUnique\(\{\s*where: \{ id: clientCampaignAssignmentId \}/);
     assert.match(body, /if \(clientCampaignAssignmentId != null\)/);
   });
 
