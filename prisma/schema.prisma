@@ -2535,6 +2535,19 @@ model ClientProductAssignment {
 }
 
 /// v15 11D/11H — client-safe product tracking wrapper (never expose supplier URL to client).
+///
+/// INVARIANT (database-enforced): at most one ACTIVE link per (clientId, productId).
+/// Production enforces this with the PostgreSQL partial unique index
+///   product_tracking_links_clientId_productId_active_key
+///   ON ("clientId", "productId") WHERE "status" = 'ACTIVE'
+/// recorded in migration 20260926120000_product_tracking_links_one_active_per_client_product.
+/// Prisma 5.22 cannot express a partial (WHERE) predicate in @@unique / @@index, so the index
+/// lives in migration SQL only and is intentionally absent from this model. REVOKED and EXPIRED
+/// rows stay unlimited, so a plain @@unique([clientId, productId]) would be WRONG here.
+/// `prisma migrate dev` / `migrate diff` will report this index as drift and may propose
+/// DROP INDEX: never accept that removal. The application also serializes writers with an
+/// advisory transaction lock (ClientProductService.assignProductToClient); the index is the
+/// defense in depth behind it.
 model ProductTrackingLink {
   id                         String                    @id @default(uuid())
   clientId                   String
