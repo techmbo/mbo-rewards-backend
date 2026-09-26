@@ -1662,6 +1662,15 @@ model ClientBrandRequest {
   @@map("client_brand_requests")
 }
 
+/// INVARIANT (database-enforced, migration-only): at most one non-revoked assignment per
+/// (clientId, canonicalCampaignId). Enforced by the PostgreSQL partial unique index
+/// client_campaign_assignments_client_campaign_active_key with predicate
+/// status IN ('ASSIGNED', 'ACTIVE', 'PAUSED'), defined in 20260713120000_wave3_client_distribution
+/// and restored by 20260928090000_restore_correctness_unique_indexes. REVOKED rows intentionally do
+/// not participate, so a client can be re-assigned after a revocation. Prisma cannot express a
+/// partial unique index, which is why it is absent from this file; never remove the index on that
+/// basis and never replace it with a plain @@unique([clientId, canonicalCampaignId]), which would
+/// also forbid re-assignment after REVOKED.
 model ClientCampaignAssignment {
   id                  String            @id @default(uuid())
   clientId            String
@@ -2590,6 +2599,14 @@ model ProductTrackingLink {
   @@map("product_tracking_links")
 }
 
+/// INVARIANT (database-enforced, migration-only): one row per reporting dimension
+/// (clientId, canonicalCampaignId, COALESCE(campaignSourceId, ''), COALESCE(country, ''), reportDate).
+/// Enforced by the PostgreSQL expression unique index daily_reports_dimension_key, defined in
+/// 20260713140000_wave5_attribution_reporting and restored by
+/// 20260928090000_restore_correctness_unique_indexes. NULL source and NULL country are folded to ''
+/// so "no source" / "no country" is a single identity. Prisma cannot express an expression index, and
+/// a plain @@unique over the nullable columns is not equivalent (NULLs are distinct), so this model
+/// deliberately declares no unique. Never remove the index because it is unlisted here.
 model DailyReport {
   id                      String            @id @default(uuid())
   reportDate              DateTime          @db.Date
