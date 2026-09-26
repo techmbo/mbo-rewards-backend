@@ -546,6 +546,17 @@ model Supplier {
   @@map("suppliers")
 }
 
+/// PERFORMANCE NOTE: the historical trigram indexes supplier_campaigns_campaignName_trgm_idx and
+/// supplier_campaigns_merchantNameRaw_trgm_idx are DEFERRED PENDING MEASUREMENT, not obsolete. The
+/// admin campaign list, global search and client reporting filters use ILIKE '%term%' on campaignName
+/// and merchantNameRaw; production serves those paths without trigram indexes today, and
+/// 20260929090000_align_performance_index_expectations records that intended state. A future forward
+/// migration may CREATE EXTENSION IF NOT EXISTS pg_trgm and recreate whichever of them measured
+/// evidence justifies (table growth, observed search latency, EXPLAIN / EXPLAIN ANALYZE,
+/// pg_stat_statements where available). The historical composite
+/// supplier_campaigns_supplier_campaignStatus_lastSyncedAt_idx is retired by the same migration:
+/// @@index([supplier, campaignStatus]) and @@index([lastSyncedAt(sort: Desc)]) below cover the current
+/// filter and ordering paths.
 model SupplierCampaign {
   id                             String                          @id @default(uuid())
   supplier                       SupplierKey
@@ -944,6 +955,13 @@ enum MerchantReviewStatus {
   MERGED
 }
 
+/// PERFORMANCE NOTE: merchants_displayName_trgm_idx is DEFERRED PENDING MEASUREMENT, not obsolete.
+/// displayName is searched with ILIKE '%term%' from the merchant list, global search and, through
+/// relations, from campaign, assignment and product searches. Production serves those paths without
+/// it today; 20260929090000_align_performance_index_expectations records that intended state, and a
+/// future forward migration may reintroduce it together with pg_trgm on measured evidence.
+/// merchants_normalizedName_trgm_idx is retired by the same migration: normalizedName equality
+/// lookups use the unique btree below, and its substring searches are always paired with displayName.
 model Merchant {
   id                   String                     @id @default(uuid())
   displayName          String
@@ -1056,6 +1074,11 @@ enum CampaignSourceRelationshipStatus {
   UNKNOWN
 }
 
+/// PERFORMANCE NOTE: canonical_campaigns_displayName_trgm_idx is DEFERRED PENDING MEASUREMENT, not
+/// obsolete. The client portal campaign search, admin assignment search and global search use
+/// ILIKE '%term%' on displayName; production serves them without a trigram index today, and
+/// 20260929090000_align_performance_index_expectations records that intended state. A future forward
+/// migration may reintroduce it together with pg_trgm on measured evidence.
 model CanonicalCampaign {
   id              String                  @id @default(uuid())
   merchantId      String
@@ -1741,6 +1764,9 @@ enum AttributionStatus {
   REATTRIBUTED
 }
 
+/// PERFORMANCE NOTE: clicks_clickedAt_brin_idx is retired by
+/// 20260929090000_align_performance_index_expectations. Every clickedAt access is a range filter plus
+/// ORDER BY, served by @@index([clickedAt]) and the composite indexes ending in clickedAt below.
 model Click {
   id                 String                   @id @default(uuid())
   trackingLinkId     String
@@ -1981,6 +2007,12 @@ model ExceptionCase {
   @@map("exception_cases")
 }
 
+/// PERFORMANCE NOTE: conversions_conversionDate_brin_idx and conversions_clickId_idx are retired by
+/// 20260929090000_align_performance_index_expectations. Every conversionDate access is a range filter
+/// plus ORDER BY, served by @@index([conversionDate]) and @@index([clientAssignmentId, conversionDate])
+/// below. No query reads conversions by clickId and no current code path deletes clicks. If a click
+/// purge or retention path is introduced, add @@index([clickId]) here (and on Order) before relying on
+/// the FK ON DELETE SET NULL behaviour, which would otherwise scan this table.
 model Conversion {
   id                   String                    @id @default(uuid())
   clickId              String?
