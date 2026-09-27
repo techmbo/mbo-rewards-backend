@@ -134,7 +134,7 @@ describe("Pointer 44 — payableEligibilitySeparation.contract", () => {
       },
     };
     const financialTransactions = [
-      { id: "ft-1", supplierReceivable: "100", clientPayable: "100", transactionType: "EARN", originalCurrency: "USD", metadata: {}, calculationMetadata: {} },
+      { id: "ft-1", supplierReceivable: "100", clientPayable: "100", mboMargin: "0", transactionType: "EARN", originalCurrency: "USD", metadata: {}, calculationMetadata: {} },
     ];
     const result = evaluatePayableEligibility({
       calculatedClientCommission: 805,

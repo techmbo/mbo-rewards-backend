@@ -354,7 +354,7 @@ describe("Wave C — payment state machines", () => {
       financialTransaction: {
         // Client payable release reconciles the recognized FT against network evidence.
         findMany: async () => [
-          { id: "ft-1", supplierReceivable: "100", clientPayable: "100", transactionType: "EARN", originalCurrency: "USD", metadata: {}, calculationMetadata: {} },
+          { id: "ft-1", supplierReceivable: "100", clientPayable: "100", mboMargin: "0", transactionType: "EARN", originalCurrency: "USD", metadata: {}, calculationMetadata: {} },
         ],
       },
       exceptionCase: {

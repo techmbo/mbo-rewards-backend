@@ -1,7 +1,19 @@
 import { toStandardPagedResponse } from "../core/pagination.js";
 import { AdminClientSettlementsService } from "../modules/ops/adminClientSettlements.service.js";
+import { MboReceiptService } from "../modules/finance/mboReceipt.service.js";
 
 const svc = new AdminClientSettlementsService();
+let receiptService = null;
+
+/** Test seam: swap the receipt service without touching the route wiring. */
+export function setMboReceiptServiceForTests(service) {
+  receiptService = service;
+}
+
+function getReceiptService() {
+  if (!receiptService) receiptService = new MboReceiptService();
+  return receiptService;
+}
 
 function pageParams(query = {}) {
   const page = Math.max(1, Number(query.page) || 1);
@@ -86,3 +98,19 @@ export async function adminListPayoutsHandler(req, res, next) {
   }
 }
 
+
+/**
+ * ADMIN finance action — record an actual MBO bank/reconciliation receipt for one order and
+ * attempt the client-payable transition. The actor is always the authenticated admin (never a
+ * body field). The response carries the bank reference only; no bank account data exists here.
+ */
+export async function adminRecordMboReceiptHandler(req, res, next) {
+  try {
+    const result = await getReceiptService().recordReceipt(req.params.orderId, req.body ?? {}, {
+      actorId: req.user?.id ?? null,
+    });
+    res.status(result.replayed ? 200 : 201).json(result);
+  } catch (error) {
+    next(error);
+  }
+}

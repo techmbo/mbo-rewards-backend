@@ -169,7 +169,10 @@ describe("P1.7 Wave 5 — portal source of truth", () => {
         clientCampaignAssignment: { findMany: mock.fn(async () => []) },
         conversion: { findMany: mock.fn(async () => []) },
         click: { groupBy: mock.fn(async () => []), findMany: mock.fn(async () => []) },
-        clientWithdrawal: { findMany: mock.fn(async () => []) },
+        // Withdrawal balance now reads the finance ledger and complete withdrawal aggregates
+        // (ClientBalanceService); an empty ledger keeps this overview test about campaign KPIs.
+        clientWithdrawal: { findMany: mock.fn(async () => []), groupBy: mock.fn(async () => []) },
+        financialTransaction: { groupBy: mock.fn(async () => []) },
       },
       financeConsumer: {
         getMode: () => "LEGACY",

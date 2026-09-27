@@ -190,6 +190,7 @@ export class PaymentStateService {
           id: true,
           supplierReceivable: true,
           clientPayable: true,
+          mboMargin: true,
           transactionType: true,
           originalCurrency: true,
           metadata: true,

@@ -94,7 +94,8 @@ export function resolveAlertSpec({ condition = null, reconciliationPair = null }
   }
   if (reconciliationPair) {
     if (CLIENT_PAYABLE_BLOCKING_PAIRS.has(reconciliationPair)) {
-      if (reconciliationPair === RECONCILIATION_PAIR.MBO_RECEIPT_VS_CLIENT_PAYABLE) {
+      // The client payable split (gross = client payable + MBO margin) is the client-money check.
+      if (reconciliationPair === RECONCILIATION_PAIR.MBO_GROSS_VS_CLIENT_PAYABLE_PLUS_MARGIN) {
         return resolveAlertSpec({ condition: ALERT_CONDITION.CLIENT_PAYABLE_MISMATCH });
       }
       if (

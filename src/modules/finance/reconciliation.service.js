@@ -59,6 +59,8 @@ export function buildOrderReconciliationInputs({ order = null, financialTransact
   const meta = asObject(order?.metadata);
   const mboGross = netFinancialAmount(financialTransactions, "supplierReceivable");
   const clientPayable = netFinancialAmount(financialTransactions, "clientPayable");
+  // Signed/net like the other ledger legs; never derived as gross − clientPayable.
+  const mboMargin = netFinancialAmount(financialTransactions, "mboMargin");
   const receipt = extractMboActualReceipt({ order, financialTransactions });
 
   const receiptAmount = sourceAmount(receipt?.amount);
@@ -88,6 +90,7 @@ export function buildOrderReconciliationInputs({ order = null, financialTransact
     networkPaymentAmount,
     mboActualReceiptAmount: receiptAmount,
     clientPayableAmount: clientPayable,
+    mboMarginAmount: mboMargin,
   };
 }
 
@@ -154,6 +157,7 @@ export class ReconciliationService {
             id: true,
             supplierReceivable: true,
             clientPayable: true,
+            mboMargin: true,
             transactionType: true,
             originalCurrency: true,
             metadata: true,

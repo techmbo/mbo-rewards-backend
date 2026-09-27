@@ -30,6 +30,8 @@ export const PERMISSIONS = {
   EXCEPTIONS_READ: "exceptions:read",
   EXCEPTIONS_MANAGE: "exceptions:manage",
   FINANCE_OPS_READ: "finance_ops:read",
+  /** Finance writes (e.g. recording an MBO bank receipt). ADMIN only via Object.values(PERMISSIONS). */
+  FINANCE_OPS_MANAGE: "finance_ops:manage",
   PRODUCTS_READ: "products:read",
   PRODUCTS_MANAGE: "products:manage",
   PORTAL_CAMPAIGNS_READ: "portal:campaigns:read",

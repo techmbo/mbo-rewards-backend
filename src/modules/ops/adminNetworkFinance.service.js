@@ -204,6 +204,8 @@ export class AdminNetworkFinanceService {
           select: {
             id: true,
             supplierReceivable: true,
+            clientPayable: true,
+            mboMargin: true,
             transactionType: true,
             status: true,
             originalCurrency: true,

@@ -764,6 +764,7 @@ export class NetworkPortalService {
           mboGrossNetworkCommission: money(meta.mboGrossNetworkCommission),
           mboActualReceiptAmount: money(meta.mboActualReceiptAmount),
           clientPayableAmount: money(meta.clientPayableAmount),
+          mboMarginAmount: meta.mboMarginAmount == null ? null : money(meta.mboMarginAmount),
         };
       }),
     };
@@ -832,6 +833,7 @@ export class NetworkPortalService {
         mboGrossNetworkCommission: 0,
         mboActualReceiptAmount: 0,
         clientPayableAmount: 0,
+        mboMarginAmount: 0,
         orders: [],
       };
       cur.reportedCommission += Number(f.grossCommission ?? f.confirmedCommission ?? 0);
@@ -850,6 +852,7 @@ export class NetworkPortalService {
           select: {
             supplierReceivable: true,
             clientPayable: true,
+            mboMargin: true,
             transactionType: true,
             originalCurrency: true,
             metadata: true,
@@ -890,26 +893,32 @@ export class NetworkPortalService {
         mboGrossNetworkCommission: 0,
         mboActualReceiptAmount: 0,
         clientPayableAmount: 0,
+        mboMarginAmount: 0,
         orders: [],
       };
 
       let recv = 0;
       let clientPay = 0;
+      let margin = 0;
       for (const t of o.financialTransactions || []) {
         const sup = Number(t.supplierReceivable || 0);
         const cli = Number(t.clientPayable || 0);
+        const mar = Number(t.mboMargin || 0);
         if (t.transactionType === "REVERSAL") {
           recv -= sup;
           clientPay -= cli;
+          margin -= mar;
         } else {
           recv += sup;
           clientPay += cli;
+          margin += mar;
         }
       }
 
       if (o.validationStatus === "VALIDATION_APPROVED") {
         cur.mboGrossNetworkCommission += recv;
         cur.clientPayableAmount += clientPay;
+        cur.mboMarginAmount += margin;
       }
       cur.mboOrderCount += 1;
 
@@ -958,6 +967,8 @@ export class NetworkPortalService {
           networkPaymentAmount: row.paidCommission || null,
           mboActualReceiptAmount: row.mboActualReceiptAmount || null,
           clientPayableAmount: row.clientPayableAmount || null,
+          // 0 is a real margin (100% client share); only an absent ledger leaves it null.
+          mboMarginAmount: row.mboGrossNetworkCommission ? row.mboMarginAmount : null,
         },
       });
 
@@ -970,6 +981,7 @@ export class NetworkPortalService {
         mboGrossNetworkCommission: row.mboGrossNetworkCommission,
         mboActualReceiptAmount: row.mboActualReceiptAmount,
         clientPayableAmount: row.clientPayableAmount,
+        mboMarginAmount: row.mboMarginAmount,
       };
 
       upserts.push(

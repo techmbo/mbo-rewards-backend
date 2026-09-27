@@ -296,7 +296,8 @@ describe("PRODUCTS_MANAGE — permission model", () => {
     ]);
     assert.deepEqual(USER_ROLES, ["ADMIN", "OPERATIONS", "ANALYST", "TECH", "SUPPORT", "CLIENT"]);
     assert.deepEqual(STAFF_USER_ROLES, ["ADMIN", "OPERATIONS", "ANALYST", "TECH", "SUPPORT"]);
-    assert.equal(Object.keys(PERMISSIONS).length, 39);
+    // 40: FINANCE_OPS_MANAGE (finance writes, ADMIN only) joined the catalog.
+    assert.equal(Object.keys(PERMISSIONS).length, 40);
   });
 });
 

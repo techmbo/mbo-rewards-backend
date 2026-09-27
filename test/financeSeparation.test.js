@@ -30,7 +30,14 @@ const matchedBlockingChecks = [
     material: false,
   },
   {
-    pair: "MBO_RECEIPT_VS_CLIENT_PAYABLE",
+    pair: "MBO_RECEIPT_VS_MBO_GROSS",
+    status: "MATCHED",
+    ok: true,
+    skipped: false,
+    material: false,
+  },
+  {
+    pair: "MBO_GROSS_VS_CLIENT_PAYABLE_PLUS_MARGIN",
     status: "MATCHED",
     ok: true,
     skipped: false,
@@ -192,7 +199,7 @@ describe("Pointer 17 — financeSeparation.contract", () => {
     };
     const checks = [
       {
-        pair: "MBO_RECEIPT_VS_CLIENT_PAYABLE",
+        pair: "MBO_GROSS_VS_CLIENT_PAYABLE_PLUS_MARGIN",
         status: "MISMATCH",
         ok: false,
         skipped: false,

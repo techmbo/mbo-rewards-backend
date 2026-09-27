@@ -17,7 +17,7 @@ import {
 } from "../src/modules/finance/reconciliation.service.js";
 
 describe("Pointer 18 / PR4 — reconciliationLogic.contract", () => {
-  it("matches when all five pairwise checks align", () => {
+  it("matches when all six pairwise checks align", () => {
     const result = runReconciliationChecks({
       networkOrderCount: 10,
       mboOrderCount: 10,
@@ -27,11 +27,12 @@ describe("Pointer 18 / PR4 — reconciliationLogic.contract", () => {
       networkPaymentAmount: 100,
       mboActualReceiptAmount: 100,
       clientPayableAmount: 100,
+      mboMarginAmount: 0,
     });
     assert.equal(result.allMatched, true);
     assert.equal(result.hasMaterialMismatch, false);
     assert.equal(result.hasSourceDataMissing, false);
-    assert.equal(result.checks.length, 5);
+    assert.equal(result.checks.length, 6);
     assert.equal(shouldBlockClientPayableRelease(result.checks), false);
   });
 
@@ -69,13 +70,13 @@ describe("Pointer 18 / PR4 — reconciliationLogic.contract", () => {
     assert.equal(shouldBlockClientPayableRelease(result.checks), true);
   });
 
-  it("blocks client payable on MBO receipt vs client payable mismatch", () => {
+  it("blocks client payable on MBO receipt vs MBO gross mismatch", () => {
     const result = runReconciliationChecks({
       mboActualReceiptAmount: 100,
-      clientPayableAmount: 120,
+      mboGrossNetworkCommission: 120,
     });
     const check = result.checks.find(
-      (c) => c.pair === RECONCILIATION_PAIR.MBO_RECEIPT_VS_CLIENT_PAYABLE,
+      (c) => c.pair === RECONCILIATION_PAIR.MBO_RECEIPT_VS_MBO_GROSS,
     );
     assert.equal(check.ok, false);
     assert.equal(shouldBlockClientPayableRelease(result.checks), true);
@@ -230,14 +231,15 @@ describe("Pointer 18 / PR4 — reconciliationLogic.contract", () => {
       (c) => c.pair === RECONCILIATION_PAIR.NETWORK_PAYMENT_VS_MBO_RECEIPT,
     );
     const receiptCheck = result.checks.find(
-      (c) => c.pair === RECONCILIATION_PAIR.MBO_RECEIPT_VS_CLIENT_PAYABLE,
+      (c) => c.pair === RECONCILIATION_PAIR.MBO_RECEIPT_VS_MBO_GROSS,
     );
 
     assert.equal(paymentCheck.status, RECONCILIATION_STATUS.CANNOT_RECONCILE);
     assert.equal(paymentCheck.reasonCode, RECONCILIATION_REASON_CODE.SOURCE_DATA_MISSING);
     assert.equal(paymentCheck.left, null);
     assert.equal(paymentCheck.right, 50);
-    assert.equal(receiptCheck.status, RECONCILIATION_STATUS.MISMATCH);
-    assert.equal(receiptCheck.difference, 10);
+    // Receipt 50 reconciles to gross 50; client payable 40 is below gross by the MBO margin.
+    assert.equal(receiptCheck.status, RECONCILIATION_STATUS.MATCHED);
+    assert.equal(receiptCheck.difference, 0);
   });
 });

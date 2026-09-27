@@ -42,7 +42,7 @@ describe("Pointer 21 — alertException.contract", () => {
 
   it("maps client payable reconciliation to CRITICAL", () => {
     const spec = resolveAlertSpec({
-      reconciliationPair: RECONCILIATION_PAIR.MBO_RECEIPT_VS_CLIENT_PAYABLE,
+      reconciliationPair: RECONCILIATION_PAIR.MBO_GROSS_VS_CLIENT_PAYABLE_PLUS_MARGIN,
     });
     assert.equal(spec.condition, ALERT_CONDITION.CLIENT_PAYABLE_MISMATCH);
     assert.equal(spec.severity, ALERT_SEVERITY.CRITICAL);

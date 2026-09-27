@@ -9,6 +9,19 @@ import {
   FINANCE_CONSUMER_MODES,
 } from "../../finance/financeConsumer.service.js";
 import { auditService } from "../../../platform/audit/audit.service.js";
+import {
+  ClientBalanceService,
+  MIN_WITHDRAWAL_AMOUNT,
+  SERIALIZABLE_MONEY_TX_OPTIONS,
+  isSerializationConflict,
+  isUniqueViolationOn,
+  resolveSettlementCurrency,
+} from "../../finance/clientBalance.service.js";
+
+/** Bounded retries for a SERIALIZABLE withdrawal transaction that loses a write conflict. */
+const WITHDRAWAL_SERIALIZATION_RETRIES = 3;
+/** Bounded retries when a generated reference collides with an existing row. */
+const WITHDRAWAL_REFERENCE_RETRIES = 5;
 
 /**
  * The one mounted client API path (`app.use("/api", routes)` + `/v1/client/...`).
@@ -56,6 +69,13 @@ export class PortalDashboardService {
     this.financeConsumer = deps.financeConsumer ?? new FinanceConsumerService({ prisma: this.prisma });
     this.clientReporting = deps.clientReporting ?? null;
     this.audit = deps.audit ?? auditService;
+    /** Authoritative withdrawal balance (finance ledger, complete aggregates, one currency). */
+    this.balances = deps.balances ?? new ClientBalanceService({ prisma: this.prisma });
+    this.runInTransaction =
+      deps.runInTransaction ??
+      (typeof this.prisma?.$transaction === "function"
+        ? (fn, options) => this.prisma.$transaction(fn, options)
+        : (fn) => fn(this.prisma));
   }
 
   async assertClient(clientId) {
@@ -240,19 +260,19 @@ export class PortalDashboardService {
       }
     }
 
+    // Recent withdrawals are listed for display only. Money (available / inProgress / paid) comes
+    // from ClientBalanceService: finance-ledger net minus complete withdrawal aggregates, in the
+    // client's settlement currency. No row cap participates in any amount below.
     const withdrawals = await this.prisma.clientWithdrawal.findMany({
       where: { clientId },
       orderBy: { createdAt: "desc" },
       take: 100,
     });
 
-    const inProgress = withdrawals
-      .filter((w) => ["REQUESTED", "PROCESSING"].includes(w.status))
-      .reduce((s, w) => s + money(w.amount), 0);
-    const paid = withdrawals
-      .filter((w) => w.status === "PAID")
-      .reduce((s, w) => s + money(w.amount), 0);
-    const available = Math.max(0, money(approved) - inProgress - paid);
+    const settlementCurrency = resolveSettlementCurrency(client);
+    const balance = settlementCurrency
+      ? await this.balances.computeBalance({ clientId, currency: settlementCurrency })
+      : null;
 
     const financeCmp = await this.financeConsumer.compareClientEarnings(clientId, {
       assignmentIds: ids,
@@ -273,30 +293,41 @@ export class PortalDashboardService {
       }
     }
 
-    const displayApproved =
-      this.financeConsumer.getMode() === FINANCE_CONSUMER_MODES.FINANCE
-        ? display.approvedCommission
-        : approved;
     const displayPending =
       this.financeConsumer.getMode() === FINANCE_CONSUMER_MODES.FINANCE
         ? display.pendingCommission
         : pending;
-    const displayAvailable = Math.max(0, money(displayApproved) - inProgress - paid);
 
     const bank = await this.prisma.clientBankAccount.findUnique({ where: { clientId } });
 
     return {
-      currency: client.currency || null,
+      currency: settlementCurrency,
       kpis: {
-        available: money(
-          this.financeConsumer.getMode() === FINANCE_CONSUMER_MODES.FINANCE
-            ? displayAvailable
-            : available,
-        ),
+        // Authoritative: finance ledger net in the settlement currency, minus every REQUESTED,
+        // PROCESSING and PAID withdrawal in that currency. 0 when no settlement currency is
+        // configured — nothing can be authorised without one.
+        available: balance ? balance.available : 0,
+        availableRaw: balance ? balance.availableRaw : null,
+        earnedNet: balance ? balance.earnedNet : null,
+        // Informational only (legacy conversion snapshots) — never authorises a withdrawal.
         pending: money(displayPending),
-        inProgress: money(inProgress),
-        paid: money(paid),
+        inProgress: balance ? balance.reserved : 0,
+        paid: balance ? balance.paid : 0,
       },
+      balance: balance
+        ? { ...balance, status: "OK" }
+        : {
+            clientId,
+            currency: null,
+            earnedNet: null,
+            reserved: null,
+            paid: null,
+            availableRaw: null,
+            available: 0,
+            source: "financial_transaction",
+            status: "CURRENCY_NOT_CONFIGURED",
+          },
+      availableSource: "financial_transaction",
       commissionSource: display.source,
       commissionAuthoritative: display.authoritative,
       bank: bank
@@ -370,33 +401,68 @@ export class PortalDashboardService {
     };
   }
 
+  /**
+   * Create a withdrawal request. One concurrency-safe logical operation:
+   *   assert client → verify bank → resolve settlement currency (fail closed when missing) →
+   *   validate amount shape → SERIALIZABLE transaction { recompute authoritative balance →
+   *   amount ≤ available → insert REQUESTED } → commit.
+   *
+   * Two concurrent requests both read the withdrawal aggregate and both insert into it; under
+   * SERIALIZABLE isolation PostgreSQL refuses to commit the second (Prisma P2034). The loser is
+   * retried a bounded number of times, recomputes the balance inside a fresh transaction, and now
+   * sees the winner's row, so it fails "Amount exceeds available balance" instead of overdrawing.
+   * A conflicted transaction never committed anything, so a retry cannot double-insert.
+   *
+   * Remaining risk without a caller idempotency key (deliberately out of Phase 1 scope): a client
+   * that submits the same request twice, sequentially, gets two rows when the balance covers both.
+   */
   async requestWithdrawal(clientId, { amount, requestedBy }) {
-    await this.assertClient(clientId);
+    const client = await this.assertClient(clientId);
     const bank = await this.prisma.clientBankAccount.findUnique({ where: { clientId } });
     if (!bank) throw fail("Add bank details before requesting a withdrawal.", 400);
 
-    const summary = await this.getPaymentsSummary(clientId);
-    const value = money(amount);
-    if (!value || value < 1000) throw fail("Minimum withdrawal is 1,000.", 400);
-    if (value > summary.kpis.available) throw fail("Amount exceeds available balance.", 400);
-
-    let reference = newWithdrawalRef();
-    for (let i = 0; i < 5; i += 1) {
-      const clash = await this.prisma.clientWithdrawal.findUnique({ where: { reference } });
-      if (!clash) break;
-      reference = newWithdrawalRef();
+    const currency = resolveSettlementCurrency(client);
+    if (!currency) {
+      throw fail("Client settlement currency is not configured. Withdrawals are unavailable until it is set.", 409);
     }
 
-    const row = await this.prisma.clientWithdrawal.create({
-      data: {
-        clientId,
-        reference,
-        amount: value,
-        currency: summary.currency || undefined,
-        status: "REQUESTED",
-        requestedBy: requestedBy || null,
-      },
-    });
+    const value = money(amount);
+    if (!Number.isFinite(value) || value <= 0) throw fail("Withdrawal amount must be greater than zero.", 400);
+    if (value < MIN_WITHDRAWAL_AMOUNT) throw fail("Minimum withdrawal is 1,000.", 400);
+
+    let row = null;
+    let serializationAttempts = 0;
+    let referenceAttempts = 0;
+    while (!row) {
+      const reference = newWithdrawalRef();
+      try {
+        row = await this.runInTransaction(async (tx) => {
+          // Balance recomputed INSIDE the transaction; nothing read before it is trusted.
+          const balance = await this.balances.computeBalance({ clientId, currency }, tx);
+          if (value > balance.available) throw fail("Amount exceeds available balance.", 400);
+          return tx.clientWithdrawal.create({
+            data: {
+              clientId,
+              reference,
+              amount: value,
+              currency,
+              status: "REQUESTED",
+              requestedBy: requestedBy || null,
+            },
+          });
+        }, SERIALIZABLE_MONEY_TX_OPTIONS);
+      } catch (error) {
+        if (isSerializationConflict(error) && serializationAttempts < WITHDRAWAL_SERIALIZATION_RETRIES) {
+          serializationAttempts += 1;
+          continue;
+        }
+        if (isUniqueViolationOn(error, "reference") && referenceAttempts < WITHDRAWAL_REFERENCE_RETRIES) {
+          referenceAttempts += 1;
+          continue;
+        }
+        throw error;
+      }
+    }
 
     try {
       await this.audit.record({

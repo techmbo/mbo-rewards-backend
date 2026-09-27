@@ -267,6 +267,7 @@ import {
   adminListPayableOrdersHandler,
   adminListWithdrawalInvoiceRequestsHandler,
   adminListPayoutsHandler,
+  adminRecordMboReceiptHandler,
 } from "../controllers/adminClientSettlements.controller.js";
 import {
   boostinyListPaymentMappingsHandler,
@@ -1493,6 +1494,19 @@ router.get(
   authenticate,
   requirePermission(PERMISSIONS.FINANCE_OPS_READ),
   adminListPayoutsHandler,
+);
+/**
+ * Record an actual MBO bank receipt for an order (finance separation MBO_ACTUAL_RECEIPT) and
+ * attempt CLIENT_PAYMENT_PAYABLE through PaymentStateService. ADMIN role only: requireAdminRole
+ * plus finance_ops:manage (granted to ADMIN alone). No portal or API-key caller.
+ */
+router.post(
+  "/ops/admin/client-settlements/orders/:orderId/mbo-receipt",
+  authenticate,
+  requireAdminRole,
+  requirePermission(PERMISSIONS.FINANCE_OPS_MANAGE),
+  auditAction("finance.mbo_receipt.record", (req) => `order:${req.params.orderId}`),
+  adminRecordMboReceiptHandler,
 );
 
 /** Boostiny Partner Payment CSV — aggregate settlement only (never fake individual orders). */

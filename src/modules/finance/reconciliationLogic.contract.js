@@ -6,10 +6,17 @@
  * 2. Network Commission vs MBO Gross Network Commission
  * 3. Network Invoice vs Network Payment
  * 4. Network Payment vs MBO Actual Receipt
- * 5. MBO Receipt vs Client Payable
+ * 5. MBO Actual Receipt vs MBO Gross Network Commission
+ * 6. MBO Gross vs Client Payable + MBO Margin (the financial split)
+ *
+ * The bank receipt is gross money received by MBO; it reconciles to the gross ledger
+ * (FinancialTransaction.supplierReceivable net), never to client payable. Client payable is
+ * reconciled independently through the split gross = clientPayable + mboMargin, using the
+ * signed/net FinancialTransaction amounts, so any client share from 0% to 100% can pass.
  *
  * Missing source evidence is not a numeric mismatch and must never be filled from
- * an internal MBO amount. It is CANNOT_RECONCILE / SOURCE_DATA_MISSING.
+ * an internal MBO amount. It is CANNOT_RECONCILE / SOURCE_DATA_MISSING. In particular the
+ * margin is never derived as gross − clientPayable: that would make the split check a tautology.
  */
 
 export const RECONCILIATION_PAIR = {
@@ -17,7 +24,8 @@ export const RECONCILIATION_PAIR = {
   NETWORK_COMMISSION_VS_MBO_GROSS: "NETWORK_COMMISSION_VS_MBO_GROSS",
   NETWORK_INVOICE_VS_NETWORK_PAYMENT: "NETWORK_INVOICE_VS_NETWORK_PAYMENT",
   NETWORK_PAYMENT_VS_MBO_RECEIPT: "NETWORK_PAYMENT_VS_MBO_RECEIPT",
-  MBO_RECEIPT_VS_CLIENT_PAYABLE: "MBO_RECEIPT_VS_CLIENT_PAYABLE",
+  MBO_RECEIPT_VS_MBO_GROSS: "MBO_RECEIPT_VS_MBO_GROSS",
+  MBO_GROSS_VS_CLIENT_PAYABLE_PLUS_MARGIN: "MBO_GROSS_VS_CLIENT_PAYABLE_PLUS_MARGIN",
 };
 
 export const RECONCILIATION_PAIR_LABELS = {
@@ -25,7 +33,8 @@ export const RECONCILIATION_PAIR_LABELS = {
   [RECONCILIATION_PAIR.NETWORK_COMMISSION_VS_MBO_GROSS]: "Network Commission vs MBO Gross",
   [RECONCILIATION_PAIR.NETWORK_INVOICE_VS_NETWORK_PAYMENT]: "Network Invoice vs Network Payment",
   [RECONCILIATION_PAIR.NETWORK_PAYMENT_VS_MBO_RECEIPT]: "Network Payment vs MBO Receipt",
-  [RECONCILIATION_PAIR.MBO_RECEIPT_VS_CLIENT_PAYABLE]: "MBO Receipt vs Client Payable",
+  [RECONCILIATION_PAIR.MBO_RECEIPT_VS_MBO_GROSS]: "MBO Receipt vs MBO Gross",
+  [RECONCILIATION_PAIR.MBO_GROSS_VS_CLIENT_PAYABLE_PLUS_MARGIN]: "MBO Gross vs Client Payable + MBO Margin",
 };
 
 /** Currency amount pairs below this absolute difference are immaterial. */
@@ -45,11 +54,25 @@ export const RECONCILIATION_REASON_CODE = {
   SOURCE_DATA_MISSING: "SOURCE_DATA_MISSING",
 };
 
+/**
+ * Pairs that must each be MATCHED before client payable can be released:
+ *   network payment ≈ MBO receipt, MBO receipt ≈ MBO gross, network commission ≈ MBO gross,
+ *   MBO gross ≈ client payable + MBO margin.
+ */
 export const CLIENT_PAYABLE_BLOCKING_PAIRS = new Set([
   RECONCILIATION_PAIR.NETWORK_PAYMENT_VS_MBO_RECEIPT,
-  RECONCILIATION_PAIR.MBO_RECEIPT_VS_CLIENT_PAYABLE,
+  RECONCILIATION_PAIR.MBO_RECEIPT_VS_MBO_GROSS,
   RECONCILIATION_PAIR.NETWORK_COMMISSION_VS_MBO_GROSS,
+  RECONCILIATION_PAIR.MBO_GROSS_VS_CLIENT_PAYABLE_PLUS_MARGIN,
 ]);
+
+/** clientPayable + mboMargin, or null when either side of the split is unknown (never guessed). */
+function sumOfSplit(clientPayableAmount, mboMarginAmount) {
+  const client = toNumber(clientPayableAmount);
+  const margin = toNumber(mboMarginAmount);
+  if (client == null || margin == null) return null;
+  return Number((client + margin).toFixed(4));
+}
 
 function toNumber(value) {
   if (value == null || value === "") return null;
@@ -151,7 +174,7 @@ function buildCheck({
 }
 
 /**
- * Run all five pairwise reconciliation checks.
+ * Run all six pairwise reconciliation checks.
  */
 export function runReconciliationChecks({
   networkOrderCount = null,
@@ -162,6 +185,7 @@ export function runReconciliationChecks({
   networkPaymentAmount = null,
   mboActualReceiptAmount = null,
   clientPayableAmount = null,
+  mboMarginAmount = null,
   materialityThreshold = DEFAULT_MATERIALITY_THRESHOLD,
 } = {}) {
   const checks = [
@@ -199,11 +223,19 @@ export function runReconciliationChecks({
       materialityThreshold,
     }),
     buildCheck({
-      pair: RECONCILIATION_PAIR.MBO_RECEIPT_VS_CLIENT_PAYABLE,
+      pair: RECONCILIATION_PAIR.MBO_RECEIPT_VS_MBO_GROSS,
       left: mboActualReceiptAmount,
-      right: clientPayableAmount,
+      right: mboGrossNetworkCommission,
       leftLabel: "MBO actual receipt",
-      rightLabel: "Client payable",
+      rightLabel: "MBO gross network commission",
+      materialityThreshold,
+    }),
+    buildCheck({
+      pair: RECONCILIATION_PAIR.MBO_GROSS_VS_CLIENT_PAYABLE_PLUS_MARGIN,
+      left: mboGrossNetworkCommission,
+      right: sumOfSplit(clientPayableAmount, mboMarginAmount),
+      leftLabel: "MBO gross network commission",
+      rightLabel: "Client payable + MBO margin",
       materialityThreshold,
     }),
   ];
@@ -231,12 +263,17 @@ export function runReconciliationChecks({
   };
 }
 
+/**
+ * Client payable release is blocked unless EVERY blocking pair is present and MATCHED.
+ * A check list that omits a required pair fails closed: absence of a check is not evidence.
+ */
 export function shouldBlockClientPayableRelease(checks = []) {
-  return checks.some(
-    (check) =>
-      CLIENT_PAYABLE_BLOCKING_PAIRS.has(check.pair) &&
-      check.status !== RECONCILIATION_STATUS.MATCHED,
-  );
+  const list = Array.isArray(checks) ? checks : [];
+  for (const pair of CLIENT_PAYABLE_BLOCKING_PAIRS) {
+    const check = list.find((c) => c?.pair === pair);
+    if (!check || check.status !== RECONCILIATION_STATUS.MATCHED) return true;
+  }
+  return false;
 }
 
 export function summarizeChecksForUi(checks = []) {

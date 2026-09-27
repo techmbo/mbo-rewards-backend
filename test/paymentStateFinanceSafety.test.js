@@ -32,6 +32,7 @@ function makeHarness({ order = makeOrder(), transactions = null, requireSupplier
       id: "ft-1",
       supplierReceivable: "100",
       clientPayable: "100",
+      mboMargin: "0",
       transactionType: "EARN",
       originalCurrency: "USD",
       metadata: {},
