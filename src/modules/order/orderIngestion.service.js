@@ -125,13 +125,15 @@ export class OrderIngestionService {
       db,
     );
 
+    // statusSourceObject is set only by callers that proved the raw status came from a verified
+    // source object (Partnerize conversion_status → "conversions"); everyone else resolves as before.
     const statusResolution = resolveOrderStatusFromNetworkRaw(
       input.networkRawStatus ??
         input.metadata?.network_raw_status ??
         input.metadata?.networkRawStatus ??
         input.metadata?.rawStatus ??
         null,
-      { supplier },
+      { supplier, ...(input.statusSourceObject ? { sourceObject: input.statusSourceObject } : {}) },
     );
 
     const effectiveMboOrderStatus =

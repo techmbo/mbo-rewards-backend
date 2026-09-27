@@ -40,7 +40,42 @@ export const STATUS_MAPPING_STATUS = Object.freeze({
  *
  * PR4 intentionally starts empty rather than carrying the previous universal guesses.
  */
-export const VERIFIED_NETWORK_STATUS_REGISTRY = Object.freeze([]);
+const PARTNERIZE_CONVERSION_STATUS_EVIDENCE =
+  "MBO_Rewards_Internal_Network_Integration_Master_CANONICAL_FINAL — Partnerize § 8 Conversion Status " +
+  "Mapping (approved / pending / rejected); Partnerize Publisher API conversion report statuses.";
+
+export const VERIFIED_NETWORK_STATUS_REGISTRY = Object.freeze([
+  // Partnerize conversion rows (conversion_status). Scoped to the conversions source object only:
+  // campaign, payment or any other Partnerize object never matches. Unknown/new values stay
+  // REVIEW_REQUIRED; "declined" and the report filter value "mixed" are deliberately absent.
+  Object.freeze({
+    supplier: "PARTNERIZE",
+    sourceObject: "conversions",
+    sourceReport: null,
+    rawStatus: "pending",
+    mboOrderStatus: MBO_ORDER_STATUS.PENDING,
+    supplierPaymentStatus: null,
+    evidence: PARTNERIZE_CONVERSION_STATUS_EVIDENCE,
+  }),
+  Object.freeze({
+    supplier: "PARTNERIZE",
+    sourceObject: "conversions",
+    sourceReport: null,
+    rawStatus: "approved",
+    mboOrderStatus: MBO_ORDER_STATUS.CONFIRMED,
+    supplierPaymentStatus: null,
+    evidence: PARTNERIZE_CONVERSION_STATUS_EVIDENCE,
+  }),
+  Object.freeze({
+    supplier: "PARTNERIZE",
+    sourceObject: "conversions",
+    sourceReport: null,
+    rawStatus: "rejected",
+    mboOrderStatus: MBO_ORDER_STATUS.REJECTED,
+    supplierPaymentStatus: null,
+    evidence: PARTNERIZE_CONVERSION_STATUS_EVIDENCE,
+  }),
+]);
 
 /**
  * Store network status exactly as received (string casing/spacing preserved;

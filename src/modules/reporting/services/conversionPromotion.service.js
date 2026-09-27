@@ -19,6 +19,7 @@ import {
 } from "../../order/orderStatusNormalization.contract.js";
 import { extractOptimiseConversionFields } from "../../supplier/mappers/optimise.mapper.js";
 import { AttributionService } from "./attribution.service.js";
+import { FinancialTransactionService } from "../../finance/financialTransaction.service.js";
 
 export {
   extractNetworkConversionId as extractSupplierConversionId,
@@ -57,6 +58,29 @@ export function extractOrderItems(rawData) {
   return mapRawOrderItems(rawData);
 }
 
+/** The verified status registry's source object for Partnerize conversion rows. */
+const PARTNERIZE_CONVERSION_STATUS_SOURCE_OBJECT = "conversions";
+
+/**
+ * Partnerize conversion fields that the generic fallbacks below do not read. Partnerize reports
+ * the publisher's commission as publisher_commission, the event time as conversion_time, the
+ * order value as conversion_value (a plain value, or an object carrying .value) and the
+ * conversion's own status as conversion_status. Applied to Partnerize rows only, ahead of the
+ * generic fallbacks, so no other supplier's mapping changes.
+ */
+function extractPartnerizeConversionFields(raw) {
+  const conversionValue = raw.conversion_value;
+  return {
+    status: raw.conversion_status ?? null,
+    supplierCommission: toNumberOrNull(raw.publisher_commission),
+    conversionDate: raw.conversion_time ?? null,
+    orderValue:
+      conversionValue && typeof conversionValue === "object"
+        ? toNumberOrNull(conversionValue.value)
+        : toNumberOrNull(conversionValue),
+  };
+}
+
 export function mapEntityToConversionIngest(entity) {
   const raw = asObject(entity.rawData);
   const normalized = asObject(entity.normalizedData);
@@ -73,6 +97,11 @@ export function mapEntityToConversionIngest(entity) {
 
   const optimise =
     supplier === "OPTIMISE" ? extractOptimiseConversionFields(raw) : null;
+  const partnerize =
+    supplier === "PARTNERIZE" ? extractPartnerizeConversionFields(raw) : null;
+  // At most one supplier-specific extractor applies to a row; every other supplier gets null here
+  // and keeps the generic fallbacks unchanged.
+  const supplierSpecific = optimise ?? partnerize;
   const hints = extractAttributionHints(raw);
   if (optimise?.assignmentIdHint && !hints.assignmentId) {
     hints.assignmentId = String(optimise.assignmentIdHint);
@@ -87,8 +116,8 @@ export function mapEntityToConversionIngest(entity) {
   // Prefer Optimise conversion commission fields; never campaign headline / Product.price.
   // Boostiny order-level performance uses net_revenue / revenue (not "commission").
   const supplierCommission =
-    optimise?.supplierCommission != null
-      ? optimise.supplierCommission
+    supplierSpecific?.supplierCommission != null
+      ? supplierSpecific.supplierCommission
       : toNumberOrNull(
           first(
             raw.commission,
@@ -123,7 +152,7 @@ export function mapEntityToConversionIngest(entity) {
       : toNumberOrNull(first(raw.validatedCommission, raw.approvedCommission));
 
   const rawStatusValue = first(
-    optimise?.status,
+    supplierSpecific?.status,
     raw.status,
     raw.State,
     raw.state,
@@ -132,7 +161,16 @@ export function mapEntityToConversionIngest(entity) {
     normalized.status,
     entity.entityStatus,
   );
-  const statusResolution = resolveOrderStatusFromNetworkRaw(rawStatusValue, { supplier });
+  // Only a Partnerize conversion_status carries the verified conversions scope. A status that
+  // fell back to a generic field is resolved without it and therefore stays under review.
+  const statusSourceObject =
+    partnerize?.status != null && partnerize.status !== "" && rawStatusValue === partnerize.status
+      ? PARTNERIZE_CONVERSION_STATUS_SOURCE_OBJECT
+      : null;
+  const statusResolution = resolveOrderStatusFromNetworkRaw(rawStatusValue, {
+    supplier,
+    ...(statusSourceObject ? { sourceObject: statusSourceObject } : {}),
+  });
   const networkRawStatus = statusResolution.networkRawStatus;
   const mboOrderStatus = statusResolution.mboOrderStatus;
   const conversionStatus =
@@ -141,7 +179,9 @@ export function mapEntityToConversionIngest(entity) {
 
   const conversionDate = toDateOrNull(
     first(
-      optimise?.conversionDate,
+      // A malformed Partnerize conversion_time is taken here and fails toDateOrNull, so the row
+      // skips as missing_conversion_date instead of silently borrowing a different date field.
+      supplierSpecific?.conversionDate,
       raw.conversionDate,
       raw.conversion_date,
       raw.EventDate,
@@ -170,8 +210,8 @@ export function mapEntityToConversionIngest(entity) {
   );
 
   const orderValue =
-    optimise?.orderValue != null
-      ? optimise.orderValue
+    supplierSpecific?.orderValue != null
+      ? supplierSpecific.orderValue
       : toNumberOrNull(
           first(
             raw.originalOrderValue,
@@ -282,6 +322,7 @@ export function mapEntityToConversionIngest(entity) {
         networkRawStatus,
         mboOrderStatus,
         statusMappingExceptionRequired: statusResolution.mappingExceptionRequired,
+        statusSourceObject,
         items: extractOrderItems(raw),
       },
     },
@@ -361,6 +402,53 @@ export class ConversionPromotionService {
     this.orders = deps.orders ?? new OrderIngestionService();
     this.exceptions = deps.exceptions ?? new ExceptionCaseService();
     this.prisma = deps.prisma ?? prisma;
+    this.finance = deps.finance ?? new FinancialTransactionService();
+  }
+
+  /**
+   * Finance recognition for an order that promotion left VALIDATION_APPROVED.
+   *
+   * ValidationService.transition recognises finance when an order MOVES into approval. An order
+   * that promotion creates already approved (a verified source status) never makes that move, and
+   * its conversion is only linked afterwards — so the existing approved-basis sync is run here
+   * instead. It recognises a missing earn (recognition key earn:{conversionId}), and is a no-op or an
+   * idempotent correction when one exists, so re-promoting the same entity never duplicates it.
+   *
+   * Domain outcomes (missing client, unresolved attribution, no commercial rule, missing currency)
+   * are the finance service's own: it reports its ExceptionCase and returns an unresolved result,
+   * and the promoted order/conversion stand. An unexpected error is logged and returned on the
+   * outcome rather than undoing a valid promotion; the next promotion run retries it idempotently.
+   */
+  async syncApprovedFinance(order, entityId, client = null) {
+    if (!order?.id || order.validationStatus !== "VALIDATION_APPROVED") {
+      return { status: "not_applicable", validationStatus: order?.validationStatus ?? null };
+    }
+    try {
+      const synced = await this.finance.syncApprovedBasisForOrder(
+        { orderId: order.id, reason: "conversion_promotion" },
+        client,
+      );
+      if (synced?.skipped) return { status: "skipped", reason: synced.reason ?? null };
+      const results = Array.isArray(synced?.results) ? synced.results : [];
+      const unresolved = results.filter((r) => r?.unresolved === true || r?.action === "unresolved");
+      return {
+        status: unresolved.length ? "unresolved" : "synced",
+        results: results.map((r) => ({
+          conversionId: r?.conversionId ?? null,
+          action: r?.action ?? null,
+          created: r?.created ?? null,
+          reused: r?.reused ?? null,
+          unresolved: r?.unresolved === true || r?.action === "unresolved",
+          reason: r?.reason ?? null,
+        })),
+      };
+    } catch (error) {
+      logger.error(
+        { entityId, orderId: order.id, err: error?.message || String(error) },
+        "finance recognition after conversion promotion failed",
+      );
+      return { status: "error", error: error?.message || String(error) };
+    }
   }
 
   async promoteEntity(entity, client = null) {
@@ -424,6 +512,7 @@ export class ConversionPromotionService {
           networkRawStatus: orderFacts.networkRawStatus ?? meta.network_raw_status ?? null,
           mboOrderStatus: orderFacts.mboOrderStatus ?? meta.mboOrderStatus ?? null,
           statusMappingExceptionRequired: orderFacts.statusMappingExceptionRequired ?? false,
+          statusSourceObject: orderFacts.statusSourceObject ?? null,
           items: orderFacts.items,
           rawPayloadId: rawRow?.id ?? null,
           merchantId: catalog.merchantId,
@@ -476,6 +565,8 @@ export class ConversionPromotionService {
           // Lineage status is best-effort.
         }
       }
+      // After the order exists AND the conversion is linked to it (ingestConversion sets orderId).
+      const finance = await this.syncApprovedFinance(order, entity.id, client);
       return {
         result: "promoted",
         conversionId: conversion?.id ?? null,
@@ -483,6 +574,7 @@ export class ConversionPromotionService {
         attributionStatus: conversion?.attributionStatus ?? null,
         entityId: entity.id,
         rawPayloadId: rawRow?.id ?? null,
+        finance,
       };
     } catch (error) {
       logger.warn(
@@ -515,6 +607,7 @@ export class ConversionPromotionService {
       promoted: 0,
       skipped: 0,
       failed: 0,
+      financeErrors: 0,
       lastCursor: null,
       hasMore: false,
       durationMs: 0,
@@ -543,6 +636,7 @@ export class ConversionPromotionService {
       if (outcome.result === "promoted") summary.promoted += 1;
       else if (outcome.result === "failed") summary.failed += 1;
       else summary.skipped += 1;
+      if (outcome.finance?.status === "error") summary.financeErrors += 1;
     }
 
     summary.lastCursor = batch[batch.length - 1].id;
@@ -567,6 +661,7 @@ export class ConversionPromotionService {
       promoted: 0,
       skipped: 0,
       failed: 0,
+      financeErrors: 0,
       durationMs: 0,
     };
 
@@ -578,6 +673,7 @@ export class ConversionPromotionService {
       summary.promoted += page.promoted;
       summary.skipped += page.skipped;
       summary.failed += page.failed;
+      summary.financeErrors += page.financeErrors ?? 0;
       if (!page.hasMore) break;
       cursor = page.lastCursor;
     }
