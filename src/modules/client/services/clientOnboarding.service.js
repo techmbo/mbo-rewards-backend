@@ -47,6 +47,15 @@ const ALLOT_TX_OPTIONS = {
   timeout: 25_000,
 };
 
+/**
+ * setCommercialModel TX: one client row plus, per non-revoked assignment, one lookup and at most
+ * two rule writes (supersede + create). Small statements only, so a generous ceiling is safe.
+ */
+const COMMERCIAL_MODEL_TX_OPTIONS = {
+  maxWait: 10_000,
+  timeout: 60_000,
+};
+
 /** How many different campaign groups to allot in parallel. */
 const ALLOT_GROUP_CONCURRENCY = Number(process.env.ALLOT_GROUP_CONCURRENCY || 8);
 
@@ -313,24 +322,37 @@ export class ClientOnboardingService {
     }
 
     const preset = resolveCommercialPreset(commercialModel, share);
-    const updated = await this.clientRepo.update(clientId, {
-      commercialModel,
-      clientSharePercent: share,
-    });
 
-    // Re-sync commission rules for existing draft/active assignments when model changes.
-    const assignments = await this.assignmentRepo.findMany(
-      { clientId, status: undefined },
-      { skip: 0, take: 500 },
-    );
-    for (const assignment of assignments.rows) {
-      if (assignment.status === "REVOKED") continue;
-      await this.ensureCommissionRule(assignment.id, commercialModel, null, {
-        clientSharePercent: preset.clientSharePercent,
+    // One transaction: the client's stored share and every non-revoked assignment's rule state
+    // move together. A failure anywhere rolls back the client column and every rule transition,
+    // so no assignment is left mid-change and the client never advertises a share its rules do
+    // not carry. Each assignment that was EFFECTIVE before the change is EFFECTIVE (with the new
+    // split) after it — see ensureCommissionRuleDraft({ activateReplacement: true }).
+    return this.runInTransaction(async (tx) => {
+      const updated = await this.clientRepo.update(
+        clientId,
+        {
+          commercialModel,
+          clientSharePercent: share,
+        },
+        tx,
+      );
+
+      // Every non-revoked assignment, id only, no page cap: a capped page would silently leave
+      // the remainder on the old split.
+      const assignments = await tx.clientCampaignAssignment.findMany({
+        where: { clientId, status: { not: "REVOKED" } },
+        select: { id: true },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       });
-    }
+      for (const assignment of assignments) {
+        await this.ensureCommissionRule(assignment.id, commercialModel, tx, {
+          clientSharePercent: preset.clientSharePercent,
+        });
+      }
 
-    return updated;
+      return updated;
+    }, COMMERCIAL_MODEL_TX_OPTIONS);
   }
 
   async inviteAdministrator(clientId, { email, name }) {
@@ -811,9 +833,26 @@ export class ClientOnboardingService {
   }
 
   /**
-   * One lookup + create/update for DRAFT commission — no multi-query guarantee dance.
+   * One lookup + create/update for the preset commission rule of an assignment.
+   *
+   * - no DRAFT/EFFECTIVE rule        → create a DRAFT with the preset split
+   * - existing rule, same split      → return it unchanged (no duplicate)
+   * - existing DRAFT, other split    → update the DRAFT in place
+   * - existing EFFECTIVE, other split → supersede it (history preserved, money values untouched)
+   *   and create the replacement. With `activateReplacement` the replacement is created EFFECTIVE
+   *   in the same operation, so an assignment that was payable before the change is payable after
+   *   it; without it (provisioning paths) the replacement is a DRAFT that provision() activates.
+   *
+   * Split comparison is numeric at 4dp: Prisma returns Decimal values whose String() form drops
+   * trailing zeros ("70"), so a string comparison against the preset's "70.0000" never matched a
+   * persisted row and treated every unchanged share as a change.
    */
-  async ensureCommissionRuleDraft(assignmentId, commercialModel, client = null, { clientSharePercent } = {}) {
+  async ensureCommissionRuleDraft(
+    assignmentId,
+    commercialModel,
+    client = null,
+    { clientSharePercent, activateReplacement = false } = {},
+  ) {
     const db = client ?? prisma;
     const preset = resolveCommercialPreset(commercialModel, clientSharePercent);
     if (!preset) throw fail("Invalid commercial model.", 400);
@@ -824,10 +863,11 @@ export class ClientOnboardingService {
       orderBy: [{ status: "desc" }, { effectiveFrom: "desc" }],
     });
 
+    let replacementStatus = "DRAFT";
     if (existing) {
       if (
-        String(existing.clientCommission) === preset.clientCommission &&
-        String(existing.grossCommission) === preset.grossCommission
+        Number(existing.clientCommission).toFixed(4) === preset.clientCommission &&
+        Number(existing.grossCommission).toFixed(4) === preset.grossCommission
       ) {
         return existing;
       }
@@ -842,42 +882,28 @@ export class ClientOnboardingService {
           },
         });
       }
+      // EFFECTIVE with a different split: close it, never rewrite its money values.
       await db.clientCommissionRule.update({
         where: { id: existing.id },
         data: { status: "SUPERSEDED", effectiveUntil: new Date() },
       });
+      if (activateReplacement) replacementStatus = "EFFECTIVE";
     }
 
-    const effectiveFrom = new Date();
-    // Unique (assignmentId, effectiveFrom) — nudge if same-second collision
-    try {
-      return await db.clientCommissionRule.create({
-        data: {
-          assignmentId,
-          grossCommission: preset.grossCommission,
-          clientCommission: preset.clientCommission,
-          mboCommission,
-          commissionType: preset.commissionType,
-          effectiveFrom,
-          effectiveUntil: null,
-          status: "DRAFT",
-        },
-      });
-    } catch (error) {
-      effectiveFrom.setSeconds(effectiveFrom.getSeconds() + 1);
-      return db.clientCommissionRule.create({
-        data: {
-          assignmentId,
-          grossCommission: preset.grossCommission,
-          clientCommission: preset.clientCommission,
-          mboCommission,
-          commissionType: preset.commissionType,
-          effectiveFrom,
-          effectiveUntil: null,
-          status: "DRAFT",
-        },
-      });
-    }
+    // Supersede-then-create runs inside the caller's transaction when one is supplied, so no
+    // reader observes two EFFECTIVE rules or an assignment with none.
+    return db.clientCommissionRule.create({
+      data: {
+        assignmentId,
+        grossCommission: preset.grossCommission,
+        clientCommission: preset.clientCommission,
+        mboCommission,
+        commissionType: preset.commissionType,
+        effectiveFrom: new Date(),
+        effectiveUntil: null,
+        status: replacementStatus,
+      },
+    });
   }
 
   /**
@@ -963,9 +989,16 @@ export class ClientOnboardingService {
     return this.assignmentRepo.update(assignment.id, { campaignSourceId: source.id }, client);
   }
 
+  /**
+   * Commercial-model re-sync path (setCommercialModel). Unlike the provisioning paths, a
+   * replacement for an EFFECTIVE rule is activated in the same operation: nothing else runs
+   * afterwards to promote a DRAFT, and the assignment must not lose its payable rule.
+   */
   async ensureCommissionRule(assignmentId, commercialModel, client = null, { clientSharePercent } = {}) {
-    // Keep full path for commercial model re-sync; bulk allot uses ensureCommissionRuleDraft.
-    return this.ensureCommissionRuleDraft(assignmentId, commercialModel, client, { clientSharePercent });
+    return this.ensureCommissionRuleDraft(assignmentId, commercialModel, client, {
+      clientSharePercent,
+      activateReplacement: true,
+    });
   }
 
   async ensureTrackingLink(assignment, client = null, options = {}) {

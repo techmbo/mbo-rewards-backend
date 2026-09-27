@@ -1,3 +1,5 @@
+import { applyClientShareRatio } from "./commissionMath.js";
+
 const SUPPORTED_TIER_METRICS = new Set([
   "ORDER_COUNT",
   "ORDER_VALUE",
@@ -38,11 +40,21 @@ function ruleType(rule = {}) {
   return normalize(rule.commissionType ?? rule.commission_type ?? rule.type) || "UNKNOWN";
 }
 
-function clientSharePercent(rule = {}) {
+/**
+ * Validated ratio pair of a client commercial rule, or null when it cannot express a share.
+ * The pair is kept as-is so the amount is derived through the canonical applyClientShareRatio
+ * expression (never via a percent that is multiplied back out — see commissionMath.js).
+ */
+function clientSharePair(rule = {}) {
   const gross = asNumber(rule.grossCommission ?? rule.gross_commission);
   const client = asNumber(rule.clientCommission ?? rule.client_commission);
   if (gross == null || client == null || gross <= 0 || client < 0) return null;
-  return (client / gross) * 100;
+  return { gross, client };
+}
+
+/** Display/report percent for a validated pair (e.g. 70). Never used to derive money. */
+function sharePercentOf(pair) {
+  return (pair.client / pair.gross) * 100;
 }
 
 function completeApproval(approval = {}) {
@@ -178,13 +190,14 @@ export function selectClientCommercialTier({ rule = {}, context = {} } = {}) {
 }
 
 function calculatePercentageOfSupplier(rule, context) {
-  const share = clientSharePercent(rule);
+  const pair = clientSharePair(rule);
   const actual = asNumber(
     context.networkActualCommission ?? context.validatedSupplierCommission,
   );
-  if (share == null) {
+  if (pair == null) {
     return { status: "REVIEW_REQUIRED", reason: "invalid_client_share_ratio" };
   }
+  const sharePercent = roundMoney(sharePercentOf(pair));
   if (actual == null) {
     const expected = asNumber(context.expectedSupplierCommission);
     if (expected == null || context.provisionalAllowed !== true) {
@@ -192,18 +205,18 @@ function calculatePercentageOfSupplier(rule, context) {
     }
     return {
       status: "CALCULATED",
-      amount: roundMoney((expected * share) / 100),
+      amount: roundMoney(applyClientShareRatio(expected, pair.gross, pair.client)),
       provisional: true,
       payoutBasis: "EXPECTED_SUPPLIER_COMMISSION",
-      sharePercent: roundMoney(share),
+      sharePercent,
     };
   }
   return {
     status: "CALCULATED",
-    amount: roundMoney((actual * share) / 100),
+    amount: roundMoney(applyClientShareRatio(actual, pair.gross, pair.client)),
     provisional: false,
     payoutBasis: "NETWORK_ACTUAL_COMMISSION",
-    sharePercent: roundMoney(share),
+    sharePercent,
   };
 }
 

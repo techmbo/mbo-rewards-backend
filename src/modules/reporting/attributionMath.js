@@ -1,4 +1,4 @@
-import { deriveMboCommission } from "../commercial/commissionMath.js";
+import { applyClientShareRatio, deriveMboCommission } from "../commercial/commissionMath.js";
 
 export function isPayableConversionStatus(status) {
   const value = String(status || "").toUpperCase();
@@ -88,8 +88,8 @@ export function applyCommissionRuleToGross(grossAmount, rule) {
     };
   }
 
-  const ratio = ruleClient / ruleGross;
-  const clientCommissionNum = gross * ratio;
+  // Canonical expression shared with the commercial engine — see applyClientShareRatio.
+  const clientCommissionNum = applyClientShareRatio(gross, ruleGross, ruleClient);
   if (clientCommissionNum < 0) {
     return {
       ok: false,
