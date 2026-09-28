@@ -30,6 +30,10 @@ import {
 } from "../src/jobs/syncOrchestration.service.js";
 import { AWIN_MATERIALIZATION_PAGE_SIZE } from "../src/jobs/awinParentMaterializationUnit.js";
 
+// These tests pin route/worker behaviour across every network. The strict supplier gate is a
+// separate policy (test/syncGatingObservability.test.js), so the service is given an open gate here.
+const openSupplierGate = async () => () => ({ allowed: true, status: "ENABLED", supplierKey: null });
+
 const ROUTES_SRC = readFileSync(new URL("../src/routes/index.js", import.meta.url), "utf8");
 const CONTROLLER_SRC = readFileSync(new URL("../src/controllers/sync.controller.js", import.meta.url), "utf8");
 const NOW = new Date("2026-09-21T00:00:00.000Z");
@@ -107,7 +111,7 @@ function createStore() {
 
 function harness({ pageImpl } = {}) {
   const { rows, prisma } = createStore();
-  const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState });
+  const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState, loadSupplierGate: openSupplierGate });
   const supplierCalls = [];
   const materializationCalls = [];
   const locals = {

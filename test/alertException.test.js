@@ -131,7 +131,11 @@ describe("Pointer 21 — exception reporting integration", () => {
     assert.equal(reports.length, 1);
     assert.equal(reports[0].condition, ALERT_CONDITION.AUTHENTICATION_FAILURE);
     assert.equal(updates.length, 1);
-    assert.equal(updates[0].data.syncEnabled, false);
+    // A real pause (pausedAt) rather than flipping the admin's syncEnabled switch.
+    assert.ok(updates[0].data.pausedAt instanceof Date);
+    assert.equal(updates[0].data.pausedReason, "AUTH_FAILED");
+    assert.equal(updates[0].data.lastFailureCode, "HTTP_401");
+    assert.equal("syncEnabled" in updates[0].data, false);
     assert.equal(updates[0].data.credentialHealth, "FAILED");
   });
 });

@@ -22,6 +22,10 @@ import {
 } from "../src/jobs/syncOrchestration.service.js";
 import { DEFAULT_LEASE_MS as LOCK_LEASE_MS, accountLockKey } from "../src/jobs/syncAccountLock.service.js";
 
+// These tests pin plan shape across every network. The PLANNED-supplier gate is a separate policy
+// (test/supplierSyncGate.test.js), so the service is given an open gate here.
+const openSupplierGate = async () => () => ({ allowed: true, status: "ENABLED", supplierKey: null });
+
 /** Minimal in-memory JobRun store honouring the where-shapes the service uses. */
 function createFakePrisma({ failCreateAfter = Infinity } = {}) {
   const rows = [];
@@ -105,7 +109,7 @@ const now = () => clock;
 // instead of a magic unit count. A never-synced account plans its full initial lookback.
 const loadAccountState = async () => ({ lastSuccessfulSync: null });
 const serviceFor = (prisma, extra = {}) =>
-  new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState, ...extra });
+  new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState, loadSupplierGate: openSupplierGate, ...extra });
 const planFor = (opts = {}) => buildSyncPlan({ listAccounts, loadAccountState, now: clock, ...opts });
 const planSize = async (opts = {}) => (await planFor(opts)).units.length;
 

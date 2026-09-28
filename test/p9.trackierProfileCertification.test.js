@@ -213,7 +213,8 @@ describe("the documented profile request contract", () => {
     for (const source of [
       'getMarketplaceApiKey("trackier"',
       'getOAuthAccessToken("trackier"',
-      "process.env.VCOMMISSION_API_KEY",
+      // Formerly process.env.VCOMMISSION_API_KEY; the catalog now maps trackier.primarySecret to it.
+      'legacyEnvCredential("trackier", CREDENTIAL_SLOTS.PRIMARY_SECRET)',
     ]) {
       assert.ok(code.includes(source), `certification: ${source}`);
       assert.ok(sync.includes(source), `sync: ${source}`);

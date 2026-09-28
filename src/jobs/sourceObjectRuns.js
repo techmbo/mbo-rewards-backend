@@ -12,7 +12,10 @@ import {
   sourceObjectSync,
 } from "../modules/networkOps/sourceObjectSync.service.js";
 import { getSourceObject } from "../modules/networkOps/sourceObjects.catalog.js";
-import { getSyncOptions, sourceObjectCompanions } from "./syncContext.js";
+import { SYNC_TRIGGER } from "../modules/networkOps/syncObservability.contract.js";
+import { getNetworkAccountSyncFlags } from "../modules/integrations/oauth.service.js";
+import { explicitSyncWindow, getSyncOptions, runWithSyncOptions, sourceObjectCompanions } from "./syncContext.js";
+import { activeSyncTrigger } from "./syncState.js";
 import { fetchOptimiseResource } from "./optimiseResourceSync.js";
 import { fetchTrackierResource } from "./trackierResourceSync.js";
 
@@ -35,6 +38,131 @@ export async function resolveNetworkAccountId(platform, accountLabel, db = prism
   }
 }
 
+/**
+ * Which Network Connection switch governs each source object. Anything not listed (supporting
+ * calls such as a Trackier profile) is governed only by the connection-level pause.
+ */
+export const SOURCE_OBJECT_CONNECTION_TOGGLE = Object.freeze({
+  // campaigns / programmes and their terms
+  campaigns: "campaignSyncEnabled",
+  programmes: "campaignSyncEnabled",
+  programs: "campaignSyncEnabled",
+  advertisers: "campaignSyncEnabled",
+  partnerships: "campaignSyncEnabled",
+  commissioning_lists: "campaignSyncEnabled",
+  commission_groups: "campaignSyncEnabled",
+  // coupons / vouchers / offers
+  voucher_codes: "couponSyncEnabled",
+  coupons: "couponSyncEnabled",
+  deals: "couponSyncEnabled",
+  offers: "couponSyncEnabled",
+  // products
+  products: "productSyncEnabled",
+  catalogs: "productSyncEnabled",
+  product_feeds: "productSyncEnabled",
+  // conversions and the performance reports built from them
+  conversions: "conversionSyncEnabled",
+  transactions: "conversionSyncEnabled",
+  actions: "conversionSyncEnabled",
+  events: "conversionSyncEnabled",
+  api_reports: "conversionSyncEnabled",
+  reporting: "conversionSyncEnabled",
+  reports: "conversionSyncEnabled",
+  tracking: "conversionSyncEnabled",
+  analytics: "conversionSyncEnabled",
+  link_reports: "conversionSyncEnabled",
+  reports_kpi: "conversionSyncEnabled",
+  // finance
+  payment_overview: "financeSyncEnabled",
+  invoices: "financeSyncEnabled",
+  payment_information: "financeSyncEnabled",
+  advanced_reports: "financeSyncEnabled",
+  settlement: "financeSyncEnabled",
+  finance: "financeSyncEnabled",
+});
+
+/**
+ * Run one account's sync inside its Network Connection scope. With no connection record (legacy
+ * env-configured networks) nothing changes. With one, a paused connection enables nothing and each
+ * disabled switch removes its source objects from includeSourceObject — the same predicate every
+ * sync already uses for BOTH fetching and persisting, so a disabled object is never fetched and
+ * its staged data is never touched.
+ */
+export async function withConnectionScope(platform, accountLabel, fn, deps = {}) {
+  const flagsFor = deps.getFlags ?? getNetworkAccountSyncFlags;
+  let flags = null;
+  try {
+    flags = await flagsFor(platform, accountLabel || "default");
+  } catch {
+    flags = null;
+  }
+  if (!flags?.exists) return fn();
+  // A paused connection syncs nothing and stamps nothing: no fetch, no health verdict, no checkpoint.
+  if (flags.paused) {
+    return {
+      skipped: true,
+      connectionPaused: true,
+      reason: `Network connection ${platform}/${accountLabel || "default"} is paused (${flags.pausedReason || "PAUSED"}).`,
+    };
+  }
+  const disabled = Object.keys(SOURCE_OBJECT_CONNECTION_TOGGLE).filter(
+    (object) => flags[SOURCE_OBJECT_CONNECTION_TOGGLE[object]] === false,
+  );
+  return runWithSyncOptions(
+    {
+      ...getSyncOptions(),
+      connectionScope: { platform, accountLabel: accountLabel || "default", disabled },
+    },
+    fn,
+  );
+}
+
+function disabledByConnection(sourceObject) {
+  const scope = getSyncOptions()?.connectionScope;
+  if (!scope) return false;
+  return Array.isArray(scope.disabled) && scope.disabled.includes(String(sourceObject || "").toLowerCase());
+}
+
+/** The trigger recorded on NetworkSyncRun: the run's own origin, never a hard-coded default. */
+export function currentSyncTrigger() {
+  // The run's own origin when the caller supplied one (worker units carry their run's), else the
+  // in-process slot's (a manual per-network route or the canary holds it as "api").
+  const trigger = String(getSyncOptions()?.trigger || activeSyncTrigger() || "").toLowerCase();
+  if (trigger === SYNC_TRIGGER.MANUAL || trigger === SYNC_TRIGGER.API) return SYNC_TRIGGER.MANUAL;
+  if (trigger === SYNC_TRIGGER.REPROCESS) return SYNC_TRIGGER.REPROCESS;
+  return SYNC_TRIGGER.SCHEDULER;
+}
+
+/**
+ * checkpointBefore for a run: the connection's last successful sync and the bounded window the
+ * run was asked for (null when unbounded). Recorded before the fetch, never after.
+ */
+export async function currentCheckpointBefore(networkAccountId, db = prisma) {
+  let lastSuccessfulSync = null;
+  if (networkAccountId) {
+    try {
+      const row = await db.marketplaceAccount.findUnique({
+        where: { id: networkAccountId },
+        select: { lastSuccessfulSync: true },
+      });
+      lastSuccessfulSync = row?.lastSuccessfulSync ? new Date(row.lastSuccessfulSync).toISOString() : null;
+    } catch {
+      lastSuccessfulSync = null;
+    }
+  }
+  let window = null;
+  try {
+    window = explicitSyncWindow();
+  } catch {
+    window = null;
+  }
+  return { lastSuccessfulSync, requestWindow: window };
+}
+
+async function runDefaults(networkAccountId) {
+  return { trigger: currentSyncTrigger(), checkpointBefore: await currentCheckpointBefore(networkAccountId) };
+}
+
 export function requestedSourceObject(explicit) {
   const value = explicit ?? getSyncOptions()?.sourceObject;
   if (value == null || value === "") return null;
@@ -42,8 +170,9 @@ export function requestedSourceObject(explicit) {
 }
 
 export function includeSourceObject(requested, sourceObject) {
-  if (!requested) return true;
   const key = String(sourceObject || "").toLowerCase();
+  if (disabledByConnection(key)) return false;
+  if (!requested) return true;
   if (requested === key) return true;
   // A DERIVED object computed from the requested one's rows (Impact reports, Partnerize
   // analytics) cannot be its own bounded unit — it travels with its parent. Only the bounded
@@ -121,6 +250,7 @@ export async function runUnavailableIfRequested({ network, networkAccountId, req
     network,
     networkAccountId,
     sourceObject: requested,
+    trigger: currentSyncTrigger(),
   });
   return {
     skipped: true,
@@ -135,13 +265,17 @@ export async function runLiveSourceObject({
   sourceObject,
   endpoint,
   execute,
+  checkpointBefore = null,
 }) {
+  const defaults = await runDefaults(networkAccountId);
   return executeSourceObjectRun({
     network,
     networkAccountId,
     sourceObject,
     endpoint,
     execute,
+    trigger: defaults.trigger,
+    checkpointBefore: checkpointBefore ?? defaults.checkpointBefore,
   });
 }
 
@@ -199,11 +333,14 @@ export async function fetchOptimiseSourceObject(
     return fetchOptimiseResource(resource, credentials, fn, options);
   }
 
+  const optimiseDefaults = await runDefaults(ctx.networkAccountId);
   const run = await executeSourceObjectRun({
     network: ctx.network,
     networkAccountId: ctx.networkAccountId,
     sourceObject: identity.sourceObject,
     endpoint: identity.endpoint,
+    trigger: optimiseDefaults.trigger,
+    checkpointBefore: ctx.checkpointBefore ?? optimiseDefaults.checkpointBefore,
     // options.exhaustionStats is the bag THIS call's pager writes its exhaustion reason to. It is
     // created per call by the caller rather than per account, because these resources are fetched
     // concurrently: one shared bag would be written by several walks at once and no snapshot could
@@ -282,11 +419,14 @@ export async function fetchTrackierSourceObject(
     return fetchTrackierResource(resource, credentials, fn, options);
   }
 
+  const trackierDefaults = await runDefaults(ctx.networkAccountId);
   const run = await executeSourceObjectRun({
     network: ctx.network || "trackier",
     networkAccountId: ctx.networkAccountId,
     sourceObject: identity.sourceObject,
     endpoint: identity.endpoint,
+    trigger: trackierDefaults.trigger,
+    checkpointBefore: ctx.checkpointBefore ?? trackierDefaults.checkpointBefore,
     // Same per-call bag as Optimise, for the same reason: this job awaits its Trackier source
     // objects with Promise.all.
     execute: async () =>

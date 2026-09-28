@@ -39,6 +39,10 @@ import { buildAdmitadIncrementalActionParams } from "../src/jobs/admitadSupplier
 import { buildRakutenEventWindow, buildRakutenPaymentHistoryWindow } from "../src/jobs/rakutenSupplierSync.js";
 import { clampAwinWindowStart } from "../src/jobs/waveESupplierSync.js";
 
+// These tests pin plan shape across every network. The PLANNED-supplier gate is a separate policy
+// (test/supplierSyncGate.test.js), so the service is given an open gate here.
+const openSupplierGate = async () => () => ({ allowed: true, status: "ENABLED", supplierKey: null });
+
 const SYNC_JOB_SRC = readFileSync(new URL("../src/jobs/sync.job.js", import.meta.url), "utf8");
 const WAVE_E_SRC = readFileSync(new URL("../src/jobs/waveESupplierSync.js", import.meta.url), "utf8");
 const CONTROLLER_SRC = readFileSync(new URL("../src/controllers/sync.controller.js", import.meta.url), "utf8");
@@ -118,7 +122,7 @@ function createStore() {
 
 function harness({ units = null, syncImpl = null } = {}) {
   const { rows, prisma, createManyCalls } = createStore();
-  const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState });
+  const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState, loadSupplierGate: openSupplierGate });
   const calls = [];
   const locals = {
     syncOrchestration: orchestration,

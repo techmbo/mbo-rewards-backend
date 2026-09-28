@@ -6,6 +6,7 @@
  */
 
 import { iso } from "../ops/v15FieldContract.js";
+import { describeSecretRef, isProviderSecretRef } from "../integrations/credentials/credentialResolver.js";
 
 export const NETWORK_ACCOUNT_ENVIRONMENT = Object.freeze({
   PRODUCTION: "PRODUCTION",
@@ -19,6 +20,53 @@ export const CREDENTIAL_HEALTH = Object.freeze({
   EXPIRED: "EXPIRED",
   FAILED: "FAILED",
 });
+
+/**
+ * Truthful account health from the source-object runs of one account sync.
+ *   ok             — no source object failed
+ *   ran            — how many source-object runs there were (0: nothing fetched, nothing proven)
+ *   anySucceeded   — at least one live fetch worked, i.e. the credentials were accepted
+ *   authFailed     — a run failed with HTTP 401/403
+ *   failed         — [{ sourceObject, errorCode }] for the error summary (codes only, no messages)
+ */
+export function healthFromSourceRuns(runs = []) {
+  const list = (Array.isArray(runs) ? runs : []).filter(Boolean);
+  const status = (r) => String(r?.status || "").toUpperCase();
+  const failedRuns = list.filter((r) => status(r) === "FAILED");
+  const succeeded = list.filter((r) => ["SUCCESS", "SUCCEEDED", "PARTIAL"].includes(status(r)));
+  const authFailed = failedRuns.some((r) => /^HTTP_40[13]$/.test(String(r?.errorCode || "")));
+  return {
+    ok: failedRuns.length === 0,
+    ran: list.length,
+    anySucceeded: succeeded.length > 0,
+    authFailed,
+    failed: failedRuns.map((r) => ({ sourceObject: r?.sourceObject ?? null, errorCode: r?.errorCode ?? null })),
+  };
+}
+
+/** Account stamp fields for a sync whose source runs are summarised by healthFromSourceRuns. */
+export function accountHealthStamp(health, now = new Date()) {
+  // Nothing was fetched (every object switched off or skipped): nothing was proven either way.
+  if (health && health.ok && health.ran === 0) return {};
+  if (!health || health.ok) {
+    return { credentialHealth: CREDENTIAL_HEALTH.HEALTHY, lastSyncError: null, lastFailureCode: null };
+  }
+  const summary = health.failed
+    .map((f) => `${f.sourceObject || "unknown"}${f.errorCode ? ` (${f.errorCode})` : ""}`)
+    .join(", ");
+  return {
+    lastSyncError: `${health.failed.length} source object(s) failed: ${summary}`.slice(0, 400),
+    lastFailureAt: now,
+    lastFailureCode: health.failed[0]?.errorCode || "SOURCE_OBJECT_SYNC_FAILED",
+    // Credentials are HEALTHY only when a live fetch proved them; FAILED on 401/403; otherwise the
+    // previous verdict stands rather than being overwritten either way.
+    ...(health.authFailed
+      ? { credentialHealth: CREDENTIAL_HEALTH.FAILED }
+      : health.anySucceeded
+        ? { credentialHealth: CREDENTIAL_HEALTH.HEALTHY }
+        : {}),
+  };
+}
 
 export const NETWORK_ACCOUNT_FORBIDDEN_KEYS = Object.freeze([
   "encryptedAccessToken",
@@ -129,9 +177,59 @@ export function toNetworkAccountDto(account) {
   return assertNoSecrets(dto);
 }
 
+/**
+ * Network Connection DTO (control plane). Value-free by construction: it names the credential
+ * PROVIDER and whether a reference is configured, never the reference's target, a variable name,
+ * a masked key or any secret. Health is the stored verdict written by syncs and Test Connection.
+ */
+export function toNetworkConnectionDto(account) {
+  if (!account) return null;
+  const ref = describeSecretRef(account.secretRef);
+  const dto = {
+    id: account.id ?? null,
+    platform: account.platform ?? null,
+    accountLabel: account.accountLabel ?? null,
+    environment: normalizeEnvironment(account.environment),
+    credentialSource: account.credentialSource ?? "ENCRYPTED_DB",
+    credentialProvider: ref.provider,
+    credentialsConfigured: ref.configured || hasNetworkAccountSecret(account),
+    credentialHealth: account.credentialHealth ?? CREDENTIAL_HEALTH.UNKNOWN,
+    paused: Boolean(account.pausedAt),
+    pausedAt: iso(account.pausedAt),
+    pausedReason: account.pausedReason ?? null,
+    switches: {
+      syncEnabled: account.syncEnabled !== false,
+      campaignSyncEnabled: account.campaignSyncEnabled !== false,
+      couponSyncEnabled: account.couponSyncEnabled !== false,
+      productSyncEnabled: account.productSyncEnabled !== false,
+      conversionSyncEnabled: account.conversionSyncEnabled !== false,
+      financeSyncEnabled: account.financeSyncEnabled !== false,
+    },
+    lastTest: {
+      at: iso(account.lastTestAt),
+      status: account.lastTestStatus ?? null,
+      result: account.lastTestResult ?? null,
+    },
+    lastFailureAt: iso(account.lastFailureAt),
+    lastFailureCode: account.lastFailureCode ?? null,
+    lastSyncError: sanitizeSecretError(account.lastSyncError),
+    lastSuccessfulSync: iso(account.lastSuccessfulSync),
+    lastCampaignSyncAt: iso(account.lastCampaignSyncAt),
+    lastCouponSyncAt: iso(account.lastCouponSyncAt),
+    lastOrderSyncAt: iso(account.lastOrderSyncAt),
+    lastPaymentSyncAt: iso(account.lastPaymentSyncAt),
+    lastAuthCheckAt: iso(account.lastAuthCheckAt),
+    connectedAt: iso(account.connectedAt),
+    updatedAt: iso(account.updatedAt),
+  };
+  return assertNoSecrets(dto);
+}
+
 export function networkAccountStampData(row, extras = {}) {
   const now = extras.lastAuthCheckAt ?? new Date();
-  const secretRef = extras.secretRef ?? networkAccountSecretRef(row.id);
+  // A credential-provider reference is the connection's identity for its secrets: a stamp never
+  // replaces it with the encrypted-row placeholder.
+  const secretRef = extras.secretRef ?? (isProviderSecretRef(row.secretRef) ? row.secretRef : networkAccountSecretRef(row.id));
   const lastSyncError =
     extras.lastSyncError === undefined ? null : sanitizeSecretError(extras.lastSyncError);
   const merged = {

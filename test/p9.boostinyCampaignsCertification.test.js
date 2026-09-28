@@ -251,10 +251,14 @@ describe("the documented campaigns request contract", () => {
   it("resolves credentials in the sync job's own order, with the sync job's own env names", () => {
     const creds = codeOf(CREDS_SRC);
     assert.ok(creds.indexOf('getMarketplaceApiKey("boostiny"') < creds.indexOf('getOAuthAccessToken("boostiny"'));
-    assert.ok(creds.indexOf('getOAuthAccessToken("boostiny"') < creds.indexOf("process.env.BOOSTINY_API_KEY"));
+    // The env fallback now goes through the credential resolver's catalogued slot (the catalog
+    // maps boostiny.primarySecret to BOOSTINY_API_KEY) instead of naming the variable here.
+    const envFallback = 'legacyEnvCredential("boostiny", CREDENTIAL_SLOTS.PRIMARY_SECRET)';
+    assert.ok(creds.indexOf('getOAuthAccessToken("boostiny"') < creds.indexOf(envFallback));
+    assert.ok(!creds.includes("process.env.BOOSTINY_API_KEY"));
     assert.match(creds, /process\.env\.BOOSTINY_BASE_URL/);
     const sync = codeOf(SYNC_SRC);
-    assert.match(sync, /getMarketplaceApiKey\("boostiny", accountLabel\)\)\s*\|\|\s*\(await getOAuthAccessToken\("boostiny", accountLabel\)\)\s*\|\|\s*process\.env\.BOOSTINY_API_KEY/);
+    assert.match(sync, /getMarketplaceApiKey\("boostiny", accountLabel\)\)\s*\|\|\s*\(await getOAuthAccessToken\("boostiny", accountLabel\)\)\s*\|\|\s*\(await legacyEnvCredential\("boostiny", CREDENTIAL_SLOTS\.PRIMARY_SECRET\)\)/);
   });
 
   it("builds through production's factory with the resolved key and base URL, and nothing else", async () => {

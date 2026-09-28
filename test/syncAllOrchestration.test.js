@@ -19,6 +19,10 @@ import {
   SyncOrchestrationService,
 } from "../src/jobs/syncOrchestration.service.js";
 
+// These tests pin plan shape across every network. The PLANNED-supplier gate is a separate policy
+// (test/supplierSyncGate.test.js), so the service is given an open gate here.
+const openSupplierGate = async () => () => ({ allowed: true, status: "ENABLED", supplierKey: null });
+
 const CONTROLLER_SRC = readFileSync(new URL("../src/controllers/sync.controller.js", import.meta.url), "utf8");
 const ROUTES_SRC = readFileSync(new URL("../src/routes/index.js", import.meta.url), "utf8");
 const handlerOf = (name) => CONTROLLER_SRC.split(`export async function ${name}`)[1].split("\nexport ")[0];
@@ -91,7 +95,7 @@ const plannedUnits = async (options = {}) =>
 
 function harness() {
   const { rows, ops, prisma } = createFakePrisma();
-  const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState });
+  const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState, loadSupplierGate: openSupplierGate });
   const call = async (query = {}) => {
     const res = { statusCode: null, body: null };
     res.status = (code) => { res.statusCode = code; return res; };
@@ -262,7 +266,7 @@ describe("POST /sync/all — durable enqueue", () => {
 });
 
 describe("service — run reuse requires compatible execution options", () => {
-  const serviceFor = (prisma) => new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState });
+  const serviceFor = (prisma) => new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState, loadSupplierGate: openSupplierGate });
 
   it("findActiveRun is breadth-aware on fastSync and exact on everything else", async () => {
     const { prisma } = createFakePrisma();
@@ -368,7 +372,7 @@ describe("service — run reuse requires compatible execution options", () => {
 });
 
 describe("concurrent enqueue — exactly one active run survives", () => {
-  const serviceFor = (prisma) => new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState });
+  const serviceFor = (prisma) => new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState, loadSupplierGate: openSupplierGate });
   const activeParents = (rows) => rows.filter((r) => r.jobName === ORCHESTRATION_JOB_NAME && ["PENDING", "RUNNING"].includes(r.status));
   const unitsOf = (rows, runId) => rows.filter((r) => r.jobName === UNIT_JOB_NAME && r.correlationId === runId);
 

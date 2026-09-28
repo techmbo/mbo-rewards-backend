@@ -198,7 +198,7 @@ async function appendPromotionContinuation(orchestration, runId, result) {
  * Run one unit. A network unit syncs one bounded account scope; an aggregation unit rebuilds one
  * day. Nothing here loops: a worker invocation is one unit.
  */
-async function executeUnit(req, descriptor) {
+async function executeUnit(req, descriptor, { runTrigger = null } = {}) {
   if (descriptor.kind === UNIT_KINDS.AGGREGATION) {
     return executeAggregationUnit(descriptor, { runRebuild: aggregationRebuildFor(req) });
   }
@@ -244,6 +244,11 @@ async function executeUnit(req, descriptor) {
             ? {}
             : { campaignPageCarry: descriptor.campaignPageCarry }),
         }),
+  }, {
+    // Kept apart from the unit's options, which are forwarded verbatim: a unit inherits the origin
+    // of the run it belongs to (the scheduler, or a person who started the run), and that origin is
+    // what its NetworkSyncRun rows record.
+    trigger: runTrigger === "scheduler" ? "scheduler" : "manual",
   });
 }
 
@@ -909,7 +914,7 @@ export async function triggerSyncWorker(req, res, next) {
 
     let result;
     try {
-      result = await executeUnit(req, descriptor);
+      result = await executeUnit(req, descriptor, { runTrigger: run?.payload?.trigger ?? null });
     } catch (error) {
       // A staging freeze belongs to ANOTHER run's post-sync phase. It is temporary and this unit
       // did nothing wrong, so the claim is handed back without consuming an attempt; three of these

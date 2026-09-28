@@ -1,4 +1,6 @@
 import { getMarketplaceApiKey, getOAuthAccessToken } from "./oauth.service.js";
+import { CREDENTIAL_SLOTS } from "./credentials/credentialCatalog.js";
+import { legacyEnvCredential } from "./credentials/credentialResolver.js";
 
 /**
  * Boostiny credentials for certification.
@@ -15,7 +17,7 @@ export async function resolveBoostinyCertificationCredentials(accountLabel = "de
   const apiKey =
     (await getMarketplaceApiKey("boostiny", accountLabel).catch(() => null)) ||
     (await getOAuthAccessToken("boostiny", accountLabel).catch(() => null)) ||
-    process.env.BOOSTINY_API_KEY ||
+    (await legacyEnvCredential("boostiny", CREDENTIAL_SLOTS.PRIMARY_SECRET)) ||
     null;
 
   if (!apiKey) return null;

@@ -259,6 +259,17 @@ import {
   networkCertificationRunHandler,
 } from "../controllers/networkCertification.controller.js";
 import {
+  createNetworkConnectionHandler,
+  getNetworkConnectionHandler,
+  initialSyncNetworkConnectionHandler,
+  listNetworkConnectionsHandler,
+  networkConnectionCatalogHandler,
+  pauseNetworkConnectionHandler,
+  resumeNetworkConnectionHandler,
+  testNetworkConnectionHandler,
+  updateNetworkConnectionHandler,
+} from "../controllers/networkConnections.controller.js";
+import {
   adminListNetworkBillingHandler,
   adminListNetworkPaymentsReceivedHandler,
   adminListMboReceiptsHandler,
@@ -1449,6 +1460,78 @@ router.post(
     [req.params?.network, req.body?.region || "sea", req.body?.accountLabel || "default"].join("/"),
   ),
   networkCertificationRunHandler,
+);
+
+// Network Connections — the account/config control plane. Reads are integrations:read; every
+// change is integrations:manage and audited (AuditEvent rows are written by the service, the
+// access log by auditAction). No route accepts or returns a secret, a secret reference or a
+// variable name. Test Connection makes ONE read-only supplier probe, so it shares the certification
+// limiter; initial sync creates durable estate work, so it is admin-only on top of SYNC_TRIGGER.
+// Every handler answers with Cache-Control: no-store itself (success and handled refusals alike).
+const connectionAudit = (action) =>
+  auditAction(action, (req) => `network-connections:${req.params?.id ?? req.body?.platform ?? ""}`);
+router.get(
+  "/ops/admin/network-connections/catalog",
+  authenticate,
+  requirePermission(PERMISSIONS.INTEGRATIONS_READ),
+  networkConnectionCatalogHandler,
+);
+router.get(
+  "/ops/admin/network-connections",
+  authenticate,
+  requirePermission(PERMISSIONS.INTEGRATIONS_READ),
+  listNetworkConnectionsHandler,
+);
+router.get(
+  "/ops/admin/network-connections/:id",
+  authenticate,
+  requirePermission(PERMISSIONS.INTEGRATIONS_READ),
+  getNetworkConnectionHandler,
+);
+router.post(
+  "/ops/admin/network-connections",
+  authenticate,
+  requirePermission(PERMISSIONS.INTEGRATIONS_MANAGE),
+  connectionAudit("network_connection.create"),
+  createNetworkConnectionHandler,
+);
+router.patch(
+  "/ops/admin/network-connections/:id",
+  authenticate,
+  requirePermission(PERMISSIONS.INTEGRATIONS_MANAGE),
+  connectionAudit("network_connection.update"),
+  updateNetworkConnectionHandler,
+);
+router.post(
+  "/ops/admin/network-connections/:id/pause",
+  authenticate,
+  requirePermission(PERMISSIONS.INTEGRATIONS_MANAGE),
+  connectionAudit("network_connection.pause"),
+  pauseNetworkConnectionHandler,
+);
+router.post(
+  "/ops/admin/network-connections/:id/resume",
+  authenticate,
+  requirePermission(PERMISSIONS.INTEGRATIONS_MANAGE),
+  connectionAudit("network_connection.resume"),
+  resumeNetworkConnectionHandler,
+);
+router.post(
+  "/ops/admin/network-connections/:id/test",
+  authenticate,
+  requirePermission(PERMISSIONS.INTEGRATIONS_MANAGE),
+  certificationRateLimiter,
+  connectionAudit("network_connection.test"),
+  testNetworkConnectionHandler,
+);
+router.post(
+  "/ops/admin/network-connections/:id/initial-sync",
+  authenticate,
+  requireAdminRole,
+  requirePermission(PERMISSIONS.INTEGRATIONS_MANAGE),
+  requirePermission(PERMISSIONS.SYNC_TRIGGER),
+  connectionAudit("network_connection.initial_sync"),
+  initialSyncNetworkConnectionHandler,
 );
 
 router.get("/ops/admin/commission-vocabulary", authenticate, requirePermission(PERMISSIONS.COMMISSION_READ), adminCommissionVocabularyHandler);

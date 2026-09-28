@@ -23,7 +23,35 @@ import {
   rollupIngestCounters,
   toSyncObservabilityDto,
 } from "./syncObservability.contract.js";
-import { reportRateLimitExhaustion } from "../ops/syncAlert.service.js";
+import { pauseConnectionOnAuthFailure, reportRateLimitExhaustion } from "../ops/syncAlert.service.js";
+
+/**
+ * A RUNNING row older than this never finished (the invocation was killed or timed out). It is
+ * closed as CANCELLED / RUN_ABANDONED when the next run of the same connection + source object
+ * starts. Vercel caps an invocation at minutes, so 30 minutes can only mean an abandoned run.
+ */
+export const STALE_RUN_AFTER_MS = 30 * 60 * 1000;
+export const RUN_ABANDONED_CODE = "RUN_ABANDONED";
+
+/**
+ * A safe, content-free error code: HTTP_<status> when the supplier answered, TIMEOUT / NETWORK_ERROR
+ * for transport failures, otherwise a short upper-case code already on the error, else the default.
+ * Never derived from a message, so no response body or credential can leak into it.
+ */
+export function safeSyncErrorCode(error, fallback = "SOURCE_OBJECT_SYNC_FAILED") {
+  const status = Number(error?.response?.status ?? error?.httpStatus ?? error?.status);
+  if (Number.isInteger(status) && status >= 100 && status <= 599) return `HTTP_${status}`;
+  const code = typeof error?.code === "string" ? error.code : "";
+  if (code === "ECONNABORTED" || code === "ETIMEDOUT" || /timeout/i.test(error?.name || "")) return "TIMEOUT";
+  if (["ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ERR_NETWORK"].includes(code)) return "NETWORK_ERROR";
+  if (/^[A-Z][A-Z0-9_]{1,63}$/.test(code) && !code.startsWith("ERR_BAD_")) return code;
+  return fallback;
+}
+
+function httpStatusOf(error) {
+  const status = Number(error?.response?.status ?? error?.httpStatus);
+  return Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
+}
 
 function recordCountFrom(result) {
   if (result == null) return 0;
@@ -59,6 +87,39 @@ function countersFromResult(result) {
 export class SourceObjectSyncService {
   constructor(deps = {}) {
     this.db = deps.prisma ?? defaultPrisma;
+    this.exceptions = deps.exceptions ?? null;
+    this.staleAfterMs = deps.staleAfterMs ?? STALE_RUN_AFTER_MS;
+  }
+
+  /**
+   * Close RUNNING rows of the same connection + source object that are older than the stale
+   * threshold. They are marked, never deleted: status CANCELLED, errorCode RUN_ABANDONED.
+   */
+  async #abandonStaleRuns(identity) {
+    try {
+      if (!this.db.networkSyncRun?.updateMany) return 0;
+      const cutoff = new Date(Date.now() - this.staleAfterMs);
+      const res = await this.db.networkSyncRun.updateMany({
+        where: {
+          network: identity.network,
+          sourceObject: identity.source_object,
+          networkAccountId: identity.network_account_id ?? null,
+          status: { in: [SYNC_OBS_STATUS.RUNNING, "STARTED"] },
+          finishedAt: null,
+          startedAt: { lt: cutoff },
+        },
+        data: {
+          status: SYNC_OBS_STATUS.CANCELLED,
+          errorCode: RUN_ABANDONED_CODE,
+          errorMessage: `No completion was recorded within ${Math.round(this.staleAfterMs / 60000)} minutes; closed when a newer run started.`,
+          finishedAt: new Date(),
+        },
+      });
+      return res?.count ?? 0;
+    } catch (error) {
+      logger.warn({ err: sanitizeSecretError(error?.message) || error?.message }, "stale sync run cleanup failed");
+      return 0;
+    }
   }
 
   async startRun({
@@ -82,6 +143,7 @@ export class SourceObjectSyncService {
       syncRunId,
     });
     const startedAt = new Date();
+    await this.#abandonStaleRuns(identity);
     await this.#safeCreate({
       id: identity.sync_run_id,
       network: identity.network,
@@ -104,24 +166,35 @@ export class SourceObjectSyncService {
     const existing = await this.db.networkSyncRun?.findUnique?.({ where: { id: syncRunId } });
     if (!existing) return null;
 
+    // Staging outcomes (created/updated/unchanged/quarantined) accumulate across the staging calls
+    // that share this run. recordsFetched does NOT: it is the supplier row count recorded when the
+    // fetch finished, and staging those same rows must not count them a second time.
+    const existingFetched = existing.recordsFetched ?? existing.recordCount ?? 0;
+    const { recordsFetched: _stagedRows, ...stagingPatch } = patch;
     const counters = rollupIngestCounters(
       {
-        recordsFetched: existing.recordsFetched ?? existing.recordCount ?? 0,
+        recordsFetched: existingFetched,
         recordsCreated: existing.recordsCreated ?? 0,
         recordsUpdated: existing.recordsUpdated ?? 0,
         recordsUnchanged: existing.recordsUnchanged ?? 0,
         recordsQuarantined: existing.recordsQuarantined ?? 0,
       },
-      patch,
+      stagingPatch,
     );
+    // A run that never recorded a fetch count (created by startRun) takes the staged row count.
+    if (!existingFetched && Number(patch.recordsFetched) > 0) counters.recordsFetched = Number(patch.recordsFetched);
 
+    // A PARTIAL or FAILED outcome recorded by the fetch is never upgraded by a later staging pass.
+    const keepExisting = existing.status === SYNC_OBS_STATUS.PARTIAL || existing.status === SYNC_OBS_STATUS.FAILED;
     const status =
       patch.status ||
-      resolveTerminalStatus({
-        counters,
-        hadError: false,
-        partial: patch.partial === true,
-      });
+      (keepExisting
+        ? existing.status
+        : resolveTerminalStatus({
+            counters,
+            hadError: false,
+            partial: patch.partial === true,
+          }));
 
     const data = {
       ...counters,
@@ -202,6 +275,7 @@ export class SourceObjectSyncService {
 
     const startedAt = new Date();
     const resolvedJobType = inferJobType(sourceObject, jobType);
+    await this.#abandonStaleRuns(identity);
     await this.#safeCreate({
       id: identity.sync_run_id,
       network: identity.network,
@@ -255,9 +329,11 @@ export class SourceObjectSyncService {
     } catch (error) {
       const finishedAt = new Date();
       const errorMessage = sanitizeSecretError(error?.message || String(error));
+      const errorCode = safeSyncErrorCode(error);
+      const httpStatus = httpStatusOf(error);
       await this.#safeUpdate(identity.sync_run_id, {
         status: SYNC_OBS_STATUS.FAILED,
-        errorCode: error?.code || "SOURCE_OBJECT_SYNC_FAILED",
+        errorCode,
         errorMessage,
         retryCount: error?.syncAttemptCount ?? retryCount ?? null,
         rateLimitTelemetry: error?.rateLimitTelemetry ?? rateLimitTelemetry ?? null,
@@ -279,11 +355,21 @@ export class SourceObjectSyncService {
       } catch {
         // ignore
       }
+      // 401/403: pause the connection (prior data untouched) so no further run hammers a dead key.
+      let connectionPaused = false;
+      try {
+        connectionPaused = await pauseConnectionOnAuthFailure(
+          { networkAccountId: identity.network_account_id, network: identity.network, error },
+          { prisma: this.db, ...(this.exceptions ? { exceptions: this.exceptions } : {}) },
+        );
+      } catch {
+        // Pausing is protective; a failure to record it must not mask the run's own failure.
+      }
       return {
         identity,
         status: SYNC_OBS_STATUS.FAILED,
         result: null,
-        error: { message: errorMessage, code: error?.code || "SOURCE_OBJECT_SYNC_FAILED" },
+        error: { message: errorMessage, code: errorCode, httpStatus, connectionPaused },
         syncRunId: identity.sync_run_id,
       };
     }

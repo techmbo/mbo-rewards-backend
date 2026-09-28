@@ -364,7 +364,8 @@ describe("sync wiring — Boostiny only, before any commission write, never sche
   it("the ordinary path is unchanged when no canary is set, and there is no scheduled path left to disturb", () => {
     assert.match(boostiny, /commissionRuleSkipCampaignIds: \[\.\.\.payoutGroupCampaignIds\],/);
     assert.match(boostiny, /\} else if \(refreshCampaigns && includeSourceObject\(requested, "campaigns"\)\) \{/);
-    assert.match(code, /const boostiny = await syncBoostiny\(\);/);
+    // The ordinary call is unchanged; syncAll now only wraps it in the PLANNED-supplier gate.
+    assert.match(code, /const boostiny = await gatedFullSync\("boostiny", \(\) => syncBoostiny\(\)\);/);
     // Phase 8A retired the in-process scheduler. The old assertion checked that it still reached
     // syncAll when no canary was set; the successor check is that it no longer reaches it at all.
     assert.ok(!codeOf(SCHEDULER_SRC).includes("syncAll"), "the retired scheduler runs no sync");

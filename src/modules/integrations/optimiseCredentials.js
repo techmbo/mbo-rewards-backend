@@ -1,5 +1,7 @@
 import { prisma } from "../../database/prisma.js";
-import { getMarketplaceApiKey, getOAuthAccessToken } from "./oauth.service.js";
+import { getMarketplaceAccountIdentifiers, getMarketplaceApiKey, getOAuthAccessToken } from "./oauth.service.js";
+import { CREDENTIAL_SLOTS } from "./credentials/credentialCatalog.js";
+import { legacyEnvCredential } from "./credentials/credentialResolver.js";
 
 /** Official Optimise agency IDs — docs.optimisemedia.com/docs/tools/apireference#agencyid */
 export const OPTIMISE_REGION_AGENCY_IDS = {
@@ -33,43 +35,42 @@ export async function resolveOptimiseCredentials(region, accountLabel = "default
       maskedApiKey: true,
       syncEnabled: true,
       financeSyncEnabled: true,
+      credentialSource: true,
+      pausedAt: true,
     },
   });
 
-  const regionEnvKey = {
-    sea: process.env.OPTIMISE_API_KEY,
-    mena: process.env.OPTIMISE_MENA_API_KEY,
-    uk: process.env.OPTIMISE_UK_API_KEY,
-  }[regionKey] || null;
-
-  const apiKey = marketplaceAccount
-    ? (await getMarketplaceApiKey(`optimise_${regionKey}`, normalizedLabel)) ||
-      (await getOAuthAccessToken(`optimise_${regionKey}`, normalizedLabel)) ||
-      regionEnvKey
-    : regionEnvKey;
+  const platform = `optimise_${regionKey}`;
+  // No connection record: the legacy fallback reads the catalogued names through the env provider.
+  const legacyApiKey = await legacyEnvCredential(platform, CREDENTIAL_SLOTS.PRIMARY_SECRET);
+  const connectionApiKey = marketplaceAccount
+    ? (await getMarketplaceApiKey(platform, normalizedLabel)) ||
+      (await getOAuthAccessToken(platform, normalizedLabel)) ||
+      null
+    : null;
+  const apiKey = connectionApiKey || legacyApiKey;
 
   const agencyId = marketplaceAccount?.agencyId
     ? String(marketplaceAccount.agencyId)
     : OPTIMISE_REGION_AGENCY_IDS[regionKey] || null;
 
-  const contactIdEnvKey = {
-    sea: process.env.OPTIMISE_SEA_CONTACT_ID,
-    mena: process.env.OPTIMISE_MENA_CONTACT_ID,
-    uk: process.env.OPTIMISE_UK_CONTACT_ID,
-  }[regionKey] || null;
-  const contactId = marketplaceAccount?.contactId
-    ? String(marketplaceAccount.contactId)
-    : contactIdEnvKey || null;
+  const connectionContactId = marketplaceAccount
+    ? (await getMarketplaceAccountIdentifiers(platform, normalizedLabel))?.contactId || null
+    : null;
+  const legacyContactId = await legacyEnvCredential(platform, CREDENTIAL_SLOTS.CONTACT_ID);
+  const contactId = connectionContactId ? String(connectionContactId) : legacyContactId || null;
 
   const expectedAgencyId = OPTIMISE_REGION_AGENCY_IDS[regionKey];
   const agencyMismatch =
     expectedAgencyId && agencyId && String(agencyId) !== String(expectedAgencyId);
 
-  const apiKeySource = marketplaceAccount
-    ? `marketplace_account:${marketplaceAccount.authType}`
-    : regionEnvKey
-      ? `env:OPTIMISE_${regionKey.toUpperCase()}_API_KEY`
+  // Where each value came from, without naming a variable or secret.
+  const apiKeySource = connectionApiKey
+    ? `network_connection:${marketplaceAccount.credentialSource || "ENCRYPTED_DB"}`
+    : legacyApiKey
+      ? "legacy_env_profile"
       : "missing";
+  const contactIdSource = connectionContactId ? "network_connection" : legacyContactId ? "legacy_env_profile" : "missing";
 
   return {
     region: regionKey,
@@ -80,14 +81,15 @@ export async function resolveOptimiseCredentials(region, accountLabel = "default
     baseURL: process.env.OPTIMISE_BASE_URL || "https://public.api.optimisemedia.com/v1",
     sources: {
       apiKey: apiKeySource,
-      agencyId: agencyId ? "marketplace_account" : "missing",
-      contactId: contactId ? "marketplace_account" : "missing",
+      agencyId: marketplaceAccount?.agencyId ? "network_connection" : agencyId ? "catalog_default" : "missing",
+      contactId: contactIdSource,
     },
     expectedAgencyId,
     agencyMismatch,
-    hasMarketplaceAccount: Boolean(marketplaceAccount) || Boolean(regionEnvKey),
+    hasMarketplaceAccount: Boolean(marketplaceAccount) || Boolean(legacyApiKey),
     networkAccountId: marketplaceAccount?.id ?? null,
-    syncEnabled: marketplaceAccount ? marketplaceAccount.syncEnabled !== false : true,
+    paused: Boolean(marketplaceAccount?.pausedAt),
+    syncEnabled: marketplaceAccount ? marketplaceAccount.syncEnabled !== false && !marketplaceAccount.pausedAt : true,
     financeSyncEnabled: marketplaceAccount ? marketplaceAccount.financeSyncEnabled !== false : true,
   };
 }

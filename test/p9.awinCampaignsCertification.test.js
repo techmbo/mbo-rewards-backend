@@ -318,7 +318,10 @@ describe("awin campaigns — the publisher id is never caller-controlled", () =>
 
   it("4b — the id comes from the resolver, and the resolver reads configuration only", () => {
     const resolver = readFileSync("src/modules/integrations/awinCredentials.js", "utf8");
-    assert.match(resolver, /process\.env\.AWIN_PUBLISHER_ID/);
+    // Formerly process.env.AWIN_PUBLISHER_ID; the credential catalog now maps awin.accountExternalId
+    // to that name and the resolver reads it through the env credential provider.
+    assert.match(resolver, /legacyEnvCredential\("awin", CREDENTIAL_SLOTS\.ACCOUNT_EXTERNAL_ID\)/);
+    assert.ok(!resolver.includes("process.env.AWIN_PUBLISHER_ID"));
     assert.match(resolver, /getMarketplaceExternalId\("awin", accountLabel\)/);
     // Nothing accepts an id argument, and nothing discovers one with a request.
     assert.match(resolver, /export async function resolveAwinCertificationCredentials\(accountLabel = "default"\)/);

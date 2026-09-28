@@ -4,6 +4,8 @@ import {
   getMarketplaceRefreshToken,
   getOAuthAccessToken,
 } from "./oauth.service.js";
+import { CREDENTIAL_SLOTS } from "./credentials/credentialCatalog.js";
+import { legacyEnvCredential } from "./credentials/credentialResolver.js";
 
 /**
  * Partnerize credentials for certification.
@@ -19,15 +21,15 @@ import {
  */
 export async function resolvePartnerizeCertificationCredentials(accountLabel = "default") {
   const appKey =
-    process.env.PARTNERIZE_APPLICATION_KEY || (await getMarketplaceApiKey("partnerize", accountLabel)) || null;
+    (await legacyEnvCredential("partnerize", CREDENTIAL_SLOTS.PRIMARY_SECRET)) || (await getMarketplaceApiKey("partnerize", accountLabel)) || null;
   const userKey =
-    process.env.PARTNERIZE_USER_API_KEY ||
+    (await legacyEnvCredential("partnerize", CREDENTIAL_SLOTS.SECONDARY_SECRET)) ||
     (await getMarketplaceRefreshToken("partnerize", accountLabel)) ||
     (await getOAuthAccessToken("partnerize", accountLabel)) ||
     null;
 
   const publisherId =
-    process.env.PARTNERIZE_PUBLISHER_ID ||
+    (await legacyEnvCredential("partnerize", CREDENTIAL_SLOTS.ACCOUNT_EXTERNAL_ID)) ||
     (await getMarketplaceExternalId("partnerize", accountLabel).catch(() => null)) ||
     null;
 

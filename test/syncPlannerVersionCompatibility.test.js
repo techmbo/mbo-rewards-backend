@@ -22,6 +22,10 @@ import {
   summarisePlan,
 } from "../src/jobs/syncOrchestration.service.js";
 
+// These tests pin plan shape across every network. The PLANNED-supplier gate is a separate policy
+// (test/supplierSyncGate.test.js), so the service is given an open gate here.
+const openSupplierGate = async () => () => ({ allowed: true, status: "ENABLED", supplierKey: null });
+
 const SERVICE_SRC = readFileSync(new URL("../src/jobs/syncOrchestration.service.js", import.meta.url), "utf8");
 
 const NOW = new Date("2026-09-15T00:00:00.000Z");
@@ -102,7 +106,7 @@ function createStore() {
 
 function harness() {
   const { rows, prisma } = createStore();
-  const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState });
+  const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState, loadSupplierGate: openSupplierGate });
   const supplierCalls = [];
   const locals = {
     syncOrchestration: orchestration,

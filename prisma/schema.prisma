@@ -303,7 +303,9 @@ model MarketplaceAccount {
   accountExternalId     String?
   agencyId              String?
   contactId             String?
-  encryptedAccessToken  String
+  /// Encrypted secret for ENCRYPTED_DB connections. Null for PROVIDER_REF connections, whose
+  /// secrets stay with the credential provider named by secretRef.
+  encryptedAccessToken  String?
   encryptedRefreshToken String?
   tokenExpiresAt        DateTime?
   maskedApiKey          String?
@@ -332,6 +334,25 @@ model MarketplaceAccount {
   financeSyncEnabled    Boolean   @default(true)
   /// NOT_CONFIGURED | UNKNOWN | HEALTHY | EXPIRED | FAILED
   credentialHealth      String    @default("UNKNOWN")
+  /// ENCRYPTED_DB (secret encrypted in this row) | PROVIDER_REF (secretRef names a credential
+  /// provider profile; resolved at runtime through the fixed per-network allow-list).
+  credentialSource      String    @default("ENCRYPTED_DB")
+  /// Set while the connection is paused (by an admin, or automatically on an auth failure).
+  pausedAt              DateTime?
+  pausedReason          String?
+  /// Per-object ingest switches. Default true keeps pre-existing rows' behaviour unchanged;
+  /// connections created through the Network Connections API set them explicitly.
+  campaignSyncEnabled   Boolean   @default(true)
+  couponSyncEnabled     Boolean   @default(true)
+  productSyncEnabled    Boolean   @default(true)
+  conversionSyncEnabled Boolean   @default(true)
+  /// Last Test Connection: PASSED | FAILED | NOT_CONFIGURED, and a sanitised, value-free result.
+  lastTestAt            DateTime?
+  lastTestStatus        String?
+  lastTestResult        Json?
+  /// Last failure seen by a sync or test (safe code only; message stays in lastSyncError).
+  lastFailureAt         DateTime?
+  lastFailureCode       String?
 
   syncRuns    NetworkSyncRun[]
   rawPayloads RawPayload[]

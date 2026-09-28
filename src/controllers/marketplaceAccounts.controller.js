@@ -236,6 +236,19 @@ export async function connectMarketplaceAccount(req, res, next) {
 
     const accountLabel = normalizeAccountLabel(req.body?.accountLabel);
     const environment = normalizeEnvironment(req.body?.environment);
+    // A provider-referenced Network Connection is managed through /ops/admin/network-connections.
+    // Writing encrypted secrets over it here would silently change where its credentials live.
+    const existing = await prisma.marketplaceAccount.findUnique({
+      where: { platform_accountLabel: { platform, accountLabel } },
+      select: { credentialSource: true },
+    });
+    if (existing?.credentialSource === "PROVIDER_REF") {
+      return res.status(409).json({
+        ok: false,
+        code: "connection_provider_managed",
+        message: "This connection's credentials are held by a credential provider; manage it under Network Connections.",
+      });
+    }
     const stored = {
       accountLabel,
       authType: data.authType,

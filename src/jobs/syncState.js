@@ -96,6 +96,11 @@ export function getSyncStatus() {
   return payload;
 }
 
+/** Origin of the in-process sync slot while it runs ("api" for a manual route), else null. */
+export function activeSyncTrigger() {
+  return activeSync?.status === "running" ? activeSync.trigger || null : null;
+}
+
 export function setSyncTimings(timings) {
   if (!activeSync) return;
   activeSync.timings = timings;

@@ -29,6 +29,10 @@ import {
 } from "../src/jobs/syncOrchestration.service.js";
 import { AWIN_OFFERS_PAGE_LIMIT, AWIN_OFFERS_PAGES_PER_UNIT } from "../src/jobs/syncSourcePlan.js";
 
+// These tests pin route/worker behaviour across every network. The strict supplier gate is a
+// separate policy (test/syncGatingObservability.test.js), so the service is given an open gate here.
+const openSupplierGate = async () => () => ({ allowed: true, status: "ENABLED", supplierKey: null });
+
 const ROUTES_SRC = readFileSync(new URL("../src/routes/index.js", import.meta.url), "utf8");
 const NOW = new Date("2026-09-15T00:00:00.000Z");
 const now = () => NOW;
@@ -107,7 +111,7 @@ function createStore() {
 
 function harness() {
   const { rows, prisma } = createStore();
-  const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState });
+  const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState, loadSupplierGate: openSupplierGate });
   const supplierCalls = [];
   const locals = {
     syncOrchestration: orchestration,

@@ -3,6 +3,8 @@ import {
   getMarketplaceExternalId,
   getOAuthAccessToken,
 } from "./oauth.service.js";
+import { CREDENTIAL_SLOTS } from "./credentials/credentialCatalog.js";
+import { legacyEnvCredential } from "./credentials/credentialResolver.js";
 
 /**
  * Awin credentials for certification.
@@ -21,13 +23,13 @@ import {
  */
 export async function resolveAwinCertificationCredentials(accountLabel = "default") {
   const accessToken =
-    process.env.AWIN_ACCESS_TOKEN ||
+    (await legacyEnvCredential("awin", CREDENTIAL_SLOTS.PRIMARY_SECRET)) ||
     (await getOAuthAccessToken("awin", accountLabel).catch(() => null)) ||
     (await getMarketplaceApiKey("awin", accountLabel).catch(() => null)) ||
     null;
 
   const publisherId =
-    process.env.AWIN_PUBLISHER_ID ||
+    (await legacyEnvCredential("awin", CREDENTIAL_SLOTS.ACCOUNT_EXTERNAL_ID)) ||
     (await getMarketplaceExternalId("awin", accountLabel).catch(() => null)) ||
     null;
 

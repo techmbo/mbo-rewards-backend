@@ -1,4 +1,6 @@
 import { getMarketplaceApiKey, getOAuthAccessToken } from "./oauth.service.js";
+import { CREDENTIAL_SLOTS } from "./credentials/credentialCatalog.js";
+import { legacyEnvCredential } from "./credentials/credentialResolver.js";
 
 /**
  * Trackier credentials for certification.
@@ -15,7 +17,7 @@ export async function resolveTrackierCertificationCredentials(accountLabel = "de
   const apiKey =
     (await getMarketplaceApiKey("trackier", accountLabel).catch(() => null)) ||
     (await getOAuthAccessToken("trackier", accountLabel).catch(() => null)) ||
-    process.env.VCOMMISSION_API_KEY ||
+    (await legacyEnvCredential("trackier", CREDENTIAL_SLOTS.PRIMARY_SECRET)) ||
     null;
 
   if (!apiKey) return null;

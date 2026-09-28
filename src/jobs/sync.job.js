@@ -31,6 +31,8 @@ import {
 } from "../modules/integrations/oauth.service.js";
 import {
   CREDENTIAL_HEALTH,
+  accountHealthStamp,
+  healthFromSourceRuns,
   sanitizeSecretError,
 } from "../modules/networkOps/networkAccount.contract.js";
 import {
@@ -101,6 +103,7 @@ import {
   runUnavailableIfRequested,
   summarizeSourceObjectRun,
   evidenceFromRunSummary,
+  withConnectionScope,
 } from "./sourceObjectRuns.js";
 import { withSourceOutcome } from "./sourceFetchOutcome.js";
 import { resultRows } from "../modules/networkOps/sourceObjectSync.service.js";
@@ -111,6 +114,9 @@ import {
   optimiseWorkScope,
 } from "./optimiseWorkScope.js";
 import { entityStagingBarrier } from "./entityStagingBarrier.js";
+import { loadSupplierSyncGate } from "../modules/supplier/supplierSyncGate.js";
+import { CREDENTIAL_SLOTS } from "../modules/integrations/credentials/credentialCatalog.js";
+import { legacyEnvCredential } from "../modules/integrations/credentials/credentialResolver.js";
 
 /** Phase 11 — accumulates per-account timings for SyncJobLog without changing API result shapes. */
 const accountTimingsCollector = [];
@@ -369,17 +375,20 @@ async function markAccountSyncSuccess(
     refreshedOrders = false,
     refreshedPayments = false,
     advanceLastSuccessfulSync = true,
+    sourceRuns = null,
   },
 ) {
   const now = new Date();
   const data = {};
-  if (advanceLastSuccessfulSync) data.lastSuccessfulSync = now;
+  // Truthful health: a failed source object keeps its error visible and holds the incremental
+  // checkpoint back, so the next run re-reads the window instead of skipping it.
+  const health = Array.isArray(sourceRuns) ? healthFromSourceRuns(sourceRuns) : null;
+  if (advanceLastSuccessfulSync && (!health || (health.ok && health.ran > 0))) data.lastSuccessfulSync = now;
   if (refreshedCampaigns) data.lastCampaignSyncAt = now;
   if (refreshedCoupons) data.lastCouponSyncAt = now;
   if (refreshedOrders) data.lastOrderSyncAt = now;
   if (refreshedPayments) data.lastPaymentSyncAt = now;
-  data.lastSyncError = null;
-  data.credentialHealth = CREDENTIAL_HEALTH.HEALTHY;
+  Object.assign(data, accountHealthStamp(health, now));
   if (Object.keys(data).length === 0) return;
   await updateAccountSyncTimestamps(platform, accountLabel, data);
 }
@@ -418,7 +427,10 @@ async function syncAccountsWithConcurrency(accountLabels, syncFn, { platform } =
   await runWithConcurrency(accountLabels, SAFE_SYNC_ACCOUNT_CONCURRENCY, async (label) => {
     await accountPermits.acquire();
     try {
-      const accountResult = await syncFn(label);
+      // Each account runs inside its own Network Connection scope (pause + per-object switches).
+      const accountResult = platform
+        ? await withConnectionScope(platform, label, () => syncFn(label))
+        : await syncFn(label);
       result[label] = accountResult;
       const failed = Boolean(accountResult?.failed);
       const skipped = Boolean(accountResult?.skipped);
@@ -514,7 +526,7 @@ async function syncBoostinyAccount(accountLabel) {
   const boostinyApiKey =
     (await getMarketplaceApiKey("boostiny", accountLabel)) ||
     (await getOAuthAccessToken("boostiny", accountLabel)) ||
-    process.env.BOOSTINY_API_KEY ||
+    (await legacyEnvCredential("boostiny", CREDENTIAL_SLOTS.PRIMARY_SECRET)) ||
     null;
   if (!boostinyApiKey) {
     accountTimer.end("accountSyncMs");
@@ -852,6 +864,7 @@ async function syncBoostinyAccount(accountLabel) {
       includeSourceObject(requested, "api_reports") &&
       (boostinyConversionRows.length > 0 || detailPerformanceRows.length > 0),
     refreshedPayments: includeSourceObject(requested, "api_reports") && paymentsToStore.length > 0,
+    sourceRuns: sourceObjectRuns,
   });
 
   accountTimer.end("accountSyncMs");
@@ -1139,6 +1152,8 @@ async function syncOptimiseRegion(region, accountLabel) {
   const wantCommissionGroups =
     commissionGroupConfig.enabled &&
     (!requested || requested === "commission_groups") &&
+    // The connection's campaign switch / pause governs commission groups like every other object.
+    includeSourceObject(null, "commission_groups") &&
     (refreshCampaigns || requested === "commission_groups");
   let commissionGroupsResult = null;
   if (wantCommissionGroups) {
@@ -1447,6 +1462,7 @@ async function syncOptimiseRegion(region, accountLabel) {
     refreshedOrders: conversionsResult.rows.length > 0 || reportingRows.length > 0,
     refreshedPayments: paymentsResult.rows.length > 0 || optimiseInvoices.length > 0,
     advanceLastSuccessfulSync: optimiseAdvanceWatermark({ requested, warningCount: warnings.length }),
+    sourceRuns: resourceResults.map((r) => r?.syncRun).filter(Boolean),
   });
 
   accountTimer.end("accountSyncMs");
@@ -1556,7 +1572,7 @@ async function syncTrackierAccount(accountLabel) {
   const trackierApiKey =
     (await getMarketplaceApiKey("trackier", accountLabel)) ||
     (await getOAuthAccessToken("trackier", accountLabel)) ||
-    process.env.VCOMMISSION_API_KEY ||
+    (await legacyEnvCredential("trackier", CREDENTIAL_SLOTS.PRIMARY_SECRET)) ||
     null;
   if (!trackierApiKey) {
     accountTimer.end("accountSyncMs");
@@ -1849,6 +1865,7 @@ async function syncTrackierAccount(accountLabel) {
       (includeSourceObject(requested, "tracking") && reportingRows.length > 0),
     refreshedPayments: false, // Trackier has no payments API
     advanceLastSuccessfulSync: warnings.length === 0,
+    sourceRuns: resourceResults.map((r) => r?.syncRun).filter(Boolean),
   });
 
   accountTimer.end("accountSyncMs");
@@ -1974,7 +1991,14 @@ async function maybePromoteAfterSync(result) {
   return result;
 }
 
-export async function syncPlatformAccount(platform, accountLabel, options = {}) {
+/** Networks synced as one "default" account (no per-account enumeration). */
+const SINGLE_ACCOUNT_SYNC_PLATFORMS = new Set(["impact", "partnerize", "awin", "admitad", "cj", "rakuten"]);
+
+/**
+ * `origin.trigger` is the run's origin (scheduler | manual). It is kept out of `options` so the
+ * caller's options stay exactly what it recorded, and only reaches the NetworkSyncRun trigger.
+ */
+export async function syncPlatformAccount(platform, accountLabel, options = {}, origin = {}) {
   const run = async () => {
     resetFieldSyncCaches();
     accountTimingsCollector.length = 0;
@@ -2077,13 +2101,35 @@ export async function syncPlatformAccount(platform, accountLabel, options = {}) 
     return maybePromoteAfterSync(result);
   };
 
-  if (options && Object.keys(options).length > 0) {
-    return runWithSyncOptions(options, run);
+  // One named account (or a single-account network, which always syncs "default") runs inside its
+  // Network Connection scope. A region/platform-wide call scopes each account in the loop instead.
+  const scopedLabel = accountLabel || (SINGLE_ACCOUNT_SYNC_PLATFORMS.has(platform) ? "default" : null);
+  const scoped = () => (scopedLabel ? withConnectionScope(platform, scopedLabel, run) : run());
+
+  const contextOptions = origin?.trigger ? { ...(options || {}), trigger: origin.trigger } : options;
+  if (contextOptions && Object.keys(contextOptions).length > 0) {
+    return runWithSyncOptions(contextOptions, scoped);
   }
-  return run();
+  return scoped();
+}
+
+/**
+ * Full-run gate: a PLANNED or unregistered supplier is skipped (with its status) rather than
+ * synced. Explicit per-network syncs (syncPlatformAccount) are not gated.
+ */
+let fullSyncGatePromise = null;
+async function gatedFullSync(platform, fn) {
+  if (!fullSyncGatePromise) fullSyncGatePromise = loadSupplierSyncGate({ db: prisma });
+  const gate = await fullSyncGatePromise;
+  const verdict = gate(platform);
+  if (!verdict.allowed) {
+    return { skipped: true, reason: `Supplier ${verdict.supplierKey ?? platform} is ${verdict.status}; not included in full syncs.` };
+  }
+  return fn();
 }
 
 export async function syncAll(options = {}) {
+  fullSyncGatePromise = null;
   const run = async () => {
     const jobName = "syncAll";
     let attempt = 1;
@@ -2101,47 +2147,47 @@ export async function syncAll(options = {}) {
 
       setSyncStage("boostiny");
       jobTimer.start("boostinyMs");
-      const boostiny = await syncBoostiny();
+      const boostiny = await gatedFullSync("boostiny", () => syncBoostiny());
       jobTimer.end("boostinyMs");
 
       setSyncStage("optimise");
       jobTimer.start("optimiseMs");
-      const optimise = await syncOptimise();
+      const optimise = await gatedFullSync("optimise", () => syncOptimise());
       jobTimer.end("optimiseMs");
 
       setSyncStage("trackier");
       jobTimer.start("trackierMs");
-      const trackier = await syncTrackier();
+      const trackier = await gatedFullSync("trackier", () => syncTrackier());
       jobTimer.end("trackierMs");
 
       setSyncStage("impact");
       jobTimer.start("impactMs");
-      const impact = await syncImpactAccount("default");
+      const impact = await gatedFullSync("impact", () => syncImpactAccount("default"));
       jobTimer.end("impactMs");
 
       setSyncStage("partnerize");
       jobTimer.start("partnerizeMs");
-      const partnerize = await syncPartnerizeAccount("default");
+      const partnerize = await gatedFullSync("partnerize", () => syncPartnerizeAccount("default"));
       jobTimer.end("partnerizeMs");
 
       setSyncStage("awin");
       jobTimer.start("awinMs");
-      const awin = await syncAwinAccount("default");
+      const awin = await gatedFullSync("awin", () => syncAwinAccount("default"));
       jobTimer.end("awinMs");
 
       setSyncStage("admitad");
       jobTimer.start("admitadMs");
-      const admitad = await syncAdmitadAccount("default");
+      const admitad = await gatedFullSync("admitad", () => syncAdmitadAccount("default"));
       jobTimer.end("admitadMs");
 
       setSyncStage("rakuten");
       jobTimer.start("rakutenMs");
-      const rakuten = await syncRakutenAccount("default");
+      const rakuten = await gatedFullSync("rakuten", () => syncRakutenAccount("default"));
       jobTimer.end("rakutenMs");
 
       setSyncStage("cj");
       jobTimer.start("cjMs");
-      const cj = await syncCjAccount("default");
+      const cj = await gatedFullSync("cj", () => syncCjAccount("default"));
       jobTimer.end("cjMs");
 
       const result = { boostiny, optimise, trackier, impact, partnerize, awin, admitad, rakuten, cj };

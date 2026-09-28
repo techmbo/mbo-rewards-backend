@@ -14,7 +14,7 @@ import {
 } from "../modules/networkPortal/networkPerformanceFact.ingestion.js";
 import { updateAccountSyncTimestamps } from "./syncTimestamps.js";
 import { explicitSyncWindow } from "./syncContext.js";
-import { CREDENTIAL_HEALTH } from "../modules/networkOps/networkAccount.contract.js";
+import { accountHealthStamp, healthFromSourceRuns } from "../modules/networkOps/networkAccount.contract.js";
 import {
   includeSourceObject,
   requestedSourceObject,
@@ -33,6 +33,8 @@ import { stageAwinOfferRows, stagedCompletely } from "./awinOffersStaging.js";
 import { boundedCampaignPage } from "./syncContext.js";
 import { AWIN_OFFERS_PAGE_LIMIT } from "./syncSourcePlan.js";
 import { joinUserMessages } from "./syncErrors.js";
+import { CREDENTIAL_SLOTS } from "../modules/integrations/credentials/credentialCatalog.js";
+import { legacyEnvCredential } from "../modules/integrations/credentials/credentialResolver.js";
 
 /**
  * Refusal code for an Awin offers sync asked for outside the durable orchestration.
@@ -90,25 +92,27 @@ import { unavailableOutcome, withFetchFailureSignal, withSourceOutcome } from ".
  * enriches mboLinkClicks from Click join (never copies networkClicks).
  */
 
-async function stampWaveESync(platform, accountLabel, { campaigns, conversions, payments, coupons }) {
+async function stampWaveESync(platform, accountLabel, { campaigns, conversions, payments, coupons, sourceRuns = null }) {
   const now = new Date();
-  const data = { lastSuccessfulSync: now };
+  // Truthful health: failed source objects keep their error and hold the checkpoint back.
+  const health = Array.isArray(sourceRuns) ? healthFromSourceRuns(sourceRuns) : null;
+  const data = {};
+  if (!health || (health.ok && health.ran > 0)) data.lastSuccessfulSync = now;
   if (campaigns > 0) data.lastCampaignSyncAt = now;
   if (conversions > 0) data.lastOrderSyncAt = now;
   if (payments > 0) data.lastPaymentSyncAt = now;
   if (coupons > 0) data.lastCouponSyncAt = now;
-  data.lastSyncError = null;
-  data.credentialHealth = CREDENTIAL_HEALTH.HEALTHY;
+  Object.assign(data, accountHealthStamp(health, now));
   await updateAccountSyncTimestamps(platform, accountLabel || "default", data);
 }
 
 async function resolveImpactCredentials(accountLabel = "default") {
   const sid =
-    process.env.IMPACT_ACCOUNT_SID ||
+    (await legacyEnvCredential("impact", CREDENTIAL_SLOTS.PRIMARY_SECRET)) ||
     (await getMarketplaceApiKey("impact", accountLabel)) ||
     null;
   const token =
-    process.env.IMPACT_AUTH_TOKEN ||
+    (await legacyEnvCredential("impact", CREDENTIAL_SLOTS.SECONDARY_SECRET)) ||
     (await getOAuthAccessToken("impact", accountLabel)) ||
     // Accounts connected from the admin store the Auth Token as the second secret.
     (await getMarketplaceRefreshToken("impact", accountLabel)) ||
@@ -123,11 +127,11 @@ async function resolveImpactCredentials(accountLabel = "default") {
 
 async function resolvePartnerizeCredentials(accountLabel = "default") {
   const appKey =
-    process.env.PARTNERIZE_APPLICATION_KEY ||
+    (await legacyEnvCredential("partnerize", CREDENTIAL_SLOTS.PRIMARY_SECRET)) ||
     (await getMarketplaceApiKey("partnerize", accountLabel)) ||
     null;
   const userKey =
-    process.env.PARTNERIZE_USER_API_KEY ||
+    (await legacyEnvCredential("partnerize", CREDENTIAL_SLOTS.SECONDARY_SECRET)) ||
     (await getMarketplaceRefreshToken("partnerize", accountLabel)) ||
     (await getOAuthAccessToken("partnerize", accountLabel)) ||
     null;
@@ -140,7 +144,7 @@ async function resolvePartnerizeCredentials(accountLabel = "default") {
   }
   if (appKey && userKey) {
     const publisherId =
-      process.env.PARTNERIZE_PUBLISHER_ID ||
+      (await legacyEnvCredential("partnerize", CREDENTIAL_SLOTS.ACCOUNT_EXTERNAL_ID)) ||
       (await getMarketplaceExternalId("partnerize", accountLabel)) ||
       null;
     return { applicationKey: appKey, userApiKey: userKey, publisherId };
@@ -150,12 +154,12 @@ async function resolvePartnerizeCredentials(accountLabel = "default") {
 
 async function resolveAwinCredentials(accountLabel = "default") {
   const accessToken =
-    process.env.AWIN_ACCESS_TOKEN ||
+    (await legacyEnvCredential("awin", CREDENTIAL_SLOTS.PRIMARY_SECRET)) ||
     (await getOAuthAccessToken("awin", accountLabel)) ||
     (await getMarketplaceApiKey("awin", accountLabel)) ||
     null;
   const publisherId =
-    process.env.AWIN_PUBLISHER_ID ||
+    (await legacyEnvCredential("awin", CREDENTIAL_SLOTS.ACCOUNT_EXTERNAL_ID)) ||
     (await getMarketplaceExternalId("awin", accountLabel)) ||
     null;
   if (accessToken && publisherId) return { accessToken, publisherId };
@@ -387,6 +391,7 @@ export async function syncImpactAccount(accountLabel = "default") {
     conversions: conversions.length,
     payments: 0,
     coupons: 0,
+    sourceRuns: sourceObjectRuns.filter(Boolean),
   });
 
   return {
@@ -432,7 +437,7 @@ export async function syncPartnerizeAccount(accountLabel = "default") {
 
   const adapter = createSupplierAdapter("PARTNERIZE", {
     ...creds,
-    publisherId: creds.publisherId || process.env.PARTNERIZE_PUBLISHER_ID || null,
+    publisherId: creds.publisherId || (await legacyEnvCredential("partnerize", CREDENTIAL_SLOTS.ACCOUNT_EXTERNAL_ID)) || null,
   });
   const stats = { requestCount: 0 };
   const runCtx = { network: "partnerize", networkAccountId };
@@ -599,6 +604,7 @@ export async function syncPartnerizeAccount(accountLabel = "default") {
     conversions: conversions.length,
     payments: payments.length,
     coupons: coupons.length,
+    sourceRuns: sourceObjectRuns.filter(Boolean),
   });
 
   return {
@@ -920,6 +926,7 @@ export async function syncAwinAccount(accountLabel = "default") {
     conversions: conversions.length,
     payments: 0,
     coupons: couponsRaw.length,
+    sourceRuns: sourceObjectRuns.filter(Boolean),
   });
 
   return {

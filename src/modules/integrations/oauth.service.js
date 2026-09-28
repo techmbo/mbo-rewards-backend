@@ -7,6 +7,8 @@ import {
   networkAccountStampData,
   toNetworkAccountDto,
 } from "../networkOps/networkAccount.contract.js";
+import { CREDENTIAL_SLOTS } from "./credentials/credentialCatalog.js";
+import { isProviderSecretRef, resolveCredentialSlot } from "./credentials/credentialResolver.js";
 
 const PLATFORM_CONFIG = {
   boostiny: {
@@ -256,9 +258,29 @@ async function findMarketplaceAccount(platformKey, accountLabel = "default") {
   return null;
 }
 
+/** True when the connection's secrets live with a credential provider rather than in this row. */
+export function usesCredentialProvider(account) {
+  return Boolean(account) && isProviderSecretRef(account.secretRef);
+}
+
+/** One catalogued slot of a provider-referenced connection (throws on an invalid reference). */
+async function providerSlot(account, slot) {
+  return resolveCredentialSlot(
+    {
+      platform: account.platform,
+      accountLabel: account.accountLabel,
+      environment: account.environment,
+      secretRef: account.secretRef,
+    },
+    slot,
+  );
+}
+
 export async function getMarketplaceExternalId(platformKey, accountLabel = "default") {
   const account = await findMarketplaceAccount(platformKey, accountLabel);
-  return account?.accountExternalId || null;
+  if (account?.accountExternalId) return account.accountExternalId;
+  if (usesCredentialProvider(account)) return providerSlot(account, CREDENTIAL_SLOTS.ACCOUNT_EXTERNAL_ID);
+  return null;
 }
 
 /**
@@ -270,6 +292,7 @@ export const CLIENT_CREDENTIALS_AUTH_TYPE = "client_credentials";
 
 export async function getMarketplaceApiKey(platformKey, accountLabel = "default") {
   const account = await findMarketplaceAccount(platformKey, accountLabel);
+  if (usesCredentialProvider(account)) return providerSlot(account, CREDENTIAL_SLOTS.PRIMARY_SECRET);
   if (!account?.encryptedAccessToken) return null;
   if (account.authType === CLIENT_CREDENTIALS_AUTH_TYPE) return null;
   return decryptText(account.encryptedAccessToken);
@@ -294,16 +317,22 @@ export async function getMarketplaceClientCredentials(platformKey, accountLabel 
 export async function getMarketplaceAccountIdentifiers(platformKey, accountLabel = "default") {
   const account = await findMarketplaceAccount(platformKey, accountLabel);
   if (!account) return null;
+  const provider = usesCredentialProvider(account);
   return {
-    accountExternalId: account.accountExternalId || null,
+    accountExternalId:
+      account.accountExternalId ||
+      (provider ? await providerSlot(account, CREDENTIAL_SLOTS.ACCOUNT_EXTERNAL_ID) : null) ||
+      null,
     agencyId: account.agencyId || null,
-    contactId: account.contactId || null,
+    contactId:
+      account.contactId || (provider ? await providerSlot(account, CREDENTIAL_SLOTS.CONTACT_ID) : null) || null,
   };
 }
 
 /** Second secret for Basic-auth networks (Partnerize user API key, Impact auth token). */
 export async function getMarketplaceRefreshToken(platformKey, accountLabel = "default") {
   const account = await findMarketplaceAccount(platformKey, accountLabel);
+  if (usesCredentialProvider(account)) return providerSlot(account, CREDENTIAL_SLOTS.SECONDARY_SECRET);
   if (!account?.encryptedRefreshToken) return null;
   return decryptText(account.encryptedRefreshToken);
 }
@@ -316,17 +345,28 @@ export async function getOAuthAccessToken(platformKey, accountLabel = "default")
 
 export async function getNetworkAccountSyncFlags(platformKey, accountLabel = "default") {
   const account = await findMarketplaceAccount(platformKey, accountLabel);
+  // A paused connection syncs nothing. Per-object switches default to true for rows created
+  // before they existed, so legacy connections keep their behaviour.
+  const paused = Boolean(account?.pausedAt);
+  const on = (value) => (account ? value !== false && !paused : true);
   return {
     exists: Boolean(account),
-    syncEnabled: account ? account.syncEnabled !== false : true,
-    financeSyncEnabled: account ? account.financeSyncEnabled !== false : true,
+    paused,
+    pausedReason: account?.pausedReason ?? null,
+    syncEnabled: on(account?.syncEnabled),
+    financeSyncEnabled: on(account?.financeSyncEnabled),
+    campaignSyncEnabled: on(account?.campaignSyncEnabled),
+    couponSyncEnabled: on(account?.couponSyncEnabled),
+    productSyncEnabled: on(account?.productSyncEnabled),
+    conversionSyncEnabled: on(account?.conversionSyncEnabled),
     environment: account?.environment || "PRODUCTION",
   };
 }
 
 export async function listMarketplaceAccounts(platformKey, options = {}) {
   const purpose = options.purpose || "catalog";
-  const where = { platform: platformKey };
+  // Paused connections are never enumerated for syncing.
+  const where = { platform: platformKey, ...(purpose === "all" ? {} : { pausedAt: null }) };
   if (purpose === "finance") {
     where.financeSyncEnabled = true;
   } else if (purpose !== "all") {

@@ -46,6 +46,10 @@ import {
   postSyncMayAppendUnits,
   postSyncStageOf,
 } from "./postSyncStages.js";
+import {
+  SUPPLIER_GATE_EXCLUSION_REASON,
+  loadSupplierSyncGate,
+} from "../modules/supplier/supplierSyncGate.js";
 // The durable Entity-staging barrier. The gate is the one place that TRANSITIONS into the frozen
 // state, so it is the one place that needs the announce-then-verify handshake.
 import { EntityStagingBarrier, STAGING_FROZEN_CODE } from "./entityStagingBarrier.js";
@@ -251,10 +255,29 @@ export async function buildSyncPlan({
   listAccounts = defaultListAccounts,
   loadAccountState = defaultLoadAccountState,
   now = new Date(),
+  // PLANNED / unregistered suppliers are never planned into a scheduled or full run. The planner is
+  // policy-free on its own; SyncOrchestrationService (its only production caller) always passes the
+  // registry-backed gate, which falls back to the code seed list when the registry is unreadable.
+  supplierGate = null,
 } = {}) {
   const units = [];
   const exclusions = [];
   const deferred = [];
+  const gateVerdicts = new Map();
+  const gated = (platform) => {
+    if (typeof supplierGate !== "function") return false;
+    if (!gateVerdicts.has(platform)) gateVerdicts.set(platform, supplierGate(platform));
+    const verdict = gateVerdicts.get(platform);
+    if (verdict.allowed) return false;
+    exclusions.push({
+      platform,
+      accountLabel: null,
+      sourceObject: null,
+      reason: SUPPLIER_GATE_EXCLUSION_REASON,
+      notes: `Supplier status ${verdict.status}: only ENABLED suppliers are planned into scheduled or full runs.`,
+    });
+    return true;
+  };
   // fastSync comes from options and ONLY from options. It used to be forced true when
   // kind was "incremental", which made the run payload disagree with its own units: the
   // payload recorded the caller's raw value while every unit carried the coerced one.
@@ -285,10 +308,12 @@ export async function buildSyncPlan({
   };
 
   for (const platform of ACCOUNT_LABELLED_PLATFORMS) {
+    if (gated(platform)) continue;
     const entries = normalizeAccountEntries(await listAccounts(platform));
     for (const entry of entries) await planAccount(platform, entry);
   }
   for (const platform of SINGLE_ACCOUNT_PLATFORMS) {
+    if (gated(platform)) continue;
     await planAccount(platform, { accountLabel: "default", lastSuccessfulSync: undefined });
   }
   // Post-sync stages are NOT planned by default. The existing promotion, conversion-promotion and
@@ -699,8 +724,9 @@ function compatibilityConditions({ options = null, plannerVersion = null } = {})
 }
 
 export class SyncOrchestrationService {
-  constructor({ prisma = defaultPrisma, now = () => new Date(), leaseMs = DEFAULT_LEASE_MS, maxAttempts = DEFAULT_UNIT_MAX_ATTEMPTS, listAccounts = defaultListAccounts, loadAccountState = defaultLoadAccountState, planCommissionGroupChunks = planOptimiseCommissionGroupChunks, locks = null, barrier = null } = {}) {
+  constructor({ prisma = defaultPrisma, now = () => new Date(), leaseMs = DEFAULT_LEASE_MS, maxAttempts = DEFAULT_UNIT_MAX_ATTEMPTS, listAccounts = defaultListAccounts, loadAccountState = defaultLoadAccountState, planCommissionGroupChunks = planOptimiseCommissionGroupChunks, locks = null, barrier = null, loadSupplierGate = null } = {}) {
     this.db = prisma;
+    this.supplierGate = loadSupplierGate ?? (() => loadSupplierSyncGate({ db: this.db }));
     this.now = now;
     this.leaseMs = leaseMs;
     this.maxAttempts = maxAttempts;
@@ -753,6 +779,7 @@ export class SyncOrchestrationService {
           // One clock for the whole plan: every window of every account is measured from the same
           // instant, so a plan built across a midnight boundary cannot leave a one-day hole.
           now: this.now(),
+          supplierGate: await this.supplierGate(),
         });
     const planned = plan.units;
     const exclusions = plan.exclusions;
@@ -851,6 +878,7 @@ export class SyncOrchestrationService {
       listAccounts: this.listAccounts,
       loadAccountState: this.loadAccountState,
       now: this.now(),
+      supplierGate: await this.supplierGate(),
     });
     return { ...plan, kind, options: resolvedOptions };
   }

@@ -28,6 +28,10 @@ import {
 } from "../src/jobs/syncOrchestration.service.js";
 import { SyncAccountLockService, accountLockKey } from "../src/jobs/syncAccountLock.service.js";
 
+// These tests pin route/worker behaviour across every network. The strict supplier gate is a
+// separate policy (test/syncGatingObservability.test.js), so the service is given an open gate here.
+const openSupplierGate = async () => () => ({ allowed: true, status: "ENABLED", supplierKey: null });
+
 const AUTH_SRC = readFileSync(new URL("../src/middleware/cronAuth.js", import.meta.url), "utf8");
 const CTRL_SRC = readFileSync(new URL("../src/controllers/internalCron.controller.js", import.meta.url), "utf8");
 const ROUTES_SRC = readFileSync(new URL("../src/routes/index.js", import.meta.url), "utf8");
@@ -125,6 +129,7 @@ const now = () => new Date("2026-09-17T02:17:00.000Z");
 function app({ syncImpl } = {}) {
   const { rows, prisma } = createStore();
   const orchestration = new SyncOrchestrationService({
+    loadSupplierGate: openSupplierGate,
     prisma, now,
     listAccounts: async () => ["default"],
     loadAccountState: async () => ({ lastSuccessfulSync: null }),

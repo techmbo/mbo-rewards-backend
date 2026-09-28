@@ -367,7 +367,8 @@ describe("source guards — one unit, nothing in the background, nothing else ch
   it("the worker awaits one unit and never loops, recurses or detaches work", () => {
     assert.match(worker, /await orchestration\.nextWorkableUnit\(\)/);
     assert.match(worker, /await orchestration\.claimUnit\(/);
-    assert.match(worker, /await executeUnit\(req, descriptor\)/);
+    // The run's origin rides alongside the unit (never inside its forwarded options).
+    assert.match(worker, /await executeUnit\(req, descriptor, \{ runTrigger: run\?\.payload\?\.trigger \?\? null \}\)/);
     assert.match(worker, /await orchestration\.completeUnit\(/);
     assert.match(worker, /await orchestration\.failUnit\(/);
     assert.match(worker, /assertUnitExecutable\(unit\)/);

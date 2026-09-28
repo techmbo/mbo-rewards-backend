@@ -18,6 +18,10 @@ import {
   summarisePlan,
 } from "../src/jobs/syncOrchestration.service.js";
 
+// These tests pin plan shape across every network. The PLANNED-supplier gate is a separate policy
+// (test/supplierSyncGate.test.js), so the service is given an open gate here.
+const openSupplierGate = async () => () => ({ allowed: true, status: "ENABLED", supplierKey: null });
+
 const CONTROLLER_SRC = readFileSync(new URL("../src/controllers/sync.controller.js", import.meta.url), "utf8");
 const ROUTES_SRC = readFileSync(new URL("../src/routes/index.js", import.meta.url), "utf8");
 const SERVICE_SRC = readFileSync(new URL("../src/jobs/syncOrchestration.service.js", import.meta.url), "utf8");
@@ -66,7 +70,7 @@ function harness() {
   const { rows, calls, prisma } = createStore();
   const supplierCalls = [];
   const lockCalls = [];
-  const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState });
+  const orchestration = new SyncOrchestrationService({ prisma, now, listAccounts, loadAccountState, loadSupplierGate: openSupplierGate });
   // Any lock acquisition would go through here; a preview must never reach it.
   for (const method of ["acquire", "renew", "release", "withLock"]) {
     const original = orchestration.locks[method].bind(orchestration.locks);
