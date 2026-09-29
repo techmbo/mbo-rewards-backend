@@ -1,6 +1,16 @@
 # MBO Rewards — AWS / Cloudflare handoff
 
 Prepared 2026-09-28 for the infrastructure team taking MBO Rewards from Vercel to AWS + Cloudflare.
+Updated 2026-09-28 with the confirmed production state below.
+
+**Production state at handoff (confirmed by MBO):**
+- Backend production is deployed at `bd2af1f` (Vercel, 2026-09-28 14:36 UTC).
+- The production database is Supabase (PostgreSQL), confirmed by the production Prisma
+  migration connection.
+- Migration `20260930090000_network_connection_control_plane` has been applied to production
+  successfully. No migration is pending.
+- Supplier registry: AWIN, BOOSTINY, OPTIMISE and TRACKIER are ENABLED; PARTNERIZE and IMPACT are
+  PLANNED; ADMITAD, CJ and RAKUTEN have no row.
 
 **This is a lift-and-shift.** Move the running system as it is. Do not redesign the application,
 change business logic, run database migrations, or enable anything this document lists as disabled.
@@ -16,11 +26,12 @@ Every behaviour change is a separate, later decision.
 
 | Surface | Repository | Frozen handoff branch | Commit (code) | Production branch today |
 |---|---|---|---|---|
-| Backend API, workers, cron routes | `techmbo/mbo-rewards-backend` | `handoff/aws-backend-2026-09` | `bd2af1f8da289951a52cc15eef86877878c90feb` | `fix/mbo-rewards-backend-final-corrections` (at `bd2af1f`) |
+| Backend API, workers, cron routes | `techmbo/mbo-rewards-backend` | `handoff/aws-backend-2026-09` | `bd2af1f8da289951a52cc15eef86877878c90feb` | `fix/mbo-rewards-backend-final-corrections` (at `bd2af1f`, deployed to production 2026-09-28 14:36 UTC) |
 | Marketing site + Integrated Platform (staff admin and client portal) | `techmbo/mbo-rewards-frontend` | `handoff/aws-frontend-2026-09` | `0d6515ec57818bbd2a83a86892308c85c5764533` | `fix/mbo-rewards-frontend-final-corrections` (at `0d6515e`) |
 
-- The backend handoff branch is `bd2af1f` plus one commit that adds only this document. The
-  application code is byte-identical to `bd2af1f`.
+- The backend handoff branch is `bd2af1f` plus documentation-only commits that add and update this
+  document. The application code is byte-identical to `bd2af1f`, which is the code running in
+  production.
 - The frontend handoff branch points exactly at the commit currently deployed to production.
 - Do not deploy from the production branches during the move. They may receive fixes; the handoff
   branches will not.
@@ -50,7 +61,7 @@ Every behaviour change is a separate, later decision.
                            │   ├─ /r/:slug/:token, /t/...  tracking redirects (public)
                            │   └─ /health, /health/live, /health/ready, /metrics
                            ▼
-                     PostgreSQL (Prisma 5.22; DATABASE_URL pooled + DIRECT_URL direct)
+                     Supabase PostgreSQL (Prisma 5.22; DATABASE_URL pooled + DIRECT_URL direct)
 
   GitHub Actions (backend repo) ──every 5 min──► POST /api/internal/cron/sync-drain
                                   (manual only) ► POST /api/internal/cron/sync-start
@@ -95,10 +106,13 @@ Every behaviour change is a separate, later decision.
 - **Connection variables the code reads:**
   - `DATABASE_URL`: runtime, pooled. Size the pool with `DATABASE_POOL_LIMIT` if needed.
   - `DIRECT_URL`: direct, non-pooled. Prisma migrations use it.
-- **Provider.** The team refers to this as the Supabase/Postgres production database. The backend
-  Vercel project also carries `PRISMA_DATABASE_URL` and `POSTGRES_URL`, which a Vercel storage
-  integration injects, but **no code reads them**. Before cutover, confirm which host
-  `DATABASE_URL`/`DIRECT_URL` actually point at (§21).
+- **Provider: Supabase (PostgreSQL), confirmed.** The production Prisma migration connection
+  (`DIRECT_URL`) was confirmed to be the Supabase database. `DATABASE_URL` points at the same
+  database: the running application reads the schema that migration created. The backend Vercel project also carries `PRISMA_DATABASE_URL` and `POSTGRES_URL`, which
+  a Vercel storage integration injects, but **no code reads them**; do not carry them over (§5.6).
+- **Connecting from AWS**: keep Supabase's pooled connection for `DATABASE_URL` and its direct
+  connection for `DIRECT_URL`, exactly as today, and make sure the AWS egress path can reach
+  Supabase over TLS.
 - **Lift-and-shift rule**: the database stays where it is for the move. The AWS runtime connects to
   the same database with the same two variables. Moving the database (for example to RDS) is a
   separate, later project.
@@ -109,9 +123,9 @@ Every behaviour change is a separate, later decision.
 - `prisma/migrations` holds 64 migrations. The newest is
   `20260930090000_network_connection_control_plane`, which is additive: it relaxes
   `MarketplaceAccount.encryptedAccessToken` to nullable and adds 12 columns with constant defaults.
-- The operator reports it applied before `bd2af1f` was deployed. The running `bd2af1f` code
-  cannot read `MarketplaceAccount` without it.
-- Verify before cutover, read-only:
+- **Applied to production successfully** before `bd2af1f` was deployed. Production has no
+  pending migration, and the running `bd2af1f` code depends on this migration being present.
+- Re-verify immediately before cutover, read-only:
   - `SELECT migration_name, finished_at, rolled_back_at FROM _prisma_migrations ORDER BY started_at DESC LIMIT 5;`
     shows the newest migration finished and none rolled back.
   - `npx prisma migrate status` against production reports **nothing pending**.
@@ -227,10 +241,10 @@ and lead forms work in production today (§21).
 
 | Key | Status | Full/scheduled sync |
 |---|---|---|
+| AWIN | ENABLED (row added 2026-09-28) | eligible |
 | BOOSTINY | ENABLED | eligible |
 | OPTIMISE | ENABLED | eligible |
 | TRACKIER | ENABLED | eligible |
-| AWIN | **no row** (an ENABLED row was prepared; the operator must confirm whether it was inserted) | excluded until a row is ENABLED |
 | PARTNERIZE | PLANNED | **excluded** |
 | IMPACT | PLANNED | **excluded** |
 | ADMITAD, CJ, RAKUTEN | no row | **excluded** |
@@ -250,7 +264,8 @@ gated.
 - Every network that syncs today reads its credentials from the catalogued environment variables
   (§7) as the `default` account.
 - With no connection rows, Optimise, Boostiny and Trackier have no accounts for the full-run
-  planner to enumerate, so the scheduled full plan contains no units for them.
+  planner to enumerate, so the scheduled full plan contains no units for them. Awin runs as the
+  single `default` account, so with AWIN ENABLED a full plan contains Awin units only.
 
 ### 6.3 Last observed sync state (Step 0 read-only checks, 2026-09-28)
 
@@ -540,7 +555,7 @@ secret, held in an env var and never echoed.
 | 2 | `GET $API/api/health` | `{"ok":true}` |
 | 3 | `GET $API/api/ops/admin/network-connections/catalog` (bearer `$TOKEN`) | 200, `Cache-Control: no-store`; 8 platforms; `credentialProviders: ["env"]`; no variable names in the body |
 | 4 | `GET $API/api/ops/admin/network-connections` | 200, `data: []` |
-| 5 | `GET $API/api/sync/plan-preview` | `plan.exclusions` lists `supplier_not_enabled` for partnerize, impact, admitad, cj, rakuten (and awin while it has no ENABLED row) |
+| 5 | `GET $API/api/sync/plan-preview` | `plan.exclusions` lists `supplier_not_enabled` for partnerize, impact, admitad, cj and rakuten, and not for awin; `plan.byPlatform` contains `awin` only |
 | 6 | `POST $API/api/internal/cron/sync-drain` with header `Authorization: Bearer $CRON` | 200 with `status: "idle"` while no run is active; the same call without the header returns 401 |
 | 7 | `GET $API/r/does-not-exist/x` | a 4xx, not 5xx: the tracking path reaches the app |
 | 8 | Frontend `/` and a deep link `/mbointegratedPlatform/<any route>` | 200; the SPA shell loads |
@@ -583,13 +598,12 @@ The database is not changed by the move, so rollback is routing only:
 |---|---|
 | Proxy and load-balancer timeouts cut `sync-drain` calls (Cloudflare 100 s, ALB default 60 s) | ALB idle timeout ≥ 330 s; cron bypasses the Cloudflare proxy (§13.4) |
 | Two drain callers at once (GitHub → Vercel and something → AWS) | one caller only; durable locks prevent double execution, but it wastes capacity and muddles logs |
-| Where `DATABASE_URL` points (Supabase vs the integration-injected store) is unconfirmed | confirm before step 3 (§21) |
 | How `www`/`api`/`trk` are routed today is unconfirmed | confirm in DNS before step 6 |
 | In-memory rate limits and job concurrency apply per process | acceptable for lift-and-shift; add `REDIS_URL` later if needed |
 | `OAUTH_TOKEN_ENCRYPTION_KEY` changed or mistyped | stored encrypted credentials become unreadable; copy the value exactly |
 | Public repositories | never commit values, hostnames of data stores or dumps; this document is world-readable |
 | The Awin offers source's latest run was PARTIAL | monitor after cutover; not a migration blocker |
-| AWIN has no supplier row, so Awin is not in full/scheduled runs | operator decision (prepared insert); unrelated to the move |
+| Awin is ENABLED, so a full run (manual `/sync/all`, or `sync-start` if it is ever scheduled) now includes Awin units | expected; `sync-start` stays unscheduled during the move |
 | Impact has no credentials | stays PLANNED; no action |
 | 17 stale `sync:lock` rows and 1 stale `promotion` row | harmless (§10.3) |
 | Tests: 13 known failing tests with the test env (identical on `22d5464`) | pre-existing; not introduced by `bd2af1f` |
@@ -606,7 +620,6 @@ The database is not changed by the move, so rollback is routing only:
    - `MarketplaceAccount` still 0 rows.
 5. Record the cutover (time, commits, DNS targets) in the ops log.
 6. Then **stop**. The next steps are business decisions made separately:
-   - the AWIN registry row;
    - the `sync-start` schedule;
    - the Optimise SEA go-live;
    - registering `aws-sm`.
@@ -615,13 +628,13 @@ The database is not changed by the move, so rollback is routing only:
 
 | # | Item | Why it matters | Owner |
 |---|---|---|---|
-| B1 | Which host `DATABASE_URL`/`DIRECT_URL` point at: Supabase, or the Vercel-integration Postgres behind `PRISMA_DATABASE_URL`/`POSTGRES_URL` | AWS must reach the same database; network path, TLS and pooling depend on it | MBO + infra |
+| B1 | **Resolved.** The production database is Supabase (PostgreSQL), confirmed by the production Prisma migration connection. `PRISMA_DATABASE_URL`/`POSTGRES_URL` are not used. | AWS connects to the same Supabase database with the same `DATABASE_URL`/`DIRECT_URL` | closed |
 | B2 | How `www`, `api` and `trk.mborewards.com` are routed today (Cloudflare proxy or DNS-only, and to which Vercel project). The Vercel projects list only `*.vercel.app` domains. | defines the cutover and rollback DNS targets | infra |
 | B3 | A cron hostname that bypasses the Cloudflare proxy, and the `BASE=` edit in the two workflows | a proxied drain call dies at 100 s (§13.4) | infra; the workflow edit needs MBO approval |
 | B4 | Whether the site's contact and lead forms work today: the frontend Vercel project defines no `RESEND_API_KEY` or `GOOGLE_SHEET_WEBHOOK_URL` | those secrets must exist on the Worker if the forms are expected to work | MBO |
 | B5 | Whether the standalone `mbo-rewards-admin` Vercel project (repo `techmbo/mborewards`) is still used | if it is, it needs its own handoff branch and hosting | MBO |
-| B6 | Region choice relative to the database (today `sin1`) | latency on every request | infra |
-| B7 | The AWIN supplier row (prepared, idempotent) | decides whether Awin is in full/scheduled runs; independent of the move | MBO |
+| B6 | Region choice relative to the Supabase project region (today's functions run in `sin1`) | latency on every request | infra |
+| B7 | **Resolved.** The AWIN supplier row has been added and is ENABLED. | Awin is eligible for full/scheduled runs (§6.1) | closed |
 | B8 | GitHub Actions secret `MBO_SYNC_CRON_SECRET` stays equal to the AWS `CRON_SECRET` | otherwise the drain returns 401 and the workflow fails | infra |
 
 ---
