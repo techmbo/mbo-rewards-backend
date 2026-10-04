@@ -2,6 +2,15 @@
 
 Prepared 2026-09-28 for the infrastructure team taking MBO Rewards from Vercel to AWS + Cloudflare.
 Updated 2026-09-28 with the confirmed production state below.
+Updated 2026-10-04: the standalone admin is added as the third application component.
+
+**The move contains three application components:**
+1. **Backend**: API, workers and cron routes (`techmbo/mbo-rewards-backend`).
+2. **Main frontend / Integrated Platform**: marketing site plus the Integrated Platform's staff
+   admin and client portal (`techmbo/mbo-rewards-frontend`).
+3. **Standalone admin**: a separate admin app that is still actively used on Vercel
+   (`techmbo/mborewards`, Vercel project `mbo-rewards-admin`). See §3.1 for its migration
+   requirements.
 
 **Production state at handoff (confirmed by MBO):**
 - Backend production is deployed at `bd2af1f` (Vercel, 2026-09-28 14:36 UTC).
@@ -28,11 +37,16 @@ Every behaviour change is a separate, later decision.
 |---|---|---|---|---|
 | Backend API, workers, cron routes | `techmbo/mbo-rewards-backend` | `handoff/aws-backend-2026-09` | `bd2af1f8da289951a52cc15eef86877878c90feb` | `fix/mbo-rewards-backend-final-corrections` (at `bd2af1f`, deployed to production 2026-09-28 14:36 UTC) |
 | Marketing site + Integrated Platform (staff admin and client portal) | `techmbo/mbo-rewards-frontend` | `handoff/aws-frontend-2026-09` | `0d6515ec57818bbd2a83a86892308c85c5764533` | `fix/mbo-rewards-frontend-final-corrections` (at `0d6515e`) |
+| Standalone admin | `techmbo/mborewards` | `handoff/aws-admin-2026-10` | `8ed815d4ada8dcbff92713203d0084ad65b595f9` | Source branch `fix/admin-current-backend-integration` (at `8ed815d`); Vercel project `mbo-rewards-admin` |
 
 - The backend handoff branch is `bd2af1f` plus documentation-only commits that add and update this
   document. The application code is byte-identical to `bd2af1f`, which is the code running in
   production.
 - The frontend handoff branch points exactly at the commit currently deployed to production.
+- The admin handoff branch points exactly at `8ed815d`, the head of
+  `fix/admin-current-backend-integration`. This branch is currently the active standalone admin
+  baseline and contains no handoff-only code changes. `8ed815d` is the newest build in the Vercel
+  project `mbo-rewards-admin`, served on that branch's preview URL.
 - Do not deploy from the production branches during the move. They may receive fixes; the handoff
   branches will not.
 
@@ -40,7 +54,6 @@ Every behaviour change is a separate, later decision.
 
 | Vercel project | Source | Status |
 |---|---|---|
-| `mbo-rewards-admin` | `techmbo/mborewards`, branch `fix/admin-current-backend-integration`, deployed commit `42c3cb66ecfa511ce74658afa08d954a62133457` (2026-09-10). The branch has since moved to `8ed815d` (not deployed). | Older standalone admin build. The frontend configuration names the Integrated Platform inside `mbo-rewards-frontend` (`www.mborewards.com/mbointegratedPlatform`) as the live admin. Confirm this project is unused before retiring it (§21, B5). |
 | `mbo-rewards-backend-d4ud`, `rewards` | older experiments | Not in the production path. Do not migrate. |
 
 ---
@@ -67,6 +80,10 @@ Every behaviour change is a separate, later decision.
                                   (manual only) ► POST /api/internal/cron/sync-start
   Supplier APIs ◄── outbound HTTPS from the API (Optimise, Boostiny, Trackier, Awin, Partnerize, …)
   Resend ◄── transactional e-mail from the API and the site's contact forms
+
+     Standalone admin ──────►  Vite + React 18 SPA (static), Vercel project mbo-rewards-admin
+     (branch preview URL of     repo: techmbo/mborewards, branch fix/admin-current-backend-integration
+      fix/admin-current-…)      XHR to the backend at its own VITE_API_BASE_URL (preview builds only, §3.1)
 ```
 
 - The platform SPA's API base URL is compiled in at build time from
@@ -80,7 +97,7 @@ Every behaviour change is a separate, later decision.
 
 ---
 
-## 3. Backend ↔ frontend relationship
+## 3. Component relationships (backend, main frontend, standalone admin)
 
 - **Frontend** (`mbo-rewards-frontend`): a Next.js 16 marketing site. The Integrated Platform is a
   separate Vite + React 18 app in `platform/`. It is built with `npm run sync:platform`, which
@@ -91,8 +108,45 @@ Every behaviour change is a separate, later decision.
   backend: no database access and no secrets.
 - **Next.js server routes** in the frontend: `/api/contact` and `/api/simulator-lead`. They use
   `RESEND_API_KEY` and `GOOGLE_SHEET_WEBHOOK_URL` and never call the backend.
+- **Standalone admin** (`techmbo/mborewards`): a separate Vite + React 18 single-page app with its
+  own Vercel project (`mbo-rewards-admin`) and its own `vercel.json` (every path rewritten to
+  `index.html`). It is a pure API client of the same backend, with no database access and no
+  secrets. It is still actively used; its working copy today is the Vercel preview of
+  `fix/admin-current-backend-integration`, which sits behind Vercel login protection. The project's
+  production alias (`mbo-rewards-admin.vercel.app`) serves an older build (`42c3cb6`) made without
+  `VITE_API_BASE_URL`, which the app requires at load.
 - **Backend CORS**: `FRONTEND_ORIGINS` and `ADMIN_FRONTEND_ORIGIN` must list every origin that
-  serves the platform, including any new Cloudflare preview hostnames used for testing.
+  serves the platform or the standalone admin, including any new Cloudflare preview hostnames used
+  for testing.
+
+### 3.1 Standalone admin — migration requirements
+
+| Item | Value |
+|---|---|
+| Repository | `techmbo/mborewards` |
+| Source branch | `fix/admin-current-backend-integration` |
+| Source SHA | `8ed815d4ada8dcbff92713203d0084ad65b595f9` |
+| Frozen handoff branch | `handoff/aws-admin-2026-10` |
+| Handoff SHA | `8ed815d4ada8dcbff92713203d0084ad65b595f9` |
+| Vercel project | `mbo-rewards-admin` |
+| Build | `npm ci && npm run build` (Vite) → static files in `dist/` |
+| Routing | single-page app: every unknown path must serve `index.html` |
+
+- The admin has its own `VITE_API_BASE_URL`, read in `src/api.js`; the app stops with "Missing
+  VITE_API_BASE_URL" when it is absent.
+- The current Vercel value is configured for **preview builds only**. There is no production value.
+- The AWS/Cloudflare deployment must set `VITE_API_BASE_URL` **explicitly at build time**. Vite
+  compiles it into the bundle, so changing it later means rebuilding.
+- Before cutover, confirm the value points to the new canonical API endpoint, preferably
+  `https://api.mborewards.com/api`, and **not** directly to the old Vercel backend URL
+  (`mbo-rewards-backend.vercel.app`, which the repo's `.env.example` still names).
+- The admin's new hostname must be added to the backend's `ADMIN_FRONTEND_ORIGIN` /
+  `FRONTEND_ORIGINS`, or its API calls fail CORS.
+- The repo has no Cloudflare configuration yet. Hosting it on Cloudflare Pages or Workers static
+  assets needs single-page-app fallback configured on the Cloudflare side; that is deployment
+  configuration, not an application change.
+- **Do not retire the standalone admin until parity is confirmed**: every page people use on it
+  works on the new host, or exists in the Integrated Platform.
 - **Auth tokens**: the staff and portal UIs hold a backend-issued JWT (`JWT_SECRET`). The client
   API (`/api/v1/client/*`, `/api/partner/v1/*`) uses client API keys issued by the backend. None
   of this depends on the host.
@@ -227,7 +281,13 @@ These have safe defaults in code; setting any of them changes behaviour.
 The frontend Vercel project currently defines only `VITE_API_BASE_URL`. Confirm whether the contact
 and lead forms work in production today (§21).
 
-### 5.8 Scheduler
+### 5.8 Standalone admin
+
+| Name | Where | Purpose |
+|---|---|---|
+| `VITE_API_BASE_URL` | build time, standalone admin; set on the Vercel project `mbo-rewards-admin` for **preview builds only** | backend base URL including `/api`; must be set explicitly for the AWS/Cloudflare build (§3.1) |
+
+### 5.9 Scheduler
 
 | Name | Where | Purpose |
 |---|---|---|
@@ -481,6 +541,12 @@ The complete generated list (274 routes, with auth and permission constants) is 
    the client API (machine clients cannot solve challenges).
 7. **Optional**: Cloudflare Cron Triggers can replace GitHub Actions as the `sync-drain` caller later.
    Keep the 5-minute cadence and ensure one caller at a time.
+8. **Standalone admin hosting** (Cloudflare Pages or Workers static assets) from
+   `handoff/aws-admin-2026-10`:
+   - build with `VITE_API_BASE_URL` set explicitly (§3.1);
+   - single-page-app fallback, so deep links serve `index.html`;
+   - a hostname for it, protected at least as well as today (Vercel login protection today; for
+     example Cloudflare Access), and that hostname added to the backend's CORS origins.
 
 ---
 
@@ -511,6 +577,7 @@ default) are shorter than a drain unit.
 | Backend, without Docker | `npm ci && npx prisma generate` | `NODE_ENV=production node src/index.js` |
 | Frontend (Cloudflare) | `npm ci` | `npm run deploy` (OpenNext build and Wrangler deploy) |
 | Platform SPA (only if deliberately rebuilt) | `cd platform && npm ci && npm run build`, then `npm run sync:platform` | committed into `public/mbointegratedPlatform` |
+| Standalone admin (Cloudflare) | `npm ci && VITE_API_BASE_URL=<canonical API URL> npm run build` | upload `dist/` with single-page-app fallback |
 
 ---
 
@@ -530,6 +597,8 @@ default) are shorter than a drain unit.
 5. **Stand up the frontend on Cloudflare Workers** from `handoff/aws-frontend-2026-09` and
    smoke-test it on its `*.workers.dev` or preview hostname. Add that origin to `FRONTEND_ORIGINS`
    and `ADMIN_FRONTEND_ORIGIN` for testing only.
+   - **Stand up the standalone admin** on Cloudflare from `handoff/aws-admin-2026-10`, built with
+     `VITE_API_BASE_URL` set explicitly (§3.1), and add its hostname to the backend CORS origins.
 6. **Cut over the API.**
    - Point `api.mborewards.com` and `trk.mborewards.com` at the AWS load balancer through
      Cloudflare.
@@ -539,7 +608,8 @@ default) are shorter than a drain unit.
    `sync-start.yml`) to the AWS origin hostname that bypasses the Cloudflare proxy (§13.4).
    - This is a one-line workflow change and needs approval.
    - **Only one drain caller may be active at a time.**
-8. **Cut over the site.** Point `www.mborewards.com` at the Worker.
+8. **Cut over the site.** Point `www.mborewards.com` at the Worker. Move admin users to the
+   standalone admin's new hostname once its smoke tests pass; leave the Vercel admin running.
 9. **Watch for 24 hours**: 5xx rates, drain results, login and portal use, tracking redirects.
 10. **Keep Vercel deployments intact**, unscheduled and unrouted, for at least 7 days as the
     rollback target.
@@ -561,6 +631,7 @@ secret, held in an env var and never echoed.
 | 8 | Frontend `/` and a deep link `/mbointegratedPlatform/<any route>` | 200; the SPA shell loads |
 | 9 | Platform login and one staff list page | API calls succeed with no CORS errors |
 | 10 | Logs for the first hour | no Prisma `P2022`, "column does not exist" or unhandled errors |
+| 11 | Standalone admin: load, log in, open one list page and one deep link | pages load; the browser's network panel shows API calls going to the canonical API host (not `*.vercel.app`), with no CORS errors |
 
 ## 17. Features and connections that must stay disabled
 
@@ -578,6 +649,7 @@ secret, held in an env var and never echoed.
   `FINANCE_CUTOVER_APPROVED` stays unset.
 - The `aws-sm` credential provider stays unregistered until approved.
 - `ALLOW_DEV_AUTH_BYPASS` never exists in production.
+- Retiring the standalone admin (the Vercel project or its preview) before parity is confirmed.
 
 ## 18. Rollback
 
@@ -587,8 +659,9 @@ The database is not changed by the move, so rollback is routing only:
    pre-cutover targets (recorded at step 6/8).
 2. Point the `sync-drain` workflow `BASE=` back to `https://mbo-rewards-backend.vercel.app` and
    stop the AWS caller. Keep exactly one caller.
-3. Leave the AWS stack running but unrouted until the cause is understood.
-4. No data rollback is needed. If a durable run was mid-flight, the other side picks it up from
+3. Point admin users back to the Vercel standalone admin, which stays running throughout.
+4. Leave the AWS stack running but unrouted until the cause is understood.
+5. No data rollback is needed. If a durable run was mid-flight, the other side picks it up from
    `job_runs`: units are leased, and a unit abandoned by a killed process is reclaimed after its
    lease.
 
@@ -607,6 +680,8 @@ The database is not changed by the move, so rollback is routing only:
 | Impact has no credentials | stays PLANNED; no action |
 | 17 stale `sync:lock` rows and 1 stale `promotion` row | harmless (§10.3) |
 | Tests: 13 known failing tests with the test env (identical on `22d5464`) | pre-existing; not introduced by `bd2af1f` |
+| The standalone admin is built without `VITE_API_BASE_URL`, or with the old Vercel backend URL | it fails at load, or keeps calling Vercel after cutover; set the value explicitly at build and check it (§3.1, smoke test 11) |
+| The standalone admin is retired before its pages exist elsewhere | admin users lose tools they use; keep it until parity is confirmed |
 
 ## 20. Exact first actions after cutover
 
@@ -618,8 +693,9 @@ The database is not changed by the move, so rollback is routing only:
    - no new unfinished `NetworkSyncRun`;
    - no active orchestration;
    - `MarketplaceAccount` still 0 rows.
-5. Record the cutover (time, commits, DNS targets) in the ops log.
-6. Then **stop**. The next steps are business decisions made separately:
+5. Confirm the standalone admin on its new host calls the canonical API host (smoke test 11).
+6. Record the cutover (time, commits, DNS targets) in the ops log.
+7. Then **stop**. The next steps are business decisions made separately:
    - the `sync-start` schedule;
    - the Optimise SEA go-live;
    - registering `aws-sm`.
@@ -632,10 +708,12 @@ The database is not changed by the move, so rollback is routing only:
 | B2 | How `www`, `api` and `trk.mborewards.com` are routed today (Cloudflare proxy or DNS-only, and to which Vercel project). The Vercel projects list only `*.vercel.app` domains. | defines the cutover and rollback DNS targets | infra |
 | B3 | A cron hostname that bypasses the Cloudflare proxy, and the `BASE=` edit in the two workflows | a proxied drain call dies at 100 s (§13.4) | infra; the workflow edit needs MBO approval |
 | B4 | Whether the site's contact and lead forms work today: the frontend Vercel project defines no `RESEND_API_KEY` or `GOOGLE_SHEET_WEBHOOK_URL` | those secrets must exist on the Worker if the forms are expected to work | MBO |
-| B5 | Whether the standalone `mbo-rewards-admin` Vercel project (repo `techmbo/mborewards`) is still used | if it is, it needs its own handoff branch and hosting | MBO |
+| B5 | **Resolved.** The standalone admin is still actively used. It is now the third component, frozen as `handoff/aws-admin-2026-10` at `8ed815d` (§1, §3.1). | needs its own hosting on Cloudflare | closed |
 | B6 | Region choice relative to the Supabase project region (today's functions run in `sin1`) | latency on every request | infra |
 | B7 | **Resolved.** The AWIN supplier row has been added and is ENABLED. | Awin is eligible for full/scheduled runs (§6.1) | closed |
 | B8 | GitHub Actions secret `MBO_SYNC_CRON_SECRET` stays equal to the AWS `CRON_SECRET` | otherwise the drain returns 401 and the workflow fails | infra |
+| B9 | The standalone admin's `VITE_API_BASE_URL` for the new build: confirm it is the canonical API endpoint (preferably `https://api.mborewards.com/api`), not the old Vercel backend URL | the value is compiled in; a wrong value fails at load or keeps calling Vercel | MBO + infra |
+| B10 | The standalone admin's new hostname and access protection, and adding it to the backend's CORS origins | without CORS its API calls fail; without protection the admin is publicly reachable | infra |
 
 ---
 
